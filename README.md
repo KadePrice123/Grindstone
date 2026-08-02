@@ -20,21 +20,40 @@ full requirements document. Research backing its technical decisions:
 | `env/` | broker keys (`alpaca.env`, …) | no — never leaves this machine |
 | `../../venvs/dashboard/` | virtualenv | no — rebuild from requirements.txt |
 
-## Setup
+## Setup from a fresh clone
 
-```bash
-python -m venv ../../venvs/dashboard
-../../venvs/dashboard/Scripts/python.exe -m pip install -r requirements.txt
+Prerequisites (install these first, everything else is automatic):
+
+- **Python 3.12+** — python.org or the Microsoft Store
+- **Node.js 20+ (LTS)** — nodejs.org
+
+Then one command from the repo root:
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File setup.ps1
 ```
 
-Frontend toolchain (Node lives portably in `Claude/runtimes/node`, and
-`code/app/node_modules` is a junction into `Claude/venvs/dashboard-node_modules`
-so Drive never mirrors it):
-
 ```bash
-cd code/app
+# Linux / macOS
+./setup.sh
+```
+
+That creates `.venv/` inside the clone, installs the Python and frontend
+dependencies, and finishes by running the offline verification gate — if its
+last line is `SELFTEST OK …`, the install is complete and correct.
+
+<details><summary>Manual steps (what the script does)</summary>
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+cd code\app
 npm install
+cd ..
+..\.venv\Scripts\python.exe selftest.py
 ```
+</details>
 
 ## Run the app
 
@@ -44,25 +63,41 @@ npm run dev      # dev mode with hot reload
 npm run start    # run the production build (electron-vite preview)
 ```
 
-Electron main spawns the Python sidecar from the venv, waits for its
-`{"event":"listening","port":N}` stdout line, health-checks it, and only then
-shows the window. First run: create a profile (that password *is* the vault
-key — no recovery by design), then Accounts → add your Alpaca paper key →
-Test → Save.
+Electron main finds the backend's Python automatically (`.venv` in the clone
+first, then this workspace's venv, then `python` on PATH), spawns the sidecar,
+waits for its `{"event":"listening","port":N}` stdout line, health-checks it,
+and only then shows the window. First run: create a profile (that password
+*is* the vault key — no recovery by design), then Accounts → add your Alpaca
+paper key → Test → Save. No broker account? Quotes and daily charts still
+work through the keyless delayed fallback.
 
 ## Verification gate
 
-Offline, declared in `checkpoint.json`, run by `checkpoint.py`:
+Offline, declared in `checkpoint.json`:
 
 ```bash
-cd code; python selftest.py        # expect: SELFTEST OK 12/12
+cd code
+python selftest.py     # the LAST line must read: SELFTEST OK <n>/<n>
 ```
 
-M0: branding + docs + secret hygiene. M1 adds: envelope-encryption round-trip
-with AAD tamper detection, the full offline auth+accounts API flow with a
-stolen-DB plaintext scan, Alpaca parser fixtures, the read-only Alpaca
-invariant, session expiry/wipe, and the frontend typecheck. Live connectivity
-stays a separate diagnostic, never part of the gate.
+The count grows with the project — every production bug becomes a permanent
+check. Covered today: secret hygiene, envelope-encryption round-trip with AAD
+tamper detection, the full offline auth+accounts API flow with a stolen-DB
+plaintext scan, broker parser fixtures, the read-only Alpaca invariant,
+session expiry/wipe, search ranking, the gesture-wheel system, split view,
+the chart tool engine, and the frontend typecheck. Live connectivity stays a
+separate diagnostic (`cd code/app && npm run e2e`), never part of the gate.
+
+## Troubleshooting a fresh install
+
+- **`MISSING: python` / `MISSING: npm`** — install the prerequisites above,
+  reopen the terminal so PATH refreshes, rerun the script.
+- **The window opens but says "backend not running"** — the sidecar could not
+  find a Python with the dependencies. Run the setup script (it creates
+  `.venv` where the app looks first), or activate your own venv before
+  `npm run start`.
+- **Gate fails** — the FAIL lines name the exact check and reason; the
+  install is incomplete until it passes.
 
 ## Distribution
 

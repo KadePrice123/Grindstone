@@ -58,17 +58,21 @@ export class Sidecar {
       return { cmd: exe, args: [], cwd: path.dirname(exe) }
     }
     const codeDir = this.codeDir()
-    const venvPy = path.resolve(
-      codeDir,
-      '..',
-      '..',
-      '..',
-      'venvs',
-      'dashboard',
-      'Scripts',
-      'python.exe'
-    )
-    const cmd = existsSync(venvPy) ? venvPy : 'python'
+    // Where the backend's Python may live, most-portable first (fresh-clone
+    // install test, 2026-08-02: a clone has no ../../../venvs — that path is
+    // this workspace's layout, and falling straight to PATH `python` made a
+    // cold install fail unless the user had globally installed the deps):
+    //  1. <repo>/.venv           what the README's setup creates in a clone
+    //  2. ../../../venvs/dashboard   this workspace's layout
+    //  3. python on PATH         last resort (works if deps are global or
+    //                            the user activated their own venv)
+    const candidates = [
+      path.resolve(codeDir, '..', '.venv', 'Scripts', 'python.exe'),
+      path.resolve(codeDir, '..', '.venv', 'bin', 'python'), // linux/mac clone
+      path.resolve(codeDir, '..', '..', '..', 'venvs', 'dashboard',
+                   'Scripts', 'python.exe'),
+    ]
+    const cmd = candidates.find((p) => existsSync(p)) ?? 'python'
     return { cmd, args: ['-m', 'backend.main'], cwd: codeDir }
   }
 
