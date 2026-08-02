@@ -20,6 +20,13 @@ echo "Python: $(python3 --version)   Node: $(node --version)"
 echo "Python deps installed."
 
 (cd "$here/code/app" && npm install --no-fund --no-audit)
+# Electron's postinstall can silently skip the binary download; without this
+# the app later dies with an opaque spawn ENOENT (fresh-clone test).
+if [ ! -e "$here/code/app/node_modules/electron/dist/electron" ] \
+   && [ ! -e "$here/code/app/node_modules/electron/dist/electron.exe" ]; then
+  echo "Electron binary missing - fetching it now ..."
+  (cd "$here/code/app" && node node_modules/electron/install.js)
+fi
 
 (cd "$here/code" && "$here/.venv/bin/python" selftest.py)
 

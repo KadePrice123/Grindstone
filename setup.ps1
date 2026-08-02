@@ -34,6 +34,13 @@ Write-Host "Python deps installed."
 Push-Location "$here\code\app"
 npm install --no-fund --no-audit
 $npmOk = $?
+if ($npmOk -and -not (Test-Path "node_modules\electron\dist\electron.exe")) {
+  # Electron's postinstall can silently skip the binary download; without
+  # this the app later dies with an opaque spawn ENOENT (fresh-clone test).
+  Write-Host 'Electron binary missing - fetching it now ...'
+  node node_modules\electron\install.js
+  $npmOk = (Test-Path "node_modules\electron\dist\electron.exe")
+}
 Pop-Location
 if (-not $npmOk) { Write-Host 'npm install failed' -ForegroundColor Red; exit 1 }
 
