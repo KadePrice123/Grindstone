@@ -30,6 +30,10 @@ interface StripState {
   maximized: boolean
   bounds: { x: number; y: number; width: number; height: number }
   canGoBack: boolean
+  canGoForward: boolean
+  activeKind: 'app' | 'browser' | null
+  activeUrl: string
+  loading: boolean
   draggingId: number | null
 }
 
@@ -46,6 +50,9 @@ declare global {
       dragMove: (sx: number, sy: number) => void
       dragEnd: (sx: number, sy: number) => void
       back: () => void
+      forward: () => void
+      reload: () => void
+      goto: (url: string) => void
       home: () => void
       minimize: () => void
       maximizeToggle: () => void
@@ -84,9 +91,15 @@ export function TabStrip() {
     maximized: false,
     bounds: { x: 0, y: 0, width: 0, height: 0 },
     canGoBack: false,
+    canGoForward: false,
+    activeKind: null,
+    activeUrl: '',
+    loading: false,
     draggingId: null,
   })
   const [dragDx, setDragDx] = useState(0)
+  const [addr, setAddr] = useState('')
+  const [editing, setEditing] = useState(false)
   const drag = useRef<{ id: number; startX: number; startY: number; live: boolean } | null>(null)
 
   useEffect(() => {
@@ -94,6 +107,11 @@ export function TabStrip() {
     const off = window.grindstoneTabs.onState(setState)
     return () => off()
   }, [])
+
+  // Follow the page's URL unless the user is mid-edit in the address bar.
+  useEffect(() => {
+    if (!editing) setAddr(state.activeUrl)
+  }, [state.activeUrl, state.activeId, editing])
 
   const onPointerDown = (e: React.PointerEvent, id: number) => {
     if (e.button !== 0) return
@@ -120,8 +138,64 @@ export function TabStrip() {
     if (d?.live) window.grindstoneTabs.dragEnd(e.screenX, e.screenY)
   }
 
+  const navBar =
+    state.activeKind === 'browser' ? (
+      <div className="navbar">
+        <button
+          className="strip-btn"
+          title="Back"
+          disabled={!state.canGoBack}
+          onClick={() => window.grindstoneTabs.back()}
+        >
+          ←
+        </button>
+        <button
+          className="strip-btn"
+          title="Forward"
+          disabled={!state.canGoForward}
+          onClick={() => window.grindstoneTabs.forward()}
+        >
+          →
+        </button>
+        <button
+          className="strip-btn"
+          title="Reload"
+          onClick={() => window.grindstoneTabs.reload()}
+        >
+          {state.loading ? '×' : '⟳'}
+        </button>
+        <input
+          className="addr"
+          value={addr}
+          spellCheck={false}
+          placeholder="Search or enter address"
+          onChange={(e) => {
+            setEditing(true)
+            setAddr(e.target.value)
+          }}
+          onFocus={(e) => {
+            setEditing(true)
+            e.currentTarget.select()
+          }}
+          onBlur={() => setEditing(false)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              window.grindstoneTabs.goto(addr)
+              setEditing(false)
+              ;(e.target as HTMLInputElement).blur()
+            } else if (e.key === 'Escape') {
+              setAddr(state.activeUrl)
+              setEditing(false)
+              ;(e.target as HTMLInputElement).blur()
+            }
+          }}
+        />
+      </div>
+    ) : null
+
   return (
-    <div className="strip">
+    <div className={navBar ? 'chrome with-nav' : 'chrome'}>
+      <div className="strip">
       <button
         className="strip-btn home"
         title="Home — Grindstone"
@@ -192,7 +266,9 @@ export function TabStrip() {
         <button className="close" title="Close window" onClick={() => window.grindstoneTabs.closeWindow()}>
           ×
         </button>
+        </div>
       </div>
+      {navBar}
     </div>
   )
 }

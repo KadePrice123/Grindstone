@@ -147,14 +147,15 @@ def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
 
     # The open web, fetched only on page 1 (deeper pages page through what we
     # already ranked — a fresh scrape per page would be slow and unstable).
+    engine = prefs.get("web_search_engine", websearch.DEFAULT_BACKEND)
     web: list[dict[str, Any]] = []
     if page_no == 1:
         if prefs.get("web_search_enabled", True):
-            web += [_web_row(r) for r in websearch.web_results(q, limit=12)]
+            web += [_web_row(r) for r in websearch.web_results(q, limit=12, backend=engine)]
         if prefs.get("web_news_enabled", True) and (news_toks or scope or featured):
             subject = scope["symbol"] if scope else (featured["symbol"] if featured else q)
             term = f"{subject} stock news" if (scope or featured) else q
-            web += [_web_row(r) for r in websearch.web_news(term, limit=10)]
+            web += [_web_row(r) for r in websearch.web_news(term, limit=10, backend=engine)]
 
     # In-house lists are fused normally, then boosted as a group: the user's
     # own data and the platform's pages outrank the open web by however much
@@ -177,7 +178,7 @@ def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
 
 
 def query(q: str, uni: Universe, con: sqlite3.Connection,
-          limit: int = 12, live_news=None) -> dict[str, Any]:
+          limit: int = 12, live_news=None, web=None) -> dict[str, Any]:
     """Returns {results: [...], intent: {...}|None}. Never raises on user input.
 
     live_news: optional callable(symbol) -> list[news items]; consulted when a
@@ -217,7 +218,11 @@ def query(q: str, uni: Universe, con: sqlite3.Connection,
     news = [_news_row(it) for it in newsstore.search(con, q, limit=8)]
     pages = _pages_match(q)
 
-    fused = _rrf([prefix, fuzzy, news, pages])
+    # Web hits belong in the dropdown too — a browser bar that only knows its
+    # own data is not a browser bar. Fetched by the caller so it can respect
+    # settings and stay off the critical path when disabled.
+    web_rows = [_web_row(r) for r in (web(q) if web else [])]
+    fused = _rrf_weighted([(_rrf([prefix, fuzzy, news, pages]), 2.0), (web_rows, 1.0)])
 
     # exact ticker always pins first
     if exact:

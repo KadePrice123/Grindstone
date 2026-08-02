@@ -69,6 +69,10 @@ export interface StripState {
   maximized: boolean
   bounds: { x: number; y: number; width: number; height: number }
   canGoBack: boolean
+  canGoForward: boolean
+  activeKind: 'app' | 'browser' | null
+  activeUrl: string
+  loading: boolean
   draggingId: number | null
 }
 
@@ -87,6 +91,9 @@ const grindstoneTabs = {
   dragMove: (sx: number, sy: number): void => ipcRenderer.send('tabdrag:move', sx, sy),
   dragEnd: (sx: number, sy: number): void => ipcRenderer.send('tabdrag:end', sx, sy),
   back: (): void => ipcRenderer.send('nav:back'),
+  forward: (): void => ipcRenderer.send('nav:forward'),
+  reload: (): void => ipcRenderer.send('nav:reload'),
+  goto: (url: string): void => ipcRenderer.send('nav:goto', url),
   home: (): void => ipcRenderer.send('nav:home'),
   minimize: (): void => ipcRenderer.send('win:minimize'),
   maximizeToggle: (): void => ipcRenderer.send('win:maximize'),

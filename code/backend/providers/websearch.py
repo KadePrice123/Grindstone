@@ -27,7 +27,16 @@ import threading
 import time
 from typing import Any
 
-BACKEND = "duckduckgo"  # see the module docstring before changing this
+# Measured from this machine on 2026-08-02 (query: "best index funds 2026"):
+#   duckduckgo, mojeek, wikipedia, yahoo, google -> 0 results
+#   brave 5, bing 5, startpage 5, yandex 5, auto 5
+# So a DuckDuckGo-only pin makes the feature dead, not safe. The engine set
+# is therefore a USER SETTING with the tradeoff stated at the point of
+# choice: "brave" is the narrowest option that actually returns results,
+# "auto" fans out across everything ddgs supports (best coverage, but it
+# includes engines whose terms forbid automated querying).
+DEFAULT_BACKEND = "brave"
+ALLOWED_BACKENDS = ("brave", "auto", "duckduckgo", "bing", "startpage")
 
 _MIN_INTERVAL = 0.6
 _lock = threading.Lock()
@@ -69,9 +78,12 @@ def _throttle() -> None:
         _last_call = time.monotonic()
 
 
-def _run(kind: str, query: str, limit: int) -> list[dict[str, Any]]:
+def _run(kind: str, query: str, limit: int,
+         backend: str = DEFAULT_BACKEND) -> list[dict[str, Any]]:
     if not available() or not query.strip():
         return []
+    if backend not in ALLOWED_BACKENDS:
+        backend = DEFAULT_BACKEND
 
     def work() -> list[dict[str, Any]]:
         from ddgs import DDGS  # deferred: keeps sidecar startup fast
@@ -80,7 +92,7 @@ def _run(kind: str, query: str, limit: int) -> list[dict[str, Any]]:
         client = DDGS()
         method = client.news if kind == "news" else client.text
         # max_results MUST be keyword: positionally it binds to `region`.
-        return method(query, max_results=min(limit, 25), backend=BACKEND)
+        return method(query, max_results=min(limit, 25), backend=backend)
 
     try:
         rows = _pool.submit(work).result(timeout=CALL_TIMEOUT)
@@ -97,9 +109,10 @@ def _run(kind: str, query: str, limit: int) -> list[dict[str, Any]]:
     return rows or []
 
 
-def web_results(query: str, limit: int = 10) -> list[dict[str, Any]]:
+def web_results(query: str, limit: int = 10,
+                backend: str = DEFAULT_BACKEND) -> list[dict[str, Any]]:
     out = []
-    for r in _run("text", query, limit):
+    for r in _run("text", query, limit, backend):
         href = r.get("href") or r.get("url") or ""
         if not href.startswith("http"):
             continue
@@ -113,9 +126,13 @@ def web_results(query: str, limit: int = 10) -> list[dict[str, Any]]:
     return out
 
 
-def web_news(query: str, limit: int = 10) -> list[dict[str, Any]]:
+def web_news(query: str, limit: int = 10,
+             backend: str = DEFAULT_BACKEND) -> list[dict[str, Any]]:
     out = []
-    for r in _run("news", query, limit):
+    # DuckDuckGo's news endpoint returns nothing from here; bing answers.
+    if backend == "duckduckgo":
+        backend = "auto"
+    for r in _run("news", query, limit, backend):
         url = r.get("url") or ""
         if not url.startswith("http"):
             continue

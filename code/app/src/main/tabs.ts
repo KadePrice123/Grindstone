@@ -22,6 +22,20 @@ import { log } from './log'
 const BROWSE_PARTITION = 'persist:browsing'
 let browsingHardened = false
 
+/**
+ * A clean Chrome user agent. Electron's default advertises "Electron/43" and
+ * our app name, which makes sites serve degraded or "unsupported browser"
+ * experiences — the thing that makes an embedded view feel like an iframe
+ * rather than a browser.
+ */
+function browsingUserAgent(): string {
+  const chrome = process.versions.chrome
+  return (
+    `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ` +
+    `(KHTML, like Gecko) Chrome/${chrome} Safari/537.36`
+  )
+}
+
 function browsingSession(): Electron.Session {
   const s = session.fromPartition(BROWSE_PARTITION)
   if (!browsingHardened) {
@@ -29,11 +43,14 @@ function browsingSession(): Electron.Session {
     s.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
     s.setPermissionCheckHandler(() => false)
     s.on('will-download', (e) => e.preventDefault())
+    s.setUserAgent(browsingUserAgent())
   }
   return s
 }
 
 export const TABBAR_H = 40
+/** Extra chrome height when the active tab is a web page: its address bar. */
+export const NAVBAR_H = 34
 const MIN_W = 900
 const MIN_H = 600
 const DARK_BG = '#101214'
@@ -70,6 +87,10 @@ type StripState = {
   maximized: boolean
   bounds: { x: number; y: number; width: number; height: number }
   canGoBack: boolean
+  canGoForward: boolean
+  activeKind: 'app' | 'browser' | null
+  activeUrl: string
+  loading: boolean
   draggingId: number | null
 }
 
@@ -182,9 +203,11 @@ export class TabManager {
       w.chrome.setBounds({ x: 0, y: 0, width, height })
       return
     }
-    w.chrome.setBounds({ x: 0, y: 0, width, height: TABBAR_H })
     const active = w.tabs.find((t) => t.id === w.activeId)
-    if (active) active.view.setBounds({ x: 0, y: TABBAR_H, width, height: height - TABBAR_H })
+    // Web pages get an address bar; app pages do not need one.
+    const chromeH = active?.kind === 'browser' ? TABBAR_H + NAVBAR_H : TABBAR_H
+    w.chrome.setBounds({ x: 0, y: 0, width, height: chromeH })
+    if (active) active.view.setBounds({ x: 0, y: chromeH, width, height: height - chromeH })
   }
 
   // ----------------------------------------------------------------- tabs
@@ -234,7 +257,11 @@ export class TabManager {
         // deliberately NO preload: this view can never reach our bridges
       },
     })
-    view.setBackgroundColor('#ffffff')
+    // Dark background while loading, so opening a link is not a white flash
+    // in a dark app. Pages that honour prefers-color-scheme then render dark
+    // (nativeTheme is forced dark in index.ts).
+    view.setBackgroundColor('#101214')
+    view.webContents.setUserAgent(browsingUserAgent())
     const tab: Tab = {
       id: this.nextTabId++,
       view,
@@ -270,6 +297,8 @@ export class TabManager {
     wc.on('page-title-updated', sync)
     wc.on('did-navigate', sync)
     wc.on('did-navigate-in-page', sync)
+    wc.on('did-start-loading', sync)
+    wc.on('did-stop-loading', sync)
     wc.loadURL(parsed.toString())
 
     w.tabs.push(tab)
@@ -386,6 +415,12 @@ export class TabManager {
           ? active.view.webContents.navigationHistory.canGoBack()
           : (this.appHistoryDepth.get(active.id) ?? 0) > 0
         : false,
+      canGoForward: active?.kind === 'browser'
+        ? active.view.webContents.navigationHistory.canGoForward()
+        : false,
+      activeKind: active?.kind ?? null,
+      activeUrl: active?.kind === 'browser' ? (active.url ?? '') : '',
+      loading: active?.kind === 'browser' ? active.view.webContents.isLoading() : false,
       draggingId: this.drag?.tabId ?? null,
     }
   }
@@ -492,6 +527,40 @@ export class TabManager {
         tab.view.webContents.send('nav:back')
       }
     })
+    ipcMain.on('nav:forward', (e) => {
+      const w = this.winFromSender(e.sender)
+      const tab = w?.tabs.find((t) => t.id === w.activeId)
+      if (tab?.kind === 'browser' && tab.view.webContents.navigationHistory.canGoForward()) {
+        tab.view.webContents.navigationHistory.goForward()
+      }
+    })
+    ipcMain.on('nav:reload', (e) => {
+      const w = this.winFromSender(e.sender)
+      const tab = w?.tabs.find((t) => t.id === w.activeId)
+      if (!tab) return
+      if (tab.kind === 'browser') tab.view.webContents.reload()
+      else tab.view.webContents.reload()
+    })
+    ipcMain.on('nav:goto', (e, raw: string) => {
+      const w = this.winFromSender(e.sender)
+      const tab = w?.tabs.find((t) => t.id === w.activeId)
+      if (!w || tab?.kind !== 'browser' || typeof raw !== 'string') return
+      const text = raw.trim()
+      if (!text) return
+      // Address bar behaviour: a URL navigates, anything else searches.
+      let target: string
+      try {
+        const u = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`)
+        target = /\./.test(u.hostname) ? u.toString() : ''
+      } catch {
+        target = ''
+      }
+      if (!target) {
+        target = `https://duckduckgo.com/?q=${encodeURIComponent(text)}`
+      }
+      tab.view.webContents.loadURL(target)
+    })
+
     ipcMain.on('nav:home', (e) => {
       const w = this.winFromSender(e.sender)
       if (!w) return

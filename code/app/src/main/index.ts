@@ -1,5 +1,11 @@
-import { app, ipcMain } from 'electron'
+import { app, ipcMain, nativeTheme } from 'electron'
 import path from 'node:path'
+
+// Websites opened in-app should arrive dark, not blind you. themeSource makes
+// Chromium report prefers-color-scheme: dark to every page, and Chromium's
+// auto-dark handles sites that have no dark theme of their own. The switch
+// must be set before 'ready'.
+app.commandLine.appendSwitch('enable-features', 'WebContentsForceDark')
 import { announceUnlockedIfSignedIn, registerApiBridge, clearSession } from './api'
 import { log } from './log'
 import { Sidecar } from './sidecar'
@@ -9,6 +15,7 @@ const sidecar = new Sidecar()
 let tabs: TabManager | null = null
 
 app.whenReady().then(async () => {
+  nativeTheme.themeSource = 'dark'
   const preload = path.join(__dirname, '../preload/index.js')
   tabs = new TabManager(preload)
   tabs.onAllClosed = () => app.quit()

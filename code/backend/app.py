@@ -374,7 +374,18 @@ def create_app(state: State) -> FastAPI:
     # -------------------------------------------------------------- search
     @app.get("/api/search")
     def omnibox(q: str = "", s=Depends(current_session)) -> dict[str, Any]:
+        with state.db() as db:
+            prefs = settings_mod.get_all(db, s.user_id)
         con = state.market()
+
+        def web(text: str) -> list[dict[str, Any]]:
+            # Only for queries that look like web searches: a 2-char ticker
+            # prefix should not spend a network round-trip.
+            if not prefs.get("web_search_enabled", True) or len(text.strip()) < 4:
+                return []
+            return websearch.web_results(
+                text, limit=5,
+                backend=prefs.get("web_search_engine", websearch.DEFAULT_BACKEND))
 
         def live_news(symbol: str) -> list[dict[str, Any]]:
             if not state.live_news_allowed(symbol):
@@ -391,7 +402,7 @@ def create_app(state: State) -> FastAPI:
             return items
 
         try:
-            res = search_mod.query(q, state.universe, con, live_news=live_news)
+            res = search_mod.query(q, state.universe, con, live_news=live_news, web=web)
         finally:
             con.close()
         # An empty answer must explain itself (observed: a fresh install has

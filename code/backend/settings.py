@@ -21,6 +21,16 @@ SPEC: dict[str, dict[str, Any]] = {
         "label": "Web news in results",
         "help": "Include web news articles alongside your broker's news feed.",
     },
+    "web_search_engine": {
+        "kind": "choice", "default": "brave",
+        "choices": ["brave", "auto", "bing", "startpage", "duckduckgo"],
+        "label": "Web search engine",
+        "help": "Measured here: DuckDuckGo currently returns nothing, so it is "
+                "listed only for completeness. 'brave' is the narrowest option "
+                "that works; 'auto' fans out across every engine ddgs supports "
+                "for the best coverage, including some whose terms discourage "
+                "automated queries.",
+    },
     "inhouse_boost": {
         "kind": "float", "default": 1.0, "min": 0.0, "max": 4.0, "step": 0.25,
         "label": "In-house result boost",

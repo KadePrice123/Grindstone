@@ -726,10 +726,15 @@ def _websearch_and_settings():
     # Bing, Yandex and Startpage — whose terms forbid automated querying —
     # with a fingerprint-randomizing transport. Pinning to DuckDuckGo is what
     # keeps this feature defensible; it must not drift back.
-    assert websearch.BACKEND == "duckduckgo", \
-        "web search backend must stay pinned to duckduckgo (see module docstring)"
+    # The engine is a user setting, but it must be a CHOSEN one — never
+    # silently "auto" (which fans out to engines whose terms discourage
+    # automated queries). Measured 2026-08-02: duckduckgo/mojeek/yahoo/google
+    # return nothing from here; brave/bing/startpage/yandex work.
+    assert websearch.DEFAULT_BACKEND in websearch.ALLOWED_BACKENDS
+    assert websearch.DEFAULT_BACKEND != "auto", \
+        "the default engine must be an explicit one, not the fan-out"
     src = (CODE / "backend" / "providers" / "websearch.py").read_text(encoding="utf-8")
-    assert "backend=BACKEND" in src, "the pinned backend is not actually passed to ddgs"
+    assert "backend=backend" in src, "the chosen backend is not passed to ddgs"
     assert "max_results=" in src, "max_results must be keyword — positionally it binds to region"
     # ddgs RAISES on an empty result set; counting that as a failure would
     # open the breaker after three innocent searches.
@@ -792,6 +797,18 @@ def _tab_system():
     preload = (app_dir / "src/preload/index.ts").read_text(encoding="utf-8")
     assert "grindstoneTabs" in preload and "dragEnd" in preload, \
         "preload does not expose the tab bridge"
+
+    # In-app browsing must feel like a browser, not an embedded frame:
+    # navigation controls, an address bar, a real Chrome user agent (the
+    # Electron default makes sites serve degraded pages), and dark pages.
+    for piece in ("nav:forward", "nav:reload", "nav:goto", "browsingUserAgent"):
+        assert piece in tabs, f"browser chrome missing {piece}"
+    strip = (app_dir / "src/renderer/src/components/TabStrip.tsx").read_text(encoding="utf-8")
+    assert "className=\"addr\"" in strip, "browser tabs have no address bar"
+    main_ts = (app_dir / "src/main/index.ts").read_text(encoding="utf-8")
+    assert "nativeTheme.themeSource = 'dark'" in main_ts, \
+        "opened pages will render light in a dark app"
+    assert "WebContentsForceDark" in main_ts
     # The live e2e is the only thing that crosses the real proxy + real
     # windows; it must stay runnable.
     assert (app_dir / "e2e/run.mjs").exists(), "the live e2e diagnostic is missing"
