@@ -109,6 +109,172 @@ def _env_example():
                 f".env.example line carries a value: {line!r}"
 
 
+# ----------------------------------------------------------------- M1 checks
+
+@check("security: envelope encryption round-trip and tamper detection")
+def _crypto():
+    sys.path.insert(0, str(CODE))
+    from backend import security as sec
+
+    pw_hash = sec.hash_password("correct horse battery")
+    assert sec.verify_password(pw_hash, "correct horse battery")
+    assert not sec.verify_password(pw_hash, "wrong password 123")
+
+    salt, dek = sec.new_salt(), sec.new_dek()
+    kek = sec.derive_kek("correct horse battery", salt)
+    wrapped = sec.wrap_dek(kek, dek, "kade")
+    assert sec.unwrap_dek(kek, wrapped, "kade") == dek
+
+    bad_kek = sec.derive_kek("wrong password 123", salt)
+    try:
+        sec.unwrap_dek(bad_kek, wrapped, "kade")
+        raise AssertionError("wrong-password KEK unwrapped the DEK")
+    except sec.BadPassword:
+        pass
+
+    blob = sec.encrypt_secret(dek, "PKTESTFAKEKEYVALUE00", 1, 7, "key_id")
+    assert sec.decrypt_secret(dek, blob, 1, 7, "key_id") == "PKTESTFAKEKEYVALUE00"
+    for (u, a, f) in ((2, 7, "key_id"), (1, 8, "key_id"), (1, 7, "secret_key")):
+        try:  # any AAD component change must break decryption (row-swap defense)
+            sec.decrypt_secret(dek, blob, u, a, f)
+            raise AssertionError(f"AAD swap not detected for {(u, a, f)}")
+        except sec.BadPassword:
+            pass
+
+
+@check("api: full offline auth+accounts flow, stolen-DB file holds no plaintext")
+def _api_flow():
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from fastapi.testclient import TestClient
+
+    from backend.app import State, create_app
+
+    fake_key = "PKFAKEFAKEFAKEFAKE1234"          # realistic shape, not a real key
+    fake_secret = "sEcReTfAkEsEcReTfAkEsEcReTfAkE12345"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        state = State("boot-token-for-tests", db_path=Path(tmp) / "app.db")
+        # base_url matters: TrustedHost (correctly) rejects TestClient's
+        # default Host "testserver" — present the loopback host we allow.
+        client = TestClient(create_app(state), base_url="http://127.0.0.1")
+        B = {"X-App-Token": "boot-token-for-tests"}
+
+        assert client.get("/api/health").status_code == 401, "app token not enforced"
+        assert client.get("/api/health", headers=B).json()["ok"] is True
+
+        r = client.post("/api/auth/setup", headers=B,
+                        json={"username": "t", "password": "longenough1"})
+        token = r.json()["token"]
+        A = {**B, "Authorization": f"Bearer {token}"}
+
+        assert client.post("/api/auth/login", headers=B,
+                           json={"username": "t", "password": "wrongwrong1"}).status_code == 401
+        assert client.post("/api/auth/setup", headers=B,
+                           json={"username": "u2", "password": "longenough1"}).status_code == 409
+
+        r = client.post("/api/accounts", headers=A, json={
+            "broker": "alpaca", "kind": "paper", "nickname": "T",
+            "credentials": {"key_id": fake_key, "secret_key": fake_secret}})
+        assert r.status_code == 200, r.text
+        listed = client.get("/api/accounts", headers=A).json()
+        assert listed[0]["key_hints"]["key_id"] == fake_key[-4:]
+        assert fake_secret not in json.dumps(listed)
+
+        raw = (Path(tmp) / "app.db").read_bytes()
+        assert fake_key.encode() not in raw, "plaintext key id in DB file"
+        assert fake_secret.encode() not in raw, "plaintext secret in DB file"
+
+        # unsupported broker degrades honestly, offline
+        r = client.post("/api/accounts/test", headers=A,
+                        json={"broker": "fidelity", "kind": "live", "credentials": {}})
+        assert r.json()["ok"] is False and "Fidelity" in r.json()["error"]
+
+        # lock revokes every session for the user
+        assert client.post("/api/auth/lock", headers=A).json()["ok"] is True
+        assert client.get("/api/accounts", headers=A).status_code == 401
+
+
+@check("alpaca: parsers handle real, partial, and garbage payloads")
+def _alpaca_parsers():
+    sys.path.insert(0, str(CODE))
+    from backend.brokers.alpaca import parse_account
+    from backend.brokers.base import BrokerError
+
+    full = parse_account({
+        "status": "ACTIVE", "currency": "USD", "equity": "500000", "cash": "500000",
+        "buying_power": "1000000", "options_buying_power": "500000",
+        "options_approved_level": 3, "pattern_day_trader": False,
+        "daytrade_count": 0, "account_number": "PA3ABCDF6YY",
+        "trading_blocked": False, "account_blocked": False,
+    })
+    assert full["equity"] == 500000.0 and full["account_last4"] == "F6YY"
+    assert full["options_level"] == 3 and full["blocked"] is False
+
+    partial = parse_account({"status": "ACTIVE"})
+    assert partial["equity"] is None and partial["account_last4"] == ""
+
+    weird = parse_account({"status": "ACTIVE", "equity": "not-a-number"})
+    assert weird["equity"] is None
+
+    for garbage in ({}, {"foo": 1}):
+        try:
+            parse_account(garbage)
+            raise AssertionError(f"garbage accepted: {garbage}")
+        except BrokerError:
+            pass
+
+
+@check("alpaca module is read-only: no order or position-mutation code")
+def _alpaca_readonly():
+    src = (CODE / "backend" / "brokers" / "alpaca.py").read_text(encoding="utf-8")
+    for banned in ("/v2/orders", "httpx.post", "httpx.put", "httpx.delete",
+                   "client.post", ".exercise"):
+        assert banned not in src, (
+            f"alpaca.py contains {banned!r} — order entry must arrive via the "
+            "trading milestone deliberately, with its own gate checks")
+
+
+@check("sessions: idle expiry and revocation wipe")
+def _sessions():
+    sys.path.insert(0, str(CODE))
+    from backend.sessions import SessionStore
+
+    s = SessionStore(idle_seconds=0)          # everything is instantly stale
+    tok = s.create(1, "t", b"\x01" * 32)
+    import time as _t
+    _t.sleep(0.01)
+    assert s.get(tok) is None, "stale session survived"
+
+    s2 = SessionStore()
+    t2 = s2.create(1, "t", b"\x02" * 32)
+    entry = s2._by_token[t2]
+    s2.revoke(t2)
+    assert bytes(entry.dek) == b"\x00" * 32, "DEK not wiped on revoke"
+
+
+@check("frontend: sources present; typecheck when toolchain available")
+def _frontend():
+    app_dir = CODE / "app"
+    for rel in ("package.json", "electron.vite.config.ts",
+                "src/main/index.ts", "src/main/sidecar.ts", "src/main/api.ts",
+                "src/preload/index.ts", "src/renderer/index.html",
+                "src/renderer/src/App.tsx"):
+        assert (app_dir / rel).exists(), f"missing app source {rel}"
+    pkg = json.loads((app_dir / "package.json").read_text(encoding="utf-8"))
+    assert pkg["name"] == "grindstone"
+
+    tsc = app_dir / "node_modules" / "typescript" / "bin" / "tsc"
+    node = CODE.parent.parent.parent / "runtimes" / "node" / "node.exe"
+    if not (tsc.exists() and node.exists()):
+        print("      (toolchain absent — file checks only; full typecheck needs node_modules)")
+        return
+    r = subprocess.run([str(node), str(tsc), "--noEmit"], cwd=app_dir,
+                       capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, f"tsc failed:\n{(r.stdout or r.stderr)[:1500]}"
+
+
 def main() -> int:
     passed = 0
     total = len(CHECKS)

@@ -1,0 +1,322 @@
+/* Theme tokens mirror assets/branding/branding.json — one visual system. */
+:root {
+  --accent: #d98324;
+  --bg: #101214;
+  --surface: #191c1f;
+  --surface-raised: #22262a;
+  --border: #2e3338;
+  --text: #e8eaed;
+  --text-dim: #9aa0a6;
+  --gain: #2ebd85;
+  --loss: #e5484d;
+}
+:root[data-theme='light'] {
+  --bg: #fafaf8;
+  --surface: #ffffff;
+  --surface-raised: #f2f2ef;
+  --border: #e0e0dc;
+  --text: #1c1e21;
+  --text-dim: #6b7075;
+  --gain: #1e9e6a;
+  --loss: #d33b40;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+input,
+button,
+select {
+  font: inherit;
+  color: inherit;
+}
+input {
+  user-select: text;
+}
+
+/* ---------- shared ---------- */
+.center-stage {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+}
+.mark {
+  color: var(--text);
+}
+.mark .facet {
+  fill: var(--accent);
+}
+.spin {
+  transform-origin: 50% 50%;
+  animation: gs-spin 7s linear infinite;
+}
+@keyframes gs-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+}
+
+.field {
+  width: 320px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.field:focus {
+  border-color: var(--accent);
+}
+.btn {
+  padding: 9px 22px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.btn:hover {
+  border-color: var(--accent);
+}
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #14100a;
+  font-weight: 600;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.error-text {
+  color: var(--loss);
+  font-size: 13px;
+  max-width: 380px;
+  text-align: center;
+}
+.dim {
+  color: var(--text-dim);
+}
+
+/* ---------- idle page ---------- */
+.omnibox {
+  width: min(620px, 80vw);
+  padding: 13px 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 15px;
+  outline: none;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+.omnibox:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.favorites {
+  display: grid;
+  grid-template-columns: repeat(4, 108px);
+  gap: 14px;
+}
+.fav-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 8px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    transform 0.1s;
+}
+.fav-tile:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.fav-tile svg {
+  width: 26px;
+  height: 26px;
+}
+.fav-tile span {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.user-chip {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+}
+.user-chip button {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--accent);
+}
+.user-menu {
+  position: fixed;
+  left: 16px;
+  bottom: 64px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px;
+  min-width: 160px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+.user-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.user-menu button:hover {
+  background: var(--surface);
+}
+
+/* ---------- accounts page ---------- */
+.page {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 48px 24px;
+}
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 28px;
+}
+.page-head h1 {
+  font-size: 20px;
+  font-weight: 600;
+}
+.back {
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 15px;
+  padding: 4px 8px;
+}
+.back:hover {
+  color: var(--text);
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.card h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
+.acct-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+.acct-row:first-of-type {
+  border-top: 0;
+}
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  text-transform: uppercase;
+}
+.badge.paper {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+.badge.live {
+  background: color-mix(in srgb, var(--loss) 20%, transparent);
+  color: var(--loss);
+}
+.badge.data {
+  background: color-mix(in srgb, var(--text-dim) 20%, transparent);
+  color: var(--text-dim);
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 12px 16px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.form-grid label {
+  color: var(--text-dim);
+  text-align: right;
+}
+.form-grid .field {
+  width: 100%;
+}
+.test-result {
+  padding: 12px 14px;
+  border-radius: 8px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+.test-result.ok {
+  border-color: color-mix(in srgb, var(--gain) 50%, transparent);
+  color: var(--gain);
+}
+.test-result.bad {
+  border-color: color-mix(in srgb, var(--loss) 50%, transparent);
+  color: var(--loss);
+}
+.row-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+.subtle {
+  font-size: 12px;
+  color: var(--text-dim);
+}

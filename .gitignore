@@ -29,6 +29,13 @@ context/*/raw.jsonl.orig
 context/*/convo.jsonl.conv
 context/*/digest.txt
 
+# Node / Electron (node_modules is a junction into Claude/venvs/ so Drive
+# never mirrors it — see README)
+node_modules/
+code/app/out/
+code/app/dist/
+*.tsbuildinfo
+
 # OS / editor noise
 Thumbs.db
 desktop.ini
