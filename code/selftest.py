@@ -323,13 +323,22 @@ def _hints():
         )
 
 
-@check("ipc proxy: canonical paths only, and tokens scrubbed by default")
+@check("ipc proxy: route-parsed token handling, query strings pass, scrub default")
 def _ipc_invariants():
     src = (CODE / "app" / "src" / "main" / "api.ts").read_text(encoding="utf-8")
-    # A path that is not already canonical must be rejected, not rewritten —
-    # otherwise '/api/auth/login?x=1' reaches the same route while dodging
-    # our token handling (review 2026-08-01, high).
-    assert "url.pathname !== path" in src, "IPC proxy does not enforce canonical paths"
+    # Token handling must key on the PARSED pathname ('route'), never the raw
+    # renderer string — '/api/auth/login?x=1' must hit the capture branch
+    # (review 2026-08-01, high).
+    assert "AUTH_CAPTURE_PATHS.has(route)" in src, \
+        "token capture keys on the raw path — query-string variants dodge it"
+    assert "AUTH_CLEAR_PATHS.has(route)" in src
+    # Query strings must be FORWARDED, not rejected: rejecting them killed
+    # /api/search?q=... in production while every test bypassed the proxy
+    # (2026-08-02). The fetch must carry pathname + search.
+    assert "url.pathname}${url.search}" in src, \
+        "proxy does not forward query strings — omnibox search cannot work"
+    assert "url.pathname + url.search !== path" in src, \
+        "non-canonical paths are no longer rejected"
     assert "redirect: 'error'" in src, "a 307 could silently change the routed path"
     # Scrubbing must be unconditional, not an allowlist of known routes.
     assert "function scrub(" in src and "scrub(payload)" in src, \

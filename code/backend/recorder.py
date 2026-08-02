@@ -20,10 +20,10 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 import threading
-import traceback
 from typing import Any, Callable
 
 from . import newsstore
+from .logs import LOG
 from .brokers.alpaca_data import AlpacaData
 from .brokers.base import BrokerError
 
@@ -91,7 +91,7 @@ class Recorder:
                     self.prune()
                     self._last_prune = _utcnow()
             except Exception:  # noqa: BLE001 — the loop must survive anything
-                traceback.print_exc()
+                LOG.exception("recorder tick failed")
 
     # ------------------------------------------------------------------ core
     def run_due_jobs(self, now: dt.datetime | None = None) -> int:

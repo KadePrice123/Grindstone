@@ -57,16 +57,24 @@ export function registerApiBridge(sidecar: Sidecar): void {
     if (typeof path !== 'string' || !path.startsWith('/api/')) {
       return { status: 400, body: { detail: 'bad path' } }
     }
-    // Canonical or rejected — never silently rewritten, so what we match on
-    // is exactly what the backend will route.
+    // Canonical or rejected — never silently rewritten. Query strings ARE
+    // allowed (the omnibox lives on /api/search?q=...; rejecting them
+    // silently killed search in production while every test bypassed this
+    // proxy). The invariant that actually protects tokens is below: route
+    // matching uses the PARSED pathname, so '/api/auth/login?x=1' can never
+    // reach the login route while dodging token capture/stripping.
     let url: URL
     try {
       url = new URL(path, 'http://127.0.0.1')
     } catch {
       return { status: 400, body: { detail: 'bad path' } }
     }
-    if (url.pathname !== path || url.search || url.hash) {
+    if (url.hash || url.pathname + url.search !== path) {
       return { status: 400, body: { detail: 'path must be canonical' } }
+    }
+    const route = url.pathname.replace(/\/+$/, '')
+    if (!route.startsWith('/api/')) {
+      return { status: 400, body: { detail: 'bad path' } }
     }
 
     const state = sidecar.current
@@ -80,7 +88,7 @@ export function registerApiBridge(sidecar: Sidecar): void {
 
     let res: Response
     try {
-      res = await fetch(`http://127.0.0.1:${state.port}${path}`, {
+      res = await fetch(`http://127.0.0.1:${state.port}${url.pathname}${url.search}`, {
         method: m,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -98,15 +106,15 @@ export function registerApiBridge(sidecar: Sidecar): void {
       payload = null
     }
 
-    if (res.ok && AUTH_CAPTURE_PATHS.has(path)) {
+    if (res.ok && AUTH_CAPTURE_PATHS.has(route)) {
       const t = (payload as { token?: string } | null)?.token
       if (typeof t === 'string' && t) sessionToken = t
     }
-    if (AUTH_CLEAR_PATHS.has(path)) {
+    if (AUTH_CLEAR_PATHS.has(route)) {
       sessionToken = null
     }
     // A 401 on any non-login route means the backend dropped our session.
-    if (res.status === 401 && path !== '/api/auth/login') {
+    if (res.status === 401 && route !== '/api/auth/login') {
       sessionToken = null
     }
 

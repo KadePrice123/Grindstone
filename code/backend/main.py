@@ -69,6 +69,12 @@ def main() -> int:
     print(json.dumps({"event": "listening", "port": port, "version": API_VERSION}),
           flush=True)
 
+    from backend.logs import LOG, setup as setup_logging
+
+    log_path = setup_logging()
+    LOG.info("sidecar starting — version %s, python %s", API_VERSION, sys.version.split()[0])
+    print(json.dumps({"event": "log", "path": log_path}), flush=True)
+
     state = State(boot_token)
     app = create_app(state)
 

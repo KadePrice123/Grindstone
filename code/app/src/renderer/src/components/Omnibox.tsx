@@ -66,7 +66,11 @@ export function Omnibox({
     } catch (e) {
       if (mine !== seq.current) return
       setResults([])
-      setNotice('Search is unavailable — backend error. Try again in a moment.')
+      // Carry the actual detail: "backend error" with no specifics cost a
+      // full debugging round-trip when the proxy (not the backend) was the
+      // one rejecting requests.
+      const detail = e instanceof Error ? e.message : String(e)
+      setNotice(`Search failed: ${detail}`)
       setOpen(true)
     }
   }, [])

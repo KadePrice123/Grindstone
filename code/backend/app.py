@@ -18,7 +18,6 @@ import hmac
 import sqlite3
 import threading
 import time
-import traceback
 from contextlib import AbstractContextManager
 from typing import Any
 
@@ -30,6 +29,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
 from . import universe as universe_mod
+from .logs import LOG
 from .brokers import base as brokers_base
 from .brokers.alpaca import PAPER_URL, AlpacaAdapter
 from .brokers.alpaca_data import AlpacaData
@@ -38,7 +38,7 @@ from .marketdb import connect_market
 from .sessions import SessionStore
 from .universe import Universe
 
-API_VERSION = "0.1.0"
+API_VERSION = "0.2.0"
 
 
 class State:
@@ -105,8 +105,10 @@ class State:
                         newsstore.backfill(con, client)
                 finally:
                     con.close()
+                LOG.info("market refresh done — universe %d, news %s",
+                         self.universe.size, "refreshed" if creds else "skipped (no creds)")
             except Exception:  # noqa: BLE001 — background refresh must not kill the app
-                traceback.print_exc()
+                LOG.exception("market refresh failed")
 
         with self._refresh_lock:
             if self._refresh_thread and self._refresh_thread.is_alive():
@@ -156,6 +158,14 @@ class JobPatch(BaseModel):
 def create_app(state: State) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+
+    @app.exception_handler(Exception)
+    async def unhandled(request: Request, exc: Exception):
+        # The renderer says "backend error"; THIS says why. Diagnosing blind
+        # twice was enough.
+        LOG.exception("unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse({"detail": "internal error — see data/logs/backend.log"},
+                            status_code=500)
 
     @app.middleware("http")
     async def require_app_token(request: Request, call_next):
