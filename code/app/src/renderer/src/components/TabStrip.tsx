@@ -1,12 +1,18 @@
 /**
- * The Chrome-style tab strip: [△ home] [← back] [tabs…] [+] [drag] [win btns]
+ * The Chrome-style chrome, in two rows:
+ *   [△ home] [tabs…] [+] [drag] [win btns]
+ *   [← → ⟳] [address]
+ *
+ * Back lives in the nav row ONLY. It used to sit in the tab row as well, and
+ * once the nav row became permanent that was two identical arrows stacked on
+ * top of each other — plus a third inside each page's own header.
  *
  * Drag uses pointer capture, not HTML5 DnD (DnD cannot cross OS windows).
  * The dragged tab visibly lifts and follows the pointer horizontally so the
  * grab reads immediately; main does the cross-window hit-testing.
  */
 import { useEffect, useRef, useState } from 'react'
-import { asGs, asUrl, isKnownPage } from '../urls'
+import { classify } from '../urls'
 import { Logo } from './Logo'
 import {
   AccountsIcon,
@@ -144,24 +150,10 @@ export function TabStrip() {
     const text = addr.trim()
     if (!text) return
     setEditing(false)
-    const url = asUrl(text)
-    if (url) {
-      window.grindstoneTabs.goto('url', url)
-      return
-    }
-    const gs = asGs(text)
-    if (gs) {
-      const route = isKnownPage(gs.page)
-        ? gs.page === 'home'
-          ? 'idle'
-          : gs.page === 'search'
-            ? `search:${gs.query}`
-            : gs.page
-        : `symbol:${gs.page.toUpperCase()}` // anything else .gs is a ticker
-      window.grindstoneTabs.goto('route', route)
-      return
-    }
-    window.grindstoneTabs.goto('route', `search:${text}`)
+    const dest = classify(text)
+    if (dest.kind === 'url') window.grindstoneTabs.goto('url', dest.url)
+    else if (dest.kind === 'route') window.grindstoneTabs.goto('route', dest.route)
+    else window.grindstoneTabs.goto('route', `search:${dest.query}`)
   }
 
   const navBar =
@@ -227,14 +219,6 @@ export function TabStrip() {
         onClick={() => window.grindstoneTabs.home()}
       >
         <Logo size={18} />
-      </button>
-      <button
-        className="strip-btn"
-        title="Back"
-        disabled={!state.canGoBack}
-        onClick={() => window.grindstoneTabs.back()}
-      >
-        ←
       </button>
 
       <div className="strip-tabs">

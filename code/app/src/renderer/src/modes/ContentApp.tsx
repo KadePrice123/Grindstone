@@ -91,15 +91,15 @@ export function ContentApp({ initial }: { initial: Route }) {
   const body = (() => {
     switch (route.name) {
       case 'accounts':
-        return <Accounts onBack={() => setStack((s) => s.slice(0, -1))} />
+        return <Accounts />
       case 'data':
-        return <DataPage onBack={() => setStack((s) => s.slice(0, -1))} />
+        return <DataPage />
       case 'symbol':
         return <SymbolPage symbol={route.symbol} onNavigate={navigate} />
       case 'search':
         return <SearchPage query={route.query} onNavigate={navigate} />
       case 'settings':
-        return <SettingsPage onBack={() => setStack((s) => s.slice(0, -1))} />
+        return <SettingsPage />
       case 'article':
         return <ArticlePage id={route.id} url={route.url} onNavigate={navigate} />
       default:

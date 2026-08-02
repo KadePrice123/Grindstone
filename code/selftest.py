@@ -382,7 +382,13 @@ def _search_engine():
             [("SPY", "SPDR S&P 500 ETF Trust", "ARCA", "us_equity"),
              ("SPYG", "SPDR Portfolio S&P 500 Growth ETF", "ARCA", "us_equity"),
              ("AAPL", "Apple Inc. Common Stock", "NASDAQ", "us_equity"),
-             ("TSLA", "Tesla, Inc. Common Stock", "NASDAQ", "us_equity")])
+             ("TSLA", "Tesla, Inc. Common Stock", "NASDAQ", "us_equity"),
+             # Real tickers that collide with our own page names. Without
+             # these the page-ranking assertions below cannot fail, because
+             # nothing would compete with the page for the top slot.
+             ("DATA", "Tableau Software Inc.", "NYSE", "us_equity"),
+             ("HOME", "At Home Group Inc.", "NYSE", "us_equity"),
+             ("AI", "C3.ai, Inc.", "NYSE", "us_equity")])
         con.commit()
         newsstore.upsert(con, [
             {"id": 1, "headline": "Apple reports record earnings", "summary": "",
@@ -413,6 +419,46 @@ def _search_engine():
 
         r = search_mod.query("acc", uni, con)
         assert any(x["type"] == "page" and x["page"] == "accounts" for x in r["results"])
+
+        # REGRESSION (2026-08-02): a query that NAMES a page ranked below
+        # random fuzzy tickers. Every retrieval list contributes the same RRF
+        # score at rank 0, so the page tied with a symbol and lost on
+        # insertion order — typing "settings" never surfaced Settings.
+        # DATA and HOME are real tickers in this fixture, so the page has to
+        # win on the rule, not by default.
+        for name in ("settings", "home", "data", "accounts"):
+            top = search_mod.query(name, uni, con)["results"][0]
+            assert top["type"] == "page" and top["page"] == name, \
+                f"{name!r} must lead with the {name} page, got {top}"
+            lead = search_mod.page(name, uni, con,
+                                   prefs={"web_search_enabled": False})["inhouse"][0]
+            assert lead["type"] == "page" and lead["page"] == name, \
+                f"{name!r} results page must lead with the {name} page, got {lead}"
+
+        # ...and the colliding ticker is right underneath, never dropped.
+        second = search_mod.query("data", uni, con)["results"][1]
+        assert second["type"] == "symbol" and second["symbol"] == "DATA", \
+            f"the DATA ticker must survive directly under the page, got {second}"
+
+        # The inverse: we do NOT outrank a real instrument with a page we have
+        # not built. "AI" is both C3.ai and our unbuilt AI page.
+        ai = search_mod.query("ai", uni, con)["results"]
+        assert ai[0]["type"] == "symbol" and ai[0]["symbol"] == "AI", \
+            f"an unbuilt page must not outrank a real ticker, got {ai[0]}"
+        assert any(x["type"] == "page" and x["page"] == "ai" for x in ai), \
+            "the unbuilt page should still be visible, just not first"
+        assert search_mod._page_exact("ai")[1] is False, "unbuilt page claims strongly"
+        assert search_mod._page_exact("settings")[1] is True
+        assert search_mod._page_exact("ai")[0]["ready"] is False, \
+            "the UI cannot tell an unbuilt page from a working one"
+
+        # A .gs address that reaches the backend is an address, not a literal.
+        assert search_mod.normalize("settings.gs") == "settings"
+        assert search_mod.normalize("spy.gs") == "spy"
+        assert search_mod.normalize("gold news") == "gold news", \
+            "normalize must not touch ordinary queries"
+        assert search_mod.query("settings.gs", uni, con)["results"][0]["page"] == "settings"
+        assert search_mod.query("spy.gs", uni, con)["results"][0]["symbol"] == "SPY"
 
         # REGRESSION (2026-08-02): platform hits filled every slot on page 1
         # and pushed web results to page 2, where the user never saw them.
@@ -651,16 +697,63 @@ def _providers():
     from backend.market import provider_status
 
     importlib.reload(y)
-    assert "yfinance" not in sys.modules or True  # lazy import documented
     src = (CODE / "backend" / "providers" / "yahoo.py").read_text(encoding="utf-8")
-    assert "import yfinance" not in src.split("def _ticker")[0], \
-        "yfinance must be imported lazily, not at module import"
+
+    # REGRESSION (2026-08-02, measured twice): the fallback must not import
+    # anything heavy. yfinance drags in pandas, costs ~8s, and HOLDS THE GIL —
+    # in a single-process sidecar that is a total server freeze. Eagerly it
+    # hung sign-in; lazily it blew three concurrent chart requests past their
+    # deadline and opened the circuit breaker for five minutes, so a fresh
+    # install had no market data at all while working fine from a shell.
+    # Match IMPORTS, not the docstring that explains why they are gone.
+    imports = [ln.strip() for ln in src.splitlines()
+               if ln.strip().startswith(("import ", "from "))]
+    for heavy in ("yfinance", "pandas", "curl_cffi"):
+        assert not any(heavy in ln for ln in imports), (
+            f"{heavy} is imported by the market fallback again — that freezes "
+            "the whole sidecar (see the comment in backend/main.py)")
+    reqs = (CODE.parent / "requirements.txt").read_text(encoding="utf-8")
+    for heavy in ("yfinance>", "yfinance=", "curl_cffi="):
+        assert heavy not in reqs, f"{heavy} is a dependency again"
+
     assert y.YahooProvider._map("SPX") == "^GSPC" and y.YahooProvider._map("aapl") == "AAPL"
+
+    # Padding must never become a price. Yahoo nulls its series on holidays
+    # and halts; a zero-filled bar would draw a crash that never happened.
+    series = y.YahooProvider._series({
+        "timestamp": [1704067200, 1704153600, 1704240000],
+        "indicators": {"quote": [{"open": [10.0, None, 12.0], "high": [11.0, None, 13.0],
+                                  "low": [9.0, None, 11.0], "close": [10.5, None, 12.5],
+                                  "volume": [100, None, 300]}]},
+    })
+    assert len(series) == 2, f"null padding leaked into the series: {series}"
+    assert all(b["close"] > 0 for b in series)
+
+    # An index has no Alpaca feed but does have a keyless one, so it must not
+    # be refused outright any more.
+    from backend.market import quote_for
+    assert quote_for("ES", "future", None)["available"] is False, \
+        "futures have no source and must say so"
 
     st = provider_status(has_alpaca=False)
     assert st["yahoo_fallback"] is True and "delayed" in st["equities"]
     st = provider_status(has_alpaca=True)
     assert "alpaca" in st["equities"] and "TastyTrade" in st["futures"]
+
+    # A user with no data API still deserves a full metrics grid. The
+    # fallback used to read only last price and previous close, so every
+    # other field rendered as an em dash for exactly the users who have no
+    # alternative. fast_info is one fetch — read it all.
+    for field in ("regularMarketPrice", "regularMarketDayHigh", "regularMarketDayLow",
+                  "regularMarketVolume", "fiftyTwoWeekHigh", "fiftyTwoWeekLow"):
+        assert field in src, f"the keyless fallback never asks for {field}"
+    for key in ("day_open", "day_high", "day_low", "day_volume",
+                "year_high", "year_low"):
+        assert f'"{key}"' in src, f"the fallback quote does not expose {key}"
+    # ...but a delayed feed has no order book, and an invented bid/ask is the
+    # one number a trading app must never make up.
+    assert '"bid": None, "ask": None' in src, \
+        "the delayed fallback must not invent a bid/ask"
 
 
 @check("no permanently animating logo on at-rest screens")
@@ -698,9 +791,25 @@ def _omnibox_addressing():
     # would open as (nonexistent) websites.
     assert r"\.gs(\/|\?|$)" in src, ".gs addresses are not excluded from web URLs"
 
+    # ONE classifier, shared. The home box used to have its own rule set, so
+    # "settings.gs" navigated from the chrome bar and searched from the home
+    # page — the same text meaning two things depending on where you typed it.
+    assert "export function classify" in src, "there is no shared address classifier"
     idle = (renderer / "pages" / "Idle.tsx").read_text(encoding="utf-8")
-    assert "asUrl(q)" in idle and "openUrl(url)" in idle, \
-        "typing an address does not open the site"
+    strip_src = (renderer / "components" / "TabStrip.tsx").read_text(encoding="utf-8")
+    for who, text in (("home box", idle), ("chrome omnibox", strip_src)):
+        assert "classify(" in text, f"{who} does not use the shared classifier"
+    assert "openUrl(dest.url)" in idle, "typing an address does not open the site"
+
+    # A bare page name is an address too: a browser navigates on a known
+    # keyword without making you type the suffix.
+    for name in ("home:", "accounts:", "data:", "settings:"):
+        assert name in src.replace("'", "").replace('"', ''), \
+            f"bare name {name!r} is not addressable"
+    # ...but only for pages that EXIST. Routing "ai" to an unbuilt page would
+    # dead-end, and AI is also a real ticker.
+    assert "ai:" not in src.replace("'", "").replace('"', ''), \
+        "an unbuilt page is being treated as a bare address"
 
     # The bar is always present — it is the app's search box, not a browser
     # accessory (it used to appear only on web tabs, leaving the home page
@@ -720,6 +829,53 @@ def _omnibox_addressing():
     reader = (CODE / "backend" / "providers" / "reader.py").read_text(encoding="utf-8")
     assert "include_tables=False" in reader, \
         "table extraction produces pipe-delimited noise in the reader"
+
+
+@check("one back button: the nav row owns it, pages and tab row do not")
+def _single_back():
+    """REGRESSION (2026-08-02): making the nav row permanent stacked a second
+    back arrow directly under the tab row's, and every page header carried a
+    third one of its own. Three arrows, one destination."""
+    renderer = CODE / "app" / "src" / "renderer" / "src"
+    strip = (renderer / "components" / "TabStrip.tsx").read_text(encoding="utf-8")
+    tab_row = strip.split('className="strip"')[1].split("navBar")[0]
+    assert "grindstoneTabs.back()" not in tab_row, \
+        "the tab row has its own back button, duplicating the nav row's"
+    assert strip.count("grindstoneTabs.back()") == 1, \
+        "back is wired more than once in the chrome"
+
+    for page in ("Accounts.tsx", "DataPage.tsx", "SettingsPage.tsx"):
+        text = (renderer / "pages" / page).read_text(encoding="utf-8")
+        assert 'className="back"' not in text, \
+            f"{page} draws its own back button; the nav row already has one"
+        assert "onBack" not in text, f"{page} still carries a dead onBack prop"
+
+
+@check("a chart without numbers is decoration: key metrics accompany both charts")
+def _key_metrics():
+    renderer = CODE / "app" / "src" / "renderer" / "src"
+    metrics = (renderer / "components" / "Metrics.tsx").read_text(encoding="utf-8")
+    # The glanceable set. Sources disagree about what they supply, so every
+    # one must be optional — but all of them must be asked for.
+    for field in ("price", "change_pct", "day_open", "day_high", "day_low",
+                  "prev_close", "day_volume", "bid", "ask"):
+        assert f"quote.{field}" in metrics, f"metrics never show {field}"
+    # A missing number must read as missing. A fabricated 0 in a price grid
+    # is worse than an obvious blank.
+    assert "'—'" in metrics, "absent values are not shown as an em dash"
+    assert "quote.available" in metrics, \
+        "metrics render without checking the quote is real"
+
+    for page in ("SearchPage.tsx", "SymbolPage.tsx"):
+        text = (renderer / "pages" / page).read_text(encoding="utf-8")
+        assert "<Metrics" in text, f"{page} shows a chart with no numbers on it"
+        assert "barRange(" in text, f"{page} does not show the range the chart sits in"
+
+    # The featured card charts a quarter but ranges over a year: the 52-week
+    # range is the useful one, and 260 daily bars at card size is noise.
+    search_page = (renderer / "pages" / "SearchPage.tsx").read_text(encoding="utf-8")
+    assert "limit=260" in search_page and "bars.slice(-90)" in search_page, \
+        "featured card must range over a year and chart a quarter"
 
 
 @check("news reader: content requested, stubs filtered, html rendered, cached")

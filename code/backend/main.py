@@ -90,15 +90,15 @@ def main() -> int:
     state.recorder = Recorder(connect_market(), state.creds_for)
     state.recorder.start()
 
-    # NO EAGER WARMUP OF yfinance. Tempting — a cold pandas + curl_cffi
-    # import costs seconds on the first chart request — but importing it
-    # in-process FROZE THE WHOLE SERVER: a heavy import holds the GIL and the
-    # import lock, so every in-flight request stalls for the duration. This
-    # is what made sign-in hang for a real user roughly ten seconds after
-    # launch (exactly how long it takes to type a password), and it cost
-    # three rounds of wrong diagnoses. The provider already imports lazily
-    # inside a bounded worker with a circuit breaker; let it pay the cost
-    # where it can only slow one request instead of all of them.
+    # NO HEAVY IMPORTS HERE, EAGER OR LAZY. A heavy import holds the GIL and
+    # the import lock, so every in-flight request stalls for its duration —
+    # in a single-process sidecar that is a full server freeze. Warming
+    # yfinance here made sign-in hang for a real user about ten seconds after
+    # launch (exactly how long it takes to type a password) and cost three
+    # rounds of wrong diagnoses; deferring it to the request path then blew
+    # three concurrent chart requests past their deadline and tripped the
+    # provider's breaker for five minutes. The lesson took twice: the market
+    # fallback is now plain HTTP with no such import at all.
 
     # Defence in depth for the keep-alive race that broke sign-in: uvicorn's
     # default idle timeout is 5s, which is shorter than a human pausing to

@@ -26,7 +26,10 @@ const APP = path.resolve(HERE, '..')
 const PORT = 9310 + (process.pid % 300)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-const dataDir = mkdtempSync(path.join(tmpdir(), 'grindstone-e2e-'))
+// A throwaway profile by default, but overridable: when a run fails for a
+// reason only the backend log explains, point this somewhere that survives.
+const dataDir = process.env.GRINDSTONE_E2E_DATA_DIR ?? mkdtempSync(path.join(tmpdir(), 'grindstone-e2e-'))
+const keepData = !!process.env.GRINDSTONE_E2E_DATA_DIR
 const electron = path.join(APP, 'node_modules', 'electron', 'dist', 'electron.exe')
 const child = spawn(electron, [`--remote-debugging-port=${PORT}`, '.'], {
   cwd: APP,
@@ -42,7 +45,8 @@ const cleanup = () => {
     /* already gone */
   }
   try {
-    rmSync(dataDir, { recursive: true, force: true })
+    if (!keepData) rmSync(dataDir, { recursive: true, force: true })
+    else console.log(`      profile kept at ${dataDir}`)
   } catch {
     /* windows file locks; the temp dir is disposable anyway */
   }
@@ -299,6 +303,21 @@ try {
     cs.canvas > 0 ? `${cs.canvas} canvas` : `empty state: "${cs.empty}"`
   )
 
+  // The numbers beside the chart resolve the same way: a real grid, or a
+  // stated reason. Same rule — never a blank void.
+  const metricState = await spy.eval(
+    `JSON.stringify({
+       grid: document.querySelectorAll('.metrics .metric').length,
+       why: document.querySelector('.metrics-empty')?.textContent?.slice(0,80) ?? null
+     })`
+  )
+  const ms = JSON.parse(metricState)
+  check(
+    ms.grid > 0 || !!ms.why,
+    'metrics: the chart is accompanied by numbers, or by a reason',
+    ms.grid > 0 ? `${ms.grid} metrics` : `no quote: "${ms.why}"`
+  )
+
   if (canvases === 0) {
     // Do not guess why: ask the page what it actually has.
     const diag = await spy.eval(
@@ -344,13 +363,34 @@ try {
     barsAnswer ? `${Date.now() - t0}ms ${barsAnswer}` : 'no answer in 20s'
   )
 
+  // This profile has NO broker account — which is precisely the case the
+  // keyless fallback exists for. It silently stopped working twice (a heavy
+  // import blew the deadline and tripped the breaker), and both times the
+  // symptom was an empty chart that looked like an honest empty state.
+  const src = barsAnswer ? JSON.parse(barsAnswer).source : 'none'
+  check(
+    src !== 'none',
+    'fallback: a profile with no broker account still gets market data',
+    `source=${src}`
+  )
+
   // -------------------------------------------------------------- browsing
   // News must open IN the app. iframes cannot show news sites (they send
   // X-Frame-Options/frame-ancestors), so this must be a real browser view.
   const beforeTabs = (await chromeA.eval('window.grindstoneTabs.getState()')).tabs.length
   await spy.eval(`(window.grindstone.openUrl('https://example.com/'), 'ok')`)
-  await sleep(2500)
-  const afterState = await chromeA.eval('window.grindstoneTabs.getState()')
+  // WAIT for the tab to report its URL rather than sleeping a fixed 2.5s and
+  // hoping: the page is fetched over the real network, and a slow load made
+  // this check fail intermittently on an unrelated change.
+  const afterState = await waitFor(
+    async () => {
+      const s = await chromeA.eval('window.grindstoneTabs.getState()')
+      const t = s.tabs.find((x) => x.kind === 'browser')
+      return t && /example\.com/.test(t.url ?? '') ? s : null
+    },
+    'the browser tab to report its URL',
+    20000
+  ).catch(async () => chromeA.eval('window.grindstoneTabs.getState()'))
   check(
     afterState.tabs.length === beforeTabs + 1,
     'browsing: a URL opens as an in-app tab, not in the OS browser',
@@ -363,6 +403,51 @@ try {
     'browsing: the tab reports the page URL to the strip',
     browserTab?.url
   )
+
+  // ------------------------------------------------------------ addressing
+  // Platform pages are addresses. This types into the REAL address bar and
+  // presses a REAL Enter, because the failure was in the classify/route path
+  // between the two — a unit test on either end would have passed.
+  const typeAddress = (text) => `(() => {
+    const el = document.querySelector('input.addr')
+    if (!el) return 'no address bar'
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value').set
+    setter.call(el, ${JSON.stringify('')})
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    setter.call(el, ${JSON.stringify(text)})
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    return 'typed'
+  })()`
+
+  const appTab = afterState.tabs.find((t) => t.kind === 'app')
+  for (const [typed, wantTitle] of [
+    ['settings.gs', 'Settings'],
+    ['accounts', 'Accounts'], // a bare page name is an address too
+  ]) {
+    await chromeA.eval(`(window.grindstoneTabs.activate(${appTab.id}), 'ok')`)
+    await sleep(400)
+    const typedOk = await chromeA.eval(typeAddress(typed))
+    const landed = await waitFor(
+      async () => {
+        const s = await chromeA.eval('window.grindstoneTabs.getState()')
+        const t = s.tabs.find((x) => x.id === appTab.id)
+        return t && t.title === wantTitle ? s : null
+      },
+      `${typed} to open ${wantTitle}`,
+      8000
+    ).catch(() => null)
+    check(
+      typedOk === 'typed' && !!landed,
+      `addressing: "${typed}" opens ${wantTitle}`,
+      landed ? landed.activeUrl : `still on ${typed === 'settings.gs' ? '?' : '?'}`
+    )
+  }
+
+  // ...and the bar shows the page's own address back, not a blank.
+  const finalUrl = (await chromeA.eval('window.grindstoneTabs.getState()')).activeUrl
+  check(/\.gs/.test(finalUrl ?? ''), 'addressing: the bar reports a .gs address', finalUrl)
 } catch (err) {
   console.log('FAIL  harness error —', err.message)
   failures += 1

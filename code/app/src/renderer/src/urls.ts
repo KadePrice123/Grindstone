@@ -21,10 +21,46 @@ const TLD =
 /** Platform pages that are addressable by name. */
 const PAGES = ['home', 'accounts', 'data', 'settings', 'search', 'article'] as const
 
+/**
+ * Bare words that are addresses in their own right. A browser bar navigates
+ * on a known keyword without making you type the suffix, so "settings" lands
+ * on Settings just like "settings.gs" does.
+ *
+ * ONLY pages that actually exist: routing "ai" here would dead-end on a page
+ * we have not built, and AI is also a real ticker — the ambiguity resolves
+ * itself once there is somewhere to go.
+ */
+const PAGE_ROUTES: Record<string, string> = {
+  home: 'idle',
+  accounts: 'accounts',
+  data: 'data',
+  settings: 'settings',
+}
+
+const BARE: Record<string, string> = {
+  ...PAGE_ROUTES,
+  start: 'idle',
+  account: 'accounts',
+  brokers: 'accounts',
+  setting: 'settings',
+  preferences: 'settings',
+}
+
+/** The route key for a page from the backend's registry, or null if that
+ *  page is announced but not built yet. */
+export function pageRoute(page: string): string | null {
+  return PAGE_ROUTES[page.toLowerCase()] ?? null
+}
+
 export interface GsTarget {
   page: string
   query: string
 }
+
+export type Destination =
+  | { kind: 'url'; url: string }
+  | { kind: 'route'; route: string }
+  | { kind: 'search'; query: string }
 
 export function asUrl(input: string): string | null {
   const text = input.trim()
@@ -59,7 +95,43 @@ export function asGs(input: string): GsTarget | null {
   const name = head.replace(/\.gs$/i, '').toLowerCase()
   if (!name) return null
   const params = new URLSearchParams(qs)
-  return { page: name, query: params.get('q') ?? '' }
+  return { page: name, query: params.get('q') ?? params.get('id') ?? '' }
+}
+
+/** A .gs target as a route key (App.tsx's parseRoute vocabulary). */
+export function gsRoute(gs: GsTarget): string {
+  if (!isKnownPage(gs.page)) return `symbol:${gs.page.toUpperCase()}` // anything else .gs is a ticker
+  switch (gs.page) {
+    case 'home':
+      return 'idle'
+    case 'search':
+      return `search:${gs.query}`
+    case 'article':
+      return `article:${gs.query}`
+    default:
+      return gs.page
+  }
+}
+
+/**
+ * What typing this into an address bar means. One decision procedure, shared
+ * by the chrome omnibox and the home-page search box, so the same text can
+ * never mean two different things depending on where you typed it.
+ */
+export function classify(input: string): Destination {
+  const text = input.trim()
+  if (!text) return { kind: 'search', query: '' }
+
+  const url = asUrl(text)
+  if (url) return { kind: 'url', url }
+
+  const gs = asGs(text)
+  if (gs) return { kind: 'route', route: gsRoute(gs) }
+
+  const bare = BARE[text.toLowerCase()]
+  if (bare) return { kind: 'route', route: bare }
+
+  return { kind: 'search', query: text }
 }
 
 /** The address shown for a platform page — the inverse of asGs(). */

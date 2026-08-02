@@ -72,6 +72,8 @@ export interface SearchResult {
   url?: string
   site?: string
   page?: string
+  /** Pages only: false = announced but not built, so it must not look clickable. */
+  ready?: boolean
   action?: string
   created_at?: string
 }
@@ -91,6 +93,11 @@ export interface Quote {
   day_low?: number | null
   day_volume?: number | null
   prev_close?: number | null
+  /** Provider-supplied extras; absent from feeds that do not carry them. */
+  year_high?: number | null
+  year_low?: number | null
+  avg_volume?: number | null
+  market_cap?: number | null
 }
 
 export interface NewsItem {

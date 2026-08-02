@@ -5,9 +5,11 @@
  * ticker's page.
  */
 import { useCallback, useEffect, useState } from 'react'
-import type { Route } from '../App'
-import { api, ApiError, SearchResult } from '../api'
+import { parseRoute, type Route } from '../App'
+import { api, ApiError, Quote, SearchResult, SymbolSummary } from '../api'
+import { pageRoute } from '../urls'
 import { Bar, Chart } from '../components/Chart'
+import { Metrics, barRange } from '../components/Metrics'
 import { BrowserMiniIcon, ChartMiniIcon, NewsMiniIcon, PageMiniIcon } from '../components/icons'
 
 interface PageResult {
@@ -48,10 +50,13 @@ export function SearchPage({
   const [data, setData] = useState<PageResult | null>(null)
   const [page, setPage] = useState(1)
   const [bars, setBars] = useState<Bar[]>([])
+  const [quote, setQuote] = useState<Quote | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     setPage(1)
+    setBars([]) // never show the previous query's ticker under this one's name
+    setQuote(null)
   }, [query])
 
   const load = useCallback(async () => {
@@ -63,13 +68,24 @@ export function SearchPage({
       setData(d)
       setError(null)
       if (d.featured) {
+        // A year of bars for the 52-week range, the last quarter for the
+        // chart — a small card reads as noise at full-year density.
         const b = await api<{ bars: Bar[] }>(
           'GET',
-          `/api/symbols/${encodeURIComponent(d.featured.symbol)}/bars?timeframe=1Day&limit=90`
+          `/api/symbols/${encodeURIComponent(d.featured.symbol)}/bars?timeframe=1Day&limit=260`
         )
         setBars(b.bars)
+        // The quote is a separate call on purpose: bars come from the local
+        // store or a cached fetch, the quote is live, and a slow quote must
+        // not hold the chart hostage.
+        const s = await api<SymbolSummary>(
+          'GET',
+          `/api/symbols/${encodeURIComponent(d.featured.symbol)}/summary`
+        )
+        setQuote(s.quote)
       } else {
         setBars([])
+        setQuote(null)
       }
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e))
@@ -85,15 +101,14 @@ export function SearchPage({
     else if (r.type === 'news' && typeof r.id === 'number') {
       // Our own news has clean article text — read it in-app.
       onNavigate({ name: 'article', id: r.id })
+    } else if (r.type === 'page') {
+      const key = pageRoute(r.page ?? '')
+      if (key) onNavigate(parseRoute(key))
     } else if (r.url) {
       // A web result is a WEBSITE. Extracting it to plain text stripped the
       // layout that makes it make sense (a Wikipedia infobox became a wall
       // of pipes), so open the real page in a browser tab.
       window.grindstone.openUrl(r.url)
-    } else if (r.type === 'page') {
-      if (r.page === 'accounts' || r.page === 'data' || r.page === 'settings') {
-        onNavigate({ name: r.page })
-      }
     }
   }
 
@@ -126,10 +141,15 @@ export function SearchPage({
             <span className="featured-link">Open ticker page →</span>
           </div>
           {bars.length > 0 ? (
-            <Chart bars={bars} height={120} compact />
+            <Chart bars={bars.slice(-90)} height={120} compact />
           ) : (
             <div className="dim subtle">No chart data for this symbol yet.</div>
           )}
+          {/* A line with no numbers on it is decoration. */}
+          <Metrics
+            quote={quote}
+            range={barRange(bars, bars.length >= 200 ? '52-week range' : `${bars.length}-day range`)}
+          />
         </div>
       ) : null}
 
@@ -140,9 +160,9 @@ export function SearchPage({
           </h2>
           {data.inhouse.map((r, i) => (
             <div
-              className="result-row"
+              className={r.ready === false ? 'result-row dead' : 'result-row'}
               key={`in:${r.type}:${r.symbol ?? r.id ?? r.page}:${i}`}
-              onClick={() => open(r)}
+              onClick={() => r.ready !== false && open(r)}
             >
               <span className="result-ico">
                 <RowIcon r={r} />

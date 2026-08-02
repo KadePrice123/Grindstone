@@ -4,7 +4,11 @@ argon2-cffi==25.1.0
 cryptography==50.0.0
 httpx==0.28.1
 RapidFuzz==3.14.5
-yfinance>=1.5.2,<2.0
-curl_cffi==0.16.0
+# yfinance + curl_cffi were REMOVED 2026-08-02. The keyless market fallback
+# now calls Yahoo's chart endpoint over httpx directly: importing yfinance
+# pulled in pandas, cost ~8s, and held the GIL long enough to freeze the
+# whole sidecar (it hung sign-in once and tripped the data breaker once).
+# One documented JSON endpoint answers in ~0.5s and carries both the quote
+# and the OHLC series, so nothing was lost by dropping the pair.
 ddgs==9.14.4
 trafilatura>=2.2,<3.0

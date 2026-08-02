@@ -18,14 +18,21 @@ from .universe import Universe
 RRF_K = 60
 
 # The page registry — the same declarative seam extensions will use (6.11).
+# "ready" is what the UI keys off: an unbuilt page still answers a search (so
+# you can see it is coming) but must not look clickable, because clicking it
+# went nowhere at all.
 PAGES = [
-    {"key": "accounts", "title": "Accounts", "words": ["accounts", "brokers", "keys"]},
-    {"key": "apis", "title": "APIs", "words": ["apis", "api", "keys", "credentials"]},
-    {"key": "ai", "title": "AI", "words": ["ai", "assistant", "chat"]},
-    {"key": "positions", "title": "Positions", "words": ["positions", "portfolio", "pnl", "p&l"]},
-    {"key": "data", "title": "Data management", "words": ["data", "recording", "storage", "history"]},
+    {"key": "home", "title": "Home", "words": ["home", "start", "grindstone"], "ready": True},
+    {"key": "accounts", "title": "Accounts", "words": ["accounts", "account", "brokers", "keys"],
+     "ready": True},
+    {"key": "apis", "title": "APIs", "words": ["apis", "api", "credentials"], "ready": False},
+    {"key": "ai", "title": "AI", "words": ["ai", "assistant", "chat"], "ready": False},
+    {"key": "positions", "title": "Positions", "words": ["positions", "portfolio", "pnl", "p&l"],
+     "ready": False},
+    {"key": "data", "title": "Data management",
+     "words": ["data", "recording", "storage", "history"], "ready": True},
     {"key": "settings", "title": "Settings",
-     "words": ["settings", "preferences", "theme", "search", "web"]},
+     "words": ["settings", "setting", "preferences", "theme", "web"], "ready": True},
 ]
 
 NEWS_WORDS = {"news", "headlines", "articles", "article"}
@@ -48,7 +55,20 @@ def _news_row(it: dict[str, Any]) -> dict[str, Any]:
 
 
 def _page_row(p: dict[str, Any]) -> dict[str, Any]:
-    return {"type": "page", "page": p["key"], "title": p["title"], "subtitle": "Page"}
+    return {"type": "page", "page": p["key"], "title": p["title"],
+            "subtitle": "Page" if p.get("ready") else "Arrives in a later milestone",
+            "ready": bool(p.get("ready"))}
+
+
+def normalize(q: str) -> str:
+    """Strip a platform address down to what it is asking for, so typing
+    "settings.gs" searches for "settings" instead of for a literal string
+    nothing will ever match."""
+    q = (q or "").strip()
+    head = q.split()[0] if q else ""
+    if head.lower().endswith(".gs") and " " not in q:
+        return q[: len(head) - 3] + q[len(head):]
+    return q
 
 
 def _pages_match(q: str) -> list[dict[str, Any]]:
@@ -60,6 +80,35 @@ def _pages_match(q: str) -> list[dict[str, Any]]:
         if any(w.startswith(ql) or ql in w for w in p["words"]) or ql in p["title"].lower():
             out.append(_page_row(p))
     return out
+
+
+def _page_exact(q: str) -> tuple[dict[str, Any], bool] | None:
+    """The page a query names outright, and whether that claim is STRONG.
+
+    Fusion alone could not surface these at all: every retrieval list
+    contributes the same score at rank 0, so a page tied with a fuzzy ticker
+    and lost on insertion order — typing "settings" ranked a random symbol
+    above the Settings page.
+
+    Strong means the query IS the page's name and the page exists; that beats
+    even an exact ticker, because someone typing "data" on this platform
+    means the page, and the DATA ticker sits directly underneath. A synonym,
+    or a page we have announced but not built, is weak and ranks below the
+    instrument — we should not outrank a real symbol with a promise.
+    """
+    ql = q.lower().strip()
+    if not ql:
+        return None
+    for p in PAGES:
+        named = ql == p["key"] or ql == p["title"].lower()
+        if named or ql in p["words"]:
+            return _page_row(p), bool(named and p.get("ready"))
+    return None
+
+
+def _pin(fused: list[dict[str, Any]], pins: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    keys = {_key(r) for r in pins}
+    return pins + [r for r in fused if _key(r) not in keys]
 
 
 def _key(r: dict[str, Any]) -> str:
@@ -101,7 +150,7 @@ def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
     """Full results page (the Google-style landing when you press Enter
     without picking a suggestion). Same retrieval as the dropdown, but deep:
     symbols fused with a wider news sweep, then paginated."""
-    q = (q or "").strip()
+    q = normalize(q)
     per_page = max(1, min(per_page, 50))
     page_no = max(1, page_no)
     if not q:
@@ -173,7 +222,18 @@ def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
             term = f"{subject} stock news" if (scope or featured) else q
             web += [_web_row(r) for r in websearch.web_news(term, limit=10, backend=engine)]
 
-    inhouse = _rrf([symbols, news, _pages_match(q)])
+    # Same pinning rule as the dropdown — a query that names a page must not
+    # have to out-rank fourteen thousand tickers to appear.
+    hit = _page_exact(q)
+    exact_sym = uni.exact(q)
+    pins: list[dict[str, Any]] = []
+    if hit is not None and hit[1]:
+        pins.append(hit[0])
+    if exact_sym is not None:
+        pins.append(_sym_row(exact_sym))
+    if hit is not None and not hit[1]:
+        pins.append(hit[0])
+    inhouse = _pin(_rrf([symbols, news, _pages_match(q)]), pins)
 
     # Two sections, kept strictly separate. An earlier version fused the
     # leftover platform rows into the second section, and since platform rows
@@ -205,7 +265,7 @@ def query(q: str, uni: Universe, con: sqlite3.Connection,
     live_news: optional callable(symbol) -> list[news items]; consulted when a
     symbol-news intent finds nothing locally (FR-SEARCH-4's live fallthrough —
     the rolling store is only as fresh as the last backfill)."""
-    q = (q or "").strip()
+    q = normalize(q)
     if not q:
         return {"results": [], "intent": None}
 
@@ -245,10 +305,15 @@ def query(q: str, uni: Universe, con: sqlite3.Connection,
     web_rows = [_web_row(r) for r in (web(q) if web else [])]
     fused = _rrf_weighted([(_rrf([prefix, fuzzy, news, pages]), 2.0), (web_rows, 1.0)])
 
-    # exact ticker always pins first
+    # Named destinations pin to the top: a page that owns the name, then the
+    # exact ticker, then a weaker page claim.
+    hit = _page_exact(q)
+    pins: list[dict[str, Any]] = []
+    if hit is not None and hit[1]:
+        pins.append(hit[0])
     if exact:
-        row = _sym_row(exact)
-        fused = [row] + [r for r in fused
-                         if not (r["type"] == "symbol" and r.get("symbol") == exact["symbol"])]
+        pins.append(_sym_row(exact))
+    if hit is not None and not hit[1]:
+        pins.append(hit[0])
 
-    return {"results": fused[:limit], "intent": intent}
+    return {"results": _pin(fused, pins)[:limit], "intent": intent}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError, SymbolSummary } from '../api'
 import { Bar, Chart, IndicatorKey } from '../components/Chart'
+import { Metrics, barRange } from '../components/Metrics'
 import { ChartMiniIcon } from '../components/icons'
 
 const TIMEFRAMES: { key: string; label: string }[] = [
@@ -18,10 +19,6 @@ const INDICATORS: { key: IndicatorKey; label: string }[] = [
   { key: 'ema20', label: 'EMA 20' },
   { key: 'rsi14', label: 'RSI 14' },
 ]
-
-function fmt(n: number | null | undefined, dp = 2): string {
-  return n == null ? '—' : n.toLocaleString(undefined, { maximumFractionDigits: dp })
-}
 
 function age(iso: string): string {
   const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000)
@@ -43,6 +40,7 @@ export function SymbolPage({
   const [barNote, setBarNote] = useState<string>('')
   const [timeframe, setTimeframe] = useState('1Day')
   const [indicators, setIndicators] = useState<IndicatorKey[]>(['vol'])
+  const [yearBars, setYearBars] = useState<Bar[]>([])
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -91,11 +89,24 @@ export function SymbolPage({
     loadBars()
   }, [loadBars])
 
+  // The 52-week range is a property of the instrument, not of the timeframe
+  // you happen to be looking at — so it is its own daily series, fetched once
+  // per symbol rather than recomputed every time you switch to 5m.
+  useEffect(() => {
+    let stop = false
+    setYearBars([])
+    api<{ bars: Bar[] }>('GET', `/api/symbols/${encodeURIComponent(symbol)}/bars?timeframe=1Day&limit=260`)
+      .then((b) => !stop && setYearBars(b.bars))
+      .catch(() => undefined) // the range is a nicety; its absence is not an error
+    return () => {
+      stop = true
+    }
+  }, [symbol])
+
   const toggle = (k: IndicatorKey) =>
     setIndicators((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]))
 
   const q = data?.quote
-  const up = (q?.change ?? 0) >= 0
 
   return (
     <div className="page wide">
@@ -103,20 +114,16 @@ export function SymbolPage({
         <ChartMiniIcon />
         <h1>{symbol}</h1>
         <span className="dim">{data?.name}</span>
-        {q?.available ? (
-          <span className="quote-inline">
-            <span className="quote-price sm">{fmt(q.price)}</span>
-            <span className={up ? 'quote-change up' : 'quote-change down'}>
-              {q.change != null ? `${up ? '+' : ''}${fmt(q.change)} (${fmt(q.change_pct)}%)` : ''}
-            </span>
-            <span className="omni-tag">{q.source}</span>
-          </span>
-        ) : (
-          <span className="subtle">{q?.reason ?? ''}</span>
-        )}
       </div>
 
       {error ? <div className="test-result bad">{error}</div> : null}
+
+      <div className="card">
+        <Metrics
+          quote={q}
+          range={barRange(yearBars, yearBars.length >= 200 ? '52-week range' : `${yearBars.length}-day range`)}
+        />
+      </div>
 
       <div className="card chart-card">
         <div className="chart-toolbar">

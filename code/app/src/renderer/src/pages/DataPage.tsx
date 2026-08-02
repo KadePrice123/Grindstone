@@ -24,7 +24,7 @@ function bytes(n: number): string {
   return `${(n / 1024).toFixed(0)} KB`
 }
 
-export function DataPage({ onBack }: { onBack: () => void }) {
+export function DataPage() {
   const [jobs, setJobs] = useState<RecordJob[] | null>(null)
   const [usage, setUsage] = useState<DataUsage | null>(null)
   const [form, setForm] = useState({ ...EMPTY })
@@ -95,9 +95,6 @@ export function DataPage({ onBack }: { onBack: () => void }) {
   return (
     <div className="page">
       <div className="page-head">
-        <button className="back" onClick={onBack} title="Back">
-          ←
-        </button>
         <DataIcon />
         <h1>Data management</h1>
         {usage ? <span className="dim">store: {bytes(usage.db_bytes)}</span> : null}

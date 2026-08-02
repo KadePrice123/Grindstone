@@ -2,8 +2,8 @@ import { api, SearchResult } from '../api'
 import { Logo } from '../components/Logo'
 import { Omnibox } from '../components/Omnibox'
 import { AccountsIcon, AiIcon, ApisIcon, DataIcon, PositionsIcon } from '../components/icons'
-import { asUrl } from '../urls'
-import type { Route } from '../App'
+import { classify, pageRoute } from '../urls'
+import { parseRoute, type Route } from '../App'
 
 const FAVORITES: {
   key: string
@@ -32,18 +32,26 @@ export function Idle({
     } else if ((r.type === 'web' || r.type === 'web-news') && r.url) {
       window.grindstone.openUrl(r.url) // the web: the actual site
     } else if (r.type === 'page') {
-      if (r.page === 'accounts') onNavigate({ name: 'accounts' })
-      else if (r.page === 'data') onNavigate({ name: 'data' })
+      const key = pageRoute(r.page ?? '')
+      if (key) onNavigate(parseRoute(key))
     }
   }
 
-  /** Enter with nothing selected, in browser-bar order:
-   *  a real address navigates, a bare ticker opens its page, else search. */
+  /** Enter with nothing selected, in browser-bar order: a real address
+   *  navigates, a platform address (settings.gs, or just "settings")
+   *  navigates, a bare ticker opens its page, else search.
+   *
+   *  This box and the chrome omnibox share classify() so that the same text
+   *  cannot mean two different things depending on where it was typed. */
   const submit = async (query: string) => {
     const q = query.trim()
-    const url = asUrl(q)
-    if (url) {
-      window.grindstone.openUrl(url)
+    const dest = classify(q)
+    if (dest.kind === 'url') {
+      window.grindstone.openUrl(dest.url)
+      return
+    }
+    if (dest.kind === 'route') {
+      onNavigate(parseRoute(dest.route))
       return
     }
     try {

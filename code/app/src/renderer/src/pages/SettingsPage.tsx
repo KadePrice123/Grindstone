@@ -24,7 +24,7 @@ interface SettingsPayload {
   web?: { installed: boolean; available: boolean }
 }
 
-export function SettingsPage({ onBack }: { onBack: () => void }) {
+export function SettingsPage() {
   const [data, setData] = useState<SettingsPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -61,9 +61,6 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
   return (
     <div className="page">
       <div className="page-head">
-        <button className="back" onClick={onBack} title="Back">
-          ←
-        </button>
         <SettingsIcon />
         <h1>Settings</h1>
         {saving ? <span className="subtle">saving…</span> : null}

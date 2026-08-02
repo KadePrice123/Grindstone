@@ -48,10 +48,13 @@ def alpaca_creds_for(db: sqlite3.Connection, user_id: int, dek: bytes) -> dict[s
 def quote_for(symbol: str, asset_class: str,
               creds: dict[str, str] | None) -> dict[str, Any]:
     """One quote, honestly labeled with its source. Never raises."""
-    if asset_class in ("index", "future"):
+    if asset_class == "future":
         return {"symbol": symbol, "available": False,
-                "reason": f"no connected source carries {asset_class} quotes yet"}
-    if creds is not None:
+                "reason": "no connected source carries futures quotes yet"}
+    # Alpaca has no index feed, but the keyless fallback does (verified
+    # 2026-08-02: SPX/NDX/VIX/XSP all answer), so an index skips straight to
+    # it rather than burning a request that can only fail.
+    if asset_class != "index" and creds is not None:
         try:
             q = AlpacaData(creds["key_id"], creds["secret_key"]).stock_snapshot(symbol)
             return {**q, "available": q.get("price") is not None,
@@ -80,6 +83,7 @@ def provider_status(has_alpaca: bool) -> dict[str, Any]:
         "options_chains": "alpaca (indicative)" if has_alpaca else "none",
         "news": "alpaca (Benzinga)" if has_alpaca else "none",
         "futures": "none — arrives with the TastyTrade adapter",
-        "index": "none — arrives with the TastyTrade adapter",
+        "index": "yahoo (delayed)" if YahooProvider is not None else
+                 "none — arrives with the TastyTrade adapter",
         "yahoo_fallback": YahooProvider is not None,
     }

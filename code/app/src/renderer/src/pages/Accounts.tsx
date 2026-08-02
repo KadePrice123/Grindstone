@@ -4,7 +4,7 @@ import { AccountsIcon } from '../components/icons'
 
 const EMPTY_FORM = { kind: 'paper', nickname: '', key_id: '', secret_key: '' }
 
-export function Accounts({ onBack }: { onBack: () => void }) {
+export function Accounts() {
   const [rows, setRows] = useState<AccountRow[] | null>(null)
   const [form, setForm] = useState({ ...EMPTY_FORM })
   const [test, setTest] = useState<TestResult | null>(null)
@@ -92,9 +92,6 @@ export function Accounts({ onBack }: { onBack: () => void }) {
   return (
     <div className="page">
       <div className="page-head">
-        <button className="back" onClick={onBack} title="Back">
-          ←
-        </button>
         <AccountsIcon />
         <h1>Accounts</h1>
       </div>

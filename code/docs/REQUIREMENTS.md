@@ -158,9 +158,28 @@ Decided in §6; summarized here so the requirements below have a spine:
   reason until a source exists (§6.9). *(Delivered early with the search
   milestone.)*
 - **FR-DATA-6 Keyless fallback.** Users without any data API still get
-  delayed quotes and daily history via Yahoo Finance (yfinance, pinned, own
-  throttle, personal-use terms), always labeled *delayed* and never used to
-  price orders. Provider policy per instrument: §6.9.
+  delayed quotes and daily history from Yahoo Finance, always labeled
+  *delayed* and never used to price orders. Provider policy per instrument:
+  §6.9. Also covers **index** quotes (SPX/NDX/VIX/XSP), which no connected
+  broker feed carries.
+
+  *Implementation revised 2026-08-02, twice measured.* This was specified as
+  yfinance (pinned, with curl_cffi). Both dependencies are now **removed**:
+  importing yfinance pulls in pandas, costs ~8s, and holds the GIL for most
+  of it, which in a single-process sidecar freezes the entire backend. Eagerly
+  that hung sign-in; deferred to the request path it blew three concurrent
+  chart requests past their deadline and opened the provider's circuit
+  breaker for five minutes, so a fresh install showed *no data source
+  available* for every symbol while the same code worked from a shell. The
+  provider now calls Yahoo's chart endpoint directly over httpx: ~0.5s, no
+  key, no cookie, and the quote metadata and OHLC series arrive in one
+  response. Verified end-to-end by the e2e check *"a profile with no broker
+  account still gets market data"*.
+
+  **A second keyless source is still wanted** — Yahoo is unofficial and
+  intermittent. Google Finance via Google Sheets (`GOOGLEFINANCE`) is the
+  candidate on the table; it needs Google OAuth, so it lands with the Google
+  integration (§4.11 extensions), not before. Open decision §12.
 
 ### 4.4 Browser-style shell
 
@@ -874,3 +893,16 @@ to Releases.
 9. **Public repo cadence:** the repo is public — confirm that pushing at every
    major milestone (vs. only at releases) is wanted, since research docs and
    in-progress code become public the moment they land.
+10. **Second keyless data source (Kade's ask, 2026-08-02: "yahoo has been very
+    off and on").** Yahoo's chart endpoint is unofficial and can change or
+    rate-limit without notice, so a second free source is worth having.
+    Google Finance via Google Sheets (`GOOGLEFINANCE`) is the proposal:
+    genuine coverage, but it needs a Google account and OAuth, a scratch
+    spreadsheet to evaluate formulas in, and a round-trip per lookup (~1–2s,
+    versus ~0.5s direct) — and it cannot serve options or true real-time. It
+    therefore belongs **with the Google integration** (§4.11), where the OAuth
+    cost is already being paid, rather than as a standalone provider. Decide
+    then whether it is the second source or whether a keyed vendor free tier
+    (Finnhub/Tiingo/Alpha Vantage) is the better second leg. The provider
+    seam (`backend/market.py: quote_for`) already selects per instrument, so
+    adding a leg is local.

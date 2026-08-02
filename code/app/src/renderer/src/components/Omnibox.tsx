@@ -87,7 +87,9 @@ export function Omnibox({
   }
 
   const choose = (r: SearchResult | undefined) => {
-    if (!r) return
+    // A page we have announced but not built is worth seeing and not worth
+    // clicking — selecting it used to close the dropdown and do nothing.
+    if (!r || r.ready === false) return
     setOpen(false)
     onOpen(r)
   }
@@ -157,7 +159,7 @@ export function Omnibox({
           {results.map((r, i) => (
             <div
               key={`${r.type}:${r.symbol ?? r.id ?? r.page ?? r.action}:${i}`}
-              className={`omni-row${i === sel ? ' selected' : ''}`}
+              className={`omni-row${i === sel ? ' selected' : ''}${r.ready === false ? ' dead' : ''}`}
               onMouseEnter={() => {
                 moved.current = true
                 setSel(i)
