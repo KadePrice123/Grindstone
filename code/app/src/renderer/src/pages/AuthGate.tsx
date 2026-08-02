@@ -32,7 +32,15 @@ export function AuthGate({
     setBusy(true)
     try {
       const path = creating ? '/api/auth/setup' : '/api/auth/login'
-      const res = await api<{ username: string }>('POST', path, { username, password })
+      // Belt and braces: the user must never be left staring at a dead
+      // button if the reply is lost (it was — the shell used to tear this
+      // frame down mid-request while unlocking).
+      const res = await Promise.race([
+        api<{ username: string }>('POST', path, { username, password }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Sign-in timed out — please try again')), 20000)
+        ),
+      ])
       onSignedIn(res.username)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -41,7 +49,13 @@ export function AuthGate({
         onRecheck()
         return
       }
-      setError(err instanceof ApiError ? err.message : String(err))
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : String(err)
+      )
     } finally {
       setBusy(false)
     }

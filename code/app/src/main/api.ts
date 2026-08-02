@@ -25,7 +25,14 @@ function setToken(t: string | null): void {
   const was = sessionToken !== null
   sessionToken = t
   const is = sessionToken !== null
-  if (was !== is) notifyAuth?.(is)
+  if (was === is) return
+  // DEFERRED ON PURPOSE. The auth screen lives in the window's chrome view,
+  // and unlocking reloads that very view into tab mode. Doing it inline
+  // destroyed the frame that was still awaiting this request's reply, so the
+  // login promise never settled and the button span "Working…" forever.
+  // Let the response reach the renderer first, then change the world.
+  const next = is
+  setImmediate(() => notifyAuth?.(next))
 }
 
 function frameIsOurs(frame: WebFrameMain | null): boolean {

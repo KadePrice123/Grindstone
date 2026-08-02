@@ -127,17 +127,55 @@ try {
   check(login.includes('401'), 'proxy: query-string path still routes to the backend', login.slice(0, 60))
 
   // ----------------------------------------------------------------- tabs
-  const setup = await auth.eval(
-    `window.grindstone.request('POST','/api/auth/setup',{username:'e2e',password:'e2e-password-1'}).then(r=>JSON.stringify(r))`
-  )
-  check(setup.includes('"status":200'), 'auth: first-run setup succeeds')
+  // The login REPLY must reach the renderer. Unlocking reloads the very view
+  // that is awaiting it, and doing that inline killed the promise — the
+  // button span "Working…" forever with no error anywhere (reported live).
+  const setup = await Promise.race([
+    auth.eval(
+      `window.grindstone.request('POST','/api/auth/setup',{username:'e2e',password:'e2e-password-1'}).then(r=>JSON.stringify(r))`
+    ),
+    sleep(15000).then(() => null),
+  ])
+  check(setup !== null, 'auth: the sign-in reply reaches the renderer (never hangs)')
+  check(!!setup && setup.includes('"status":200'), 'auth: first-run setup succeeds')
   await sleep(2500)
 
   const chromeTarget = await waitFor(
     async () => (await targets()).find((t) => t.url.includes('mode=chrome')),
     'the tab strip'
   )
-  const chromeA = await connect(chromeTarget)
+  let chromeA = await connect(chromeTarget)
+
+  // Now the returning-user path: lock, then sign in again. First-run setup
+  // and login take different branches, and only login was broken in the
+  // field, so both must be exercised.
+  await chromeA.eval(`window.grindstone.request('POST','/api/auth/lock')`)
+  const relock = await waitFor(
+    async () => (await targets()).find((t) => t.url.includes('mode=auth')),
+    'the lock screen after locking'
+  )
+  const auth2 = await connect(relock)
+  await sleep(800)
+  const relogin = await Promise.race([
+    auth2.eval(
+      `window.grindstone.request('POST','/api/auth/login',{username:'e2e',password:'e2e-password-1'}).then(r=>JSON.stringify(r))`
+    ),
+    sleep(15000).then(() => null),
+  ])
+  check(relogin !== null, 'auth: a returning user’s login reply also reaches the renderer')
+  check(
+    !!relogin && relogin.includes('"status":200'),
+    'auth: login succeeds',
+    String(relogin).slice(0, 60)
+  )
+  const backToTabs = await waitFor(
+    async () => (await targets()).find((t) => t.url.includes('mode=chrome')),
+    'the tab strip after login'
+  ).catch(() => null)
+  check(!!backToTabs, 'auth: signing in returns you to the tab UI')
+  // Re-point at the post-login strip: unlocking reloads the chrome view, so
+  // the old connection refers to a page that no longer exists.
+  if (backToTabs) chromeA = await connect(backToTabs)
   let state = await chromeA.eval('window.grindstoneTabs.getState()')
   check(state?.tabs?.length === 1, 'tabs: unlocking opens one tab', `got ${state?.tabs?.length}`)
 
