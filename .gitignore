@@ -1,0 +1,37 @@
+# Secrets and bulk data — whole folders, anchored to the repo root. The leading
+# slash matters: a bare `data/` would also match nested code dirs.
+/env/
+/data/
+
+# Belt and braces.
+*.env
+!.env.example
+*.db
+*.db-journal
+*.npz
+*.csv.gz
+*.parquet
+
+# Virtualenvs live in Claude/venvs/, but block them anyway.
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Saved sessions (tools/savesession.py). COMMIT the summaries — ~12 KB each,
+# readable and diffable, the part worth keeping in history. Skip the
+# conversations: ~5 MB per session, and Google Drive backs them up anyway.
+context/*/raw.jsonl.orig
+context/*/convo.jsonl.conv
+context/*/digest.txt
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
