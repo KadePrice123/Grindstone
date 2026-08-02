@@ -90,26 +90,23 @@ def main() -> int:
     state.recorder = Recorder(connect_market(), state.creds_for)
     state.recorder.start()
 
-    # Warm the keyless fallback's heavy import (pandas + curl_cffi is several
-    # seconds cold) off the request path — otherwise the first chart request
-    # on an account-less profile pays it and trips the call timeout.
-    #
-    # DELAYED ON PURPOSE. Importing yfinance from a thread during startup
-    # deadlocked the sidecar against the main thread's own imports: it bound
-    # its socket, logged "starting", and then never reached server.run(), so
-    # every request hung on a connection the OS had already accepted. Waiting
-    # until the server is serving costs nothing and removes the interleaving.
-    def _warm() -> None:
-        time.sleep(8)
-        try:
-            import yfinance  # noqa: F401
-            LOG.info("yahoo fallback warmed")
-        except Exception:  # noqa: BLE001 — optional dependency
-            LOG.info("yahoo fallback unavailable", exc_info=True)
+    # NO EAGER WARMUP OF yfinance. Tempting — a cold pandas + curl_cffi
+    # import costs seconds on the first chart request — but importing it
+    # in-process FROZE THE WHOLE SERVER: a heavy import holds the GIL and the
+    # import lock, so every in-flight request stalls for the duration. This
+    # is what made sign-in hang for a real user roughly ten seconds after
+    # launch (exactly how long it takes to type a password), and it cost
+    # three rounds of wrong diagnoses. The provider already imports lazily
+    # inside a bounded worker with a circuit breaker; let it pay the cost
+    # where it can only slow one request instead of all of them.
 
-    threading.Thread(target=_warm, daemon=True, name="yahoo-warmup").start()
-
-    config = uvicorn.Config(app, log_level="warning", access_log=False)
+    # Defence in depth for the keep-alive race that broke sign-in: uvicorn's
+    # default idle timeout is 5s, which is shorter than a human pausing to
+    # type a password. The shell no longer pools connections, so this cannot
+    # bite again — but a 5s window on a local-only server buys nothing, and
+    # any future client that DOES pool deserves better odds.
+    config = uvicorn.Config(app, log_level="warning", access_log=False,
+                            timeout_keep_alive=120)
     server = uvicorn.Server(config)
     try:
         server.run(sockets=[sock])

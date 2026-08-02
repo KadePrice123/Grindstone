@@ -334,12 +334,20 @@ def _ipc_invariants():
     assert "AUTH_CLEAR_PATHS.has(route)" in src
     # Query strings must be FORWARDED, not rejected: rejecting them killed
     # /api/search?q=... in production while every test bypassed the proxy
-    # (2026-08-02). The fetch must carry pathname + search.
-    assert "url.pathname}${url.search}" in src, \
+    # (2026-08-02). The request must carry pathname + search.
+    assert "url.pathname + url.search" in src, \
         "proxy does not forward query strings — omnibox search cannot work"
+    # Connection pooling is banned here: undici pooling plus uvicorn's idle
+    # close made requests vanish. Fresh connection per request (2026-08-02).
+    assert "agent: false" in src, \
+        "proxy must not pool connections to the sidecar"
     assert "url.pathname + url.search !== path" in src, \
         "non-canonical paths are no longer rejected"
-    assert "redirect: 'error'" in src, "a 307 could silently change the routed path"
+    # Redirects must never be followed (a 307 could silently change which
+    # route runs). node:http does not auto-follow, which is one reason it
+    # replaced fetch here; assert we are still on it.
+    assert "node:http" in src and "http.request(" in src, \
+        "proxy no longer uses node:http — redirects may be auto-followed"
     # Scrubbing must be unconditional, not an allowlist of known routes.
     assert "function scrub(" in src and "scrub(payload)" in src, \
         "response bodies are not token-scrubbed by default"

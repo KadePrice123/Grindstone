@@ -148,6 +148,12 @@ try {
     return 'submitted'
   })()`
 
+  // REGRESSION: sign-in hung for a real user because the proxy pooled
+  // connections and uvicorn closed idle ones after ~5s — the exact gap a
+  // human leaves while typing a password. Idle here on purpose before
+  // submitting, so a pooled-connection bug cannot hide behind fast tests.
+  await sleep(9000)
+
   const submitted = await auth.eval(fillAndSubmit('e2e-password-1'))
   check(submitted === 'submitted', 'auth: the sign-in form submits', String(submitted))
 

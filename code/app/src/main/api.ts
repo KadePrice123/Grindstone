@@ -12,7 +12,64 @@
  *     token-returning route therefore cannot leak by omission.
  */
 import { ipcMain, WebFrameMain } from 'electron'
+import http from 'node:http'
+import { log } from './log'
 import type { Sidecar } from './sidecar'
+
+/**
+ * Talk to the sidecar over node:http with pooling DISABLED (agent: false).
+ *
+ * We used fetch() and it hung — reproducibly for a user, invisibly in tests.
+ * Root cause: undici keeps connections alive, uvicorn closes idle ones after
+ * ~5s, and a request sent down a socket the server is simultaneously closing
+ * is simply lost. undici does not retry non-idempotent methods, so the POST
+ * never settled. GETs hid it because the boot poller kept a connection warm;
+ * the failure appeared exactly when a human paused to type a password.
+ *
+ * A fresh connection per request costs microseconds on loopback and removes
+ * the entire class of bug. Every request also carries a hard deadline, so
+ * "hangs forever" is not a reachable state.
+ */
+const REQUEST_TIMEOUT_MS = 30_000
+
+interface RawResponse {
+  status: number
+  text: string
+}
+
+function request(
+  port: number,
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  payload: string | null
+): Promise<RawResponse> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method,
+        agent: false, // no keep-alive pool: see the note above
+        headers: payload
+          ? { ...headers, 'Content-Length': Buffer.byteLength(payload) }
+          : headers,
+        timeout: REQUEST_TIMEOUT_MS,
+      },
+      (res) => {
+        let data = ''
+        res.setEncoding('utf-8')
+        res.on('data', (c) => (data += c))
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, text: data }))
+      }
+    )
+    req.on('timeout', () => req.destroy(new Error(`timed out after ${REQUEST_TIMEOUT_MS}ms`)))
+    req.on('error', reject)
+    if (payload) req.write(payload)
+    req.end()
+  })
+}
 
 const AUTH_CAPTURE_PATHS = new Set(['/api/auth/login', '/api/auth/setup'])
 const AUTH_CLEAR_PATHS = new Set(['/api/auth/logout', '/api/auth/lock'])
@@ -72,13 +129,15 @@ export function registerApiBridge(
 ): void {
   notifyAuth = onAuthChange ?? null
   ipcMain.handle('api:request', async (event, req: unknown) => {
-    if (!frameIsOurs(event.senderFrame)) {
-      return { status: 403, body: { detail: 'unknown sender' } }
-    }
     const { method, path, body } = (req ?? {}) as {
       method?: string
       path?: string
       body?: unknown
+    }
+    log('proxy IN', method, path)
+    if (!frameIsOurs(event.senderFrame)) {
+      log('proxy REJECT unknown sender', method, path)
+      return { status: 403, body: { detail: 'unknown sender' } }
     }
     const m = (method ?? 'GET').toUpperCase()
     if (!ALLOWED_METHODS.has(m)) {
@@ -116,27 +175,32 @@ export function registerApiBridge(
     if (sessionToken) headers['Authorization'] = `Bearer ${sessionToken}`
     if (body !== undefined) headers['Content-Type'] = 'application/json'
 
-    let res: Response
+    const started = Date.now()
+    let res: RawResponse
     try {
-      res = await fetch(`http://127.0.0.1:${state.port}${url.pathname}${url.search}`, {
-        method: m,
+      const target = url.pathname + url.search
+      res = await request(
+        state.port,
+        m,
+        target,
         headers,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        // A server-side redirect must never silently move us to another route.
-        redirect: 'error',
-      })
+        body !== undefined ? JSON.stringify(body) : null
+      )
     } catch (e) {
+      log('proxy: request FAILED', m, route, String(e).slice(0, 200))
       return { status: 502, body: { detail: `backend unreachable: ${String(e)}` } }
     }
 
     let payload: unknown = null
     try {
-      payload = await res.json()
-    } catch {
+      payload = res.text ? JSON.parse(res.text) : null
+    } catch (e) {
+      log('proxy: response body was not JSON', route, String(e).slice(0, 120))
       payload = null
     }
+    log('proxy', m, route, '->', res.status, `${Date.now() - started}ms`)
 
-    if (res.ok && AUTH_CAPTURE_PATHS.has(route)) {
+    if (res.status >= 200 && res.status < 300 && AUTH_CAPTURE_PATHS.has(route)) {
       const t = (payload as { token?: string } | null)?.token
       if (typeof t === 'string' && t) setToken(t)
     }
