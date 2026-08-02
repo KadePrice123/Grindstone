@@ -12,7 +12,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 function Need($cmd, $hint) {
   try { Get-Command $cmd -ErrorAction Stop | Out-Null }
-  catch { Write-Host "MISSING: $cmd — $hint" -ForegroundColor Red; exit 1 }
+  catch { Write-Host "MISSING: $cmd - $hint" -ForegroundColor Red; exit 1 }
 }
 Need python 'install Python 3.12+ from python.org or the Microsoft Store'
 Need npm    'install Node.js 20+ (LTS) from nodejs.org'
@@ -37,13 +37,13 @@ $npmOk = $?
 Pop-Location
 if (-not $npmOk) { Write-Host 'npm install failed' -ForegroundColor Red; exit 1 }
 
-# 3. The offline verification gate — proves the install is complete.
+# 3. The offline verification gate - proves the install is complete.
 Push-Location "$here\code"
 & "$here\.venv\Scripts\python.exe" selftest.py
 $gateOk = $?
 Pop-Location
 if (-not $gateOk) {
-  Write-Host 'The verification gate FAILED — see the FAIL lines above.' -ForegroundColor Red
+  Write-Host 'The verification gate FAILED - see the FAIL lines above.' -ForegroundColor Red
   exit 1
 }
 
