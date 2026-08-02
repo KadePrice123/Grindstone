@@ -2,6 +2,7 @@ import { api, SearchResult } from '../api'
 import { Logo } from '../components/Logo'
 import { Omnibox } from '../components/Omnibox'
 import { AccountsIcon, AiIcon, ApisIcon, DataIcon, PositionsIcon } from '../components/icons'
+import { asUrl } from '../urls'
 import type { Route } from '../App'
 
 const FAVORITES: {
@@ -36,10 +37,15 @@ export function Idle({
     }
   }
 
-  /** Enter with nothing selected: a bare ticker behaves like a URL and goes
-   *  straight to its page; anything else lands on the results page. */
+  /** Enter with nothing selected, in browser-bar order:
+   *  a real address navigates, a bare ticker opens its page, else search. */
   const submit = async (query: string) => {
     const q = query.trim()
+    const url = asUrl(q)
+    if (url) {
+      window.grindstone.openUrl(url)
+      return
+    }
     try {
       const res = await api<{ results: SearchResult[] }>(
         'GET',

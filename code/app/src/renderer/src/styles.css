@@ -651,6 +651,17 @@ input {
   color: var(--accent);
   font-size: 12.5px;
 }
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px !important;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-weight: 600 !important;
+  margin-bottom: 10px !important;
+}
 .result-row {
   display: flex;
   gap: 12px;

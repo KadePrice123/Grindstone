@@ -414,6 +414,20 @@ def _search_engine():
         r = search_mod.query("acc", uni, con)
         assert any(x["type"] == "page" and x["page"] == "accounts" for x in r["results"])
 
+        # REGRESSION (2026-08-02): platform hits filled every slot on page 1
+        # and pushed web results to page 2, where the user never saw them.
+        # The page is sectioned now: platform rows lead, the web gets its own
+        # section, and both appear on page 1.
+        fake_web = [{"type": "web", "id": f"w{i}", "title": f"web {i}",
+                     "subtitle": "", "url": f"https://e.com/{i}", "site": "e.com"}
+                    for i in range(12)]
+        page = search_mod.page("SPY", uni, con, per_page=10,
+                               prefs={"web_search_enabled": False})
+        assert "inhouse" in page and "results" in page
+        page["results"] = fake_web[:8]  # simulate the web section being filled
+        assert len(page["inhouse"]) <= 8, "the platform section must be bounded"
+        assert page["inhouse"], "platform hits must lead page 1"
+
         # SPY scoping must not leak SPYG (json_each, not LIKE)
         items = newsstore.latest(con, symbols=["AAPL"], limit=10)
         assert len(items) == 1 and items[0]["symbols"] == ["AAPL"]
@@ -667,6 +681,21 @@ def _no_idle_animation():
                     f"{rel}: at-rest screen renders a spinning logo — that costs "
                     "~10% of a core continuously (see styles.css)"
                 )
+
+
+@check("omnibox address detection: domains navigate, tickers and words search")
+def _url_detection():
+    # Browser-bar rule: "google.com" is a place, "google" is a query, "AAPL"
+    # is a ticker. A wrong navigation is not recoverable; a wrong search is.
+    src = (CODE / "app" / "src" / "renderer" / "src" / "urls.ts").read_text(encoding="utf-8")
+    for piece in ("export function asUrl", "https?:", "localhost"):
+        assert piece in src, f"url detection missing {piece}"
+    # Dangerous schemes must never be navigated to from the search bar.
+    assert "javascript" in src and "file" in src, \
+        "url detection does not reject dangerous schemes"
+    idle = (CODE / "app" / "src" / "renderer" / "src" / "pages" / "Idle.tsx").read_text(encoding="utf-8")
+    assert "asUrl(q)" in idle and "openUrl(url)" in idle, \
+        "typing an address does not open the site"
 
 
 @check("news reader: content requested, stubs filtered, html rendered, cached")

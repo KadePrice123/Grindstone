@@ -15,6 +15,7 @@ interface PageResult {
   page: number
   pages: number
   total: number
+  inhouse: SearchResult[]
   results: SearchResult[]
   featured: { symbol: string; name: string; asset_class: string } | null
   web?: { used: boolean; installed: boolean; available: boolean }
@@ -128,11 +129,50 @@ export function SearchPage({
         </div>
       ) : null}
 
+      {data && data.inhouse.length > 0 ? (
+        <div className="card">
+          <h2 className="section-head">
+            Tickers &amp; news <span className="src-tag in">Grindstone</span>
+          </h2>
+          {data.inhouse.map((r, i) => (
+            <div
+              className="result-row"
+              key={`in:${r.type}:${r.symbol ?? r.id ?? r.page}:${i}`}
+              onClick={() => open(r)}
+            >
+              <span className="result-ico">
+                <RowIcon r={r} />
+              </span>
+              <div className="result-body">
+                <div className="result-title">{r.title}</div>
+                <div className="subtle">
+                  {r.subtitle}
+                  {r.created_at ? ` · ${age(r.created_at)}` : ''}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       <div className="card">
+        {data && data.inhouse.length > 0 && data.results.length > 0 ? (
+          <h2 className="section-head">
+            From the web
+            {data.web?.available === false ? (
+              <span className="subtle"> · search unavailable right now</span>
+            ) : null}
+          </h2>
+        ) : null}
         {data == null ? (
           <div className="dim">Loading…</div>
-        ) : data.results.length === 0 ? (
+        ) : data.results.length === 0 && data.inhouse.length === 0 ? (
           <div className="dim">Nothing matched “{query}”.</div>
+        ) : data.results.length === 0 ? (
+          <div className="dim">
+            No web results
+            {data.web?.installed === false ? ' — web search is not installed.' : '.'}
+          </div>
         ) : (
           data.results.map((r, i) => (
             <div

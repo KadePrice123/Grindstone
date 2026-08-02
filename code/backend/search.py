@@ -121,6 +121,17 @@ def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
             if hit:
                 featured = hit
                 break
+    if featured is None and len(tokens) == 1 and len(q) >= 4:
+        # A company name usually implies a ticker: "google" should chart
+        # GOOGL. SINGLE-TOKEN ONLY — measured on the real 14k universe,
+        # multi-word queries score just as high on nonsense ("tesla earnings"
+        # -> ZECP 86, "best index funds" -> BOBP 86) as single names do on
+        # the right answer (GOOGL 82, TSLA/AAPL/AMZN/NVDA 90), so a score
+        # threshold alone cannot tell them apart. A wrong chart above the
+        # results is worse than no chart.
+        best = uni.fuzzy(q, limit=1, cutoff=80.0)
+        if best and best[0][0].get("tradable"):
+            featured = best[0][0]
 
     symbols: list[dict[str, Any]] = []
     if not news_toks:
@@ -144,6 +155,11 @@ def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
 
     prefs = prefs or {}
     boost = float(prefs.get("inhouse_boost", 1.0))
+    # The page is SECTIONED, not one fused list: platform hits used to fill
+    # every slot on page 1 and push the web to page 2, where nobody looks.
+    # The boost now decides how many platform rows lead (2 at boost 0, up to
+    # 8), and the web always gets its own section underneath.
+    inhouse_quota = max(2, min(8, round(3 + boost * 2)))
 
     # The open web, fetched only on page 1 (deeper pages page through what we
     # already ranked — a fresh scrape per page would be slow and unstable).
@@ -157,20 +173,25 @@ def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
             term = f"{subject} stock news" if (scope or featured) else q
             web += [_web_row(r) for r in websearch.web_news(term, limit=10, backend=engine)]
 
-    # In-house lists are fused normally, then boosted as a group: the user's
-    # own data and the platform's pages outrank the open web by however much
-    # they chose in settings (0 = no preference).
     inhouse = _rrf([symbols, news, _pages_match(q)])
-    fused = _rrf_weighted([(inhouse, 1.0 + boost), (web, 1.0)])
 
-    total = len(fused)
+    # Two sections, kept strictly separate. An earlier version fused the
+    # leftover platform rows into the second section, and since platform rows
+    # carry the boost they refilled it — the web vanished from page 1 again.
+    # Section 1: the best platform hits (page 1 only, size set by the boost).
+    # Section 2: the web, and ONLY the web, paginated.
+    lead = inhouse[:inhouse_quota] if page_no == 1 else []
+    web_ranked = _rrf([web]) if web else []
     start = (page_no - 1) * per_page
+    page_web = web_ranked[start:start + per_page]
+
     return {
         "query": q,
         "page": page_no,
-        "pages": max(1, (total + per_page - 1) // per_page),
-        "total": total,
-        "results": fused[start:start + per_page],
+        "pages": max(1, (len(web_ranked) + per_page - 1) // per_page),
+        "total": len(inhouse) + len(web_ranked),
+        "inhouse": lead,
+        "results": page_web,
         "featured": {"symbol": featured["symbol"], "name": featured["name"],
                      "asset_class": featured["asset_class"]} if featured else None,
         "web": {"used": bool(web), **websearch.status()},
