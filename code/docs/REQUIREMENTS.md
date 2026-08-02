@@ -299,6 +299,36 @@ Sign out, About).
 - **FR-SET-2** All branding (product name, AI name, logos) reads from
   `branding.json` — renaming later must be a one-file change (§8).
 
+### 4.11 Extensibility (architecture now, features later)
+
+The platform must be **extendable by a future community** — new pages, tools,
+and integrations (e.g. Google Drive, Google Sheets) added without touching core
+code. Nothing here ships as a feature in v1; what ships is the architecture
+that makes it cheap later (§6.11):
+
+- **FR-EXT-1** Every first-party page (Accounts, APIs, Positions, Chart, …) is
+  registered through the same internal **page registry** an extension would
+  use — page type, icon, omnibox search provider, sidebar panels, context-menu
+  contributions. If our own pages can't live on that API, neither can anyone
+  else's; dog-fooding it is the design test.
+- **FR-EXT-2** An extension is a folder/zip with a **manifest** (id, name,
+  version, permissions, contributed page types / sidebar panels / search
+  providers / MCP tools) plus web assets and an optional Python service module.
+- **FR-EXT-3** Extension pages run in **sandboxed webviews** with a typed
+  bridge API — scoped tokens against the same local API the first-party UI
+  uses; an extension never sees raw broker credentials, other extensions'
+  data, or unscoped account access.
+- **FR-EXT-4** **Permission model** from day one of the SDK: declared in the
+  manifest (read positions, read market data, draft orders, external hosts
+  allowlist), surfaced to the user at install, enforced at the API layer.
+  Order *submission* is never grantable to an extension (same rule as the AI,
+  §6.3).
+- **FR-EXT-5** v1 install path is local folder/zip ("developer mode"). A
+  marketplace, extension signing, a hosted Grindstone server, and first-party
+  hosted AI are explicitly future phases (§11) — the manifest format reserves
+  fields for signatures/update URLs so they can be added without breaking
+  existing extensions.
+
 ## 5. Non-functional requirements
 
 - **NFR-1 Security.** Secrets encrypted at rest (§6.7); local API port
@@ -315,6 +345,12 @@ Sign out, About).
   the app is fully usable with zero accounts configured (charts on free data).
 - **NFR-5 Restorability.** Everything user-created (accounts sans secrets,
   favorites, drawings, indicators, layouts) exports to a portable backup.
+- **NFR-6 Portability.** v1 ships Windows, but nothing outside a named
+  platform-abstraction layer may assume Windows: DPAPI, Credential Manager,
+  paths, process supervision, and installer specifics live behind interfaces
+  with Linux (libsecret/keyring) and macOS (Keychain) counterparts planned.
+  Electron, FastAPI, and every chosen library are already cross-platform —
+  portability is preserved by discipline, not ported later (§6.8).
 
 ## 6. Technical decisions
 
@@ -532,6 +568,21 @@ standard):
   update full-size). Installed/updated out-of-band into `%LOCALAPPDATA%` by the
   app on first run and on demand, embedding model pre-bundled/offline-pinned;
   cold start is 10+ s → shell shows a health-checked splash state.
+- **Distribution: GitHub** (Kade's repo,
+  `github.com/KadePrice123/Grindstone`). Source pushes at **major completed
+  milestones** — never keys, never `env/`, never bulk data (the gate's secret
+  scan runs before every push). Installers ship as **GitHub Releases** so
+  users can download-and-install without the source; electron-updater's GitHub
+  provider reads update metadata straight from Releases, so the release
+  channel and the auto-update host are the same thing. `release.py` builds,
+  signs, tags, and publishes the release via `gh`.
+- **OS targets**: v1 = Windows (NSIS). **Linux is the committed second
+  target** — electron-builder AppImage + deb, PyInstaller sidecar rebuilt
+  per-OS, secret wrap via libsecret/keyring instead of DPAPI (the envelope
+  scheme in §6.7 is OS-independent by design; only the optional convenience
+  wrap is per-OS). macOS is technically the same recipe but requires an Apple
+  Developer account ($99/yr) + notarization — open decision (§12). CI matrix
+  builds (GitHub Actions) become worthwhile the moment a second OS lands.
 
 ### 6.9 Data & process topology
 
@@ -583,6 +634,27 @@ The critique's biggest finding: this layer must be designed, not grown.
 - **PDT gating** (critique gap): margin accounts under $25k get day-trade
   counting and a pre-submit warning when an order would consume the last day
   trade or trigger PDT restrictions.
+
+### 6.11 Extension architecture (built-in seams, deferred features)
+
+**Decision.** Extensibility is bought with three seams built into M1–M2, not a
+plugin framework bolted on later:
+1. **Page registry** (FR-EXT-1): the shell renders whatever the registry
+   declares — first-party pages are entry #1 through #9. An extension page is
+   just a registry entry whose assets load in a sandboxed `WebContentsView`
+   with a preload-injected, permission-scoped bridge.
+2. **Scoped API tokens**: the sidecar's bearer-token auth (§6.7) gains an
+   audience/scope field now (cheap), so an extension token that can read
+   positions but not touch credentials is a data change, not a redesign.
+3. **Contribution points as data**: omnibox providers, sidebar panels,
+   context-menu items, and MCP tools are all registered declaratively —
+   the same mechanism the AI tools and first-party panels already use.
+
+Integrations like Google Drive/Sheets then become ordinary extensions: a
+manifest, an OAuth flow in their own sandbox, a page, maybe an MCP tool. The
+future hosted phase (Grindstone server, first-party hosted AI, marketplace
+with signed extensions) plugs into the reserved manifest fields (FR-EXT-5)
+and replaces "developer mode" installs — nothing in v1 needs rework for it.
 
 ## 7. Constraints & risks
 
@@ -743,13 +815,21 @@ Per workspace rules the project declares one offline gate in
 | **M4 Omnibox** | fuzzy+semantic+intent search over tickers/pages/news | latency budget met |
 | **M5 Trading** | chain viewer, trade panel, analytics, order tickets (paper), positions page, chart trade graphics | TastyTrade dry-run parity on BP numbers |
 | **M6 AI** | Open WebUI integration, Claude pipe, MCP server, context piping, news KB pipeline | drag-chart-to-AI demo; KB freshness check |
-| **M7 Ship** | installer, update script + channel, logos, theming polish, Webull/Fidelity flags | **installer built and executed on this machine; update applied over old version** |
+| **M7 Ship** | installer, update script + GitHub Releases channel, logos, theming polish, Webull/Fidelity flags | **installer built and executed on this machine; update applied over old version** |
+| **M8 Beyond** | Linux build (AppImage/deb, keyring wrap), extension SDK preview (manifest loader + developer-mode install + one sample extension) | sample extension installs and registers a page on a clean profile |
 
-Each milestone ends with `checkpoint.py` — no milestone is "done" red.
+Each milestone ends with `checkpoint.py` — no milestone is "done" red. Major
+completed milestones also push to GitHub (§6.8): source to the repo, installers
+to Releases.
 
 ## 11. Explicitly out of scope (v1)
 
 - Mobile/web deployment; multi-machine sync; social/copy-trading.
+- Extension **features**: marketplace, extension signing, hosted Grindstone
+  server, first-party hosted AI. The **seams** for them ship in v1 (§6.11);
+  the features do not.
+- macOS build (recipe identical to Linux; blocked on the $99/yr Apple
+  Developer decision, §12).
 - AI-initiated order **submission** (drafts only — a design decision, not a gap).
 - Fidelity order entry (impossible without an official API — revisit if one ships).
 - Backtesting engine (the workspace's research tooling already covers this;
@@ -776,3 +856,8 @@ Each milestone ends with `checkpoint.py` — no milestone is "done" red.
    depth only (§6.9)?
 7. **Alpaca data tier:** stay free (IEX + indicative options) or add Algo
    Trader Plus $99/mo (SIP + real-time OPRA) for accurate option mids (§7.1)?
+8. **macOS:** pay the $99/yr Apple Developer fee for signing/notarization when
+   Linux lands, or stay Windows+Linux (§6.8)?
+9. **Public repo cadence:** the repo is public — confirm that pushing at every
+   major milestone (vs. only at releases) is wanted, since research docs and
+   in-progress code become public the moment they land.

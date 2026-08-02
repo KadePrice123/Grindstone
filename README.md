@@ -40,6 +40,16 @@ credential-shaped strings in tracked files, env hygiene. The count grows with
 each milestone (see REQUIREMENTS.md §9-§10); live connectivity will be a
 separate diagnostic, never part of the gate.
 
+## Distribution
+
+- **Source**: https://github.com/KadePrice123/Grindstone — pushed at major
+  completed milestones. Secrets never leave this machine: `env/` and `data/`
+  are gitignored and the gate scans every tracked file before a push.
+- **Installers**: GitHub Releases on the same repo (download-and-install
+  without the source); the auto-updater reads the same Releases feed.
+- **OS targets**: Windows now; Linux committed next; macOS pending the Apple
+  Developer decision (REQUIREMENTS.md §6.8).
+
 ## Status
 
 M0 (scaffold + requirements + branding) — see roadmap in REQUIREMENTS.md §10.
