@@ -74,8 +74,10 @@ export default function App() {
 
   switch (phase.kind) {
     case 'booting':
-      return <Splash text="Starting backend…" />
+      return <Splash text="Starting backend…" spin />
     case 'backend-down':
+      // Deliberately static: this state can persist, and a permanently
+      // animating logo costs GPU time for as long as it is on screen.
       return <Splash text="Backend is not running." detail={phase.detail} error />
     case 'auth':
       return (
@@ -93,10 +95,20 @@ export default function App() {
   }
 }
 
-function Splash({ text, detail, error }: { text: string; detail?: string; error?: boolean }) {
+function Splash({
+  text,
+  detail,
+  error,
+  spin,
+}: {
+  text: string
+  detail?: string
+  error?: boolean
+  spin?: boolean
+}) {
   return (
     <div className="center-stage">
-      <Logo size={72} />
+      <Logo size={72} spin={spin} />
       <div className={error ? 'error-text' : 'dim'}>{text}</div>
       {detail ? <div className="error-text subtle">{detail}</div> : null}
     </div>

@@ -64,9 +64,18 @@ input {
 .mark .facet {
   fill: var(--accent);
 }
-.spin {
+/* The mark spins while something is happening (.spin) or while the pointer is
+   on it — never permanently. Measured: a continuously animating logo pins the
+   GPU process in a 60fps present loop costing ~10.7% of a core forever, which
+   is what made pointer movement feel laggy. Static at rest is 0.2%. */
+.spin,
+.mark:hover {
   transform-origin: 50% 50%;
   animation: gs-spin 7s linear infinite;
+  will-change: transform;
+}
+.mark {
+  transition: color 0.15s;
 }
 @keyframes gs-spin {
   to {

@@ -349,6 +349,25 @@ def _orphan_watchdog():
         "shell no longer holds the sidecar's stdin — the watchdog can never fire"
 
 
+@check("no permanently animating logo on at-rest screens")
+def _no_idle_animation():
+    # REGRESSION (measured 2026-08-01): a continuously spinning logo held the
+    # GPU process in a 60fps present loop — 10.7% of a core forever on a
+    # static screen — and made pointer movement feel laggy. Static at rest
+    # measured 0.2%. Screens the user sits on must not pass spin.
+    renderer = CODE / "app" / "src" / "renderer" / "src"
+    for rel in ("pages/Idle.tsx", "pages/AuthGate.tsx", "pages/Accounts.tsx"):
+        p = renderer / rel
+        if not p.exists():
+            continue
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if "<Logo" in line:
+                assert "spin" not in line, (
+                    f"{rel}: at-rest screen renders a spinning logo — that costs "
+                    "~10% of a core continuously (see styles.css)"
+                )
+
+
 @check("frontend: sources present; typecheck when toolchain available")
 def _frontend():
     app_dir = CODE / "app"
