@@ -64,6 +64,16 @@ export interface TabInfo {
   url?: string
 }
 
+/** What the gesture wheel sees of a tab. */
+export interface WheelTabInfo {
+  id: number
+  winId: number
+  title: string
+  icon: string
+  kind: 'app' | 'browser'
+  address?: string
+}
+
 interface Tab {
   id: number
   view: WebContentsView
@@ -101,6 +111,7 @@ export class TabManager {
   private nextTabId = 1
   private nextWinId = 1
   private preload: string
+  private browserPreload: string
   private locked = true
   private drag: { tabId: number; overWinId: number | null } | null = null
   private quitting = false
@@ -108,9 +119,12 @@ export class TabManager {
    *  can enable Back for app pages the same way it does for web pages. */
   private appHistoryDepth = new Map<number, number>()
   onAllClosed: (() => void) | null = null
+  /** The gesture wheel despawns when its host window disappears. */
+  onWindowGone: ((winId: number) => void) | null = null
 
-  constructor(preload: string) {
+  constructor(preload: string, browserPreload?: string) {
     this.preload = preload
+    this.browserPreload = browserPreload ?? ''
     this.registerIpc()
   }
 
@@ -196,6 +210,7 @@ export class TabManager {
     w.chrome.webContents.close()
     this.wins = this.wins.filter((x) => x !== w)
     log('window closed', w.id, 'remaining', this.wins.length)
+    this.onWindowGone?.(w.id)
     if (this.wins.length === 0 && !this.quitting) this.onAllClosed?.()
   }
 
@@ -257,7 +272,11 @@ export class TabManager {
         disableDialogs: true,
         navigateOnDragDrop: false,
         autoplayPolicy: 'document-user-activation-required',
-        // deliberately NO preload: this view can never reach our bridges
+        // NOT the app bridge — browser tabs never see grindstone/*. The only
+        // preload here is the one-way right-click forwarder for the gesture
+        // wheel (src/preload/browser.ts): no contextBridge, isTrusted-gated,
+        // sends three primitive fields on one fixed channel and nothing else.
+        ...(this.browserPreload ? { preload: this.browserPreload } : {}),
       },
     })
     // Dark background while loading, so opening a link is not a white flash
@@ -625,6 +644,102 @@ export class TabManager {
       // same-window drop: reorder already happened live
       for (const w of this.wins) this.pushStrip(w) // clear the lifted state
     })
+  }
+
+  // ------------------------------------------------- gesture-wheel surface
+  /** Everything the wheel needs from the tab system, as one narrow seam. */
+  get isLocked(): boolean {
+    return this.locked
+  }
+
+  /** Resolve any view's webContents to its window and view offset, so client
+   *  coordinates can become window coordinates. Null for unknown senders. */
+  resolveSender(wc: Electron.WebContents):
+    | { winId: number; offsetX: number; offsetY: number }
+    | null {
+    const asChrome = this.wins.find((w) => w.chrome.webContents.id === wc.id)
+    if (asChrome) return { winId: asChrome.id, offsetX: 0, offsetY: 0 }
+    const asTab = this.winFromContent(wc)
+    if (asTab) {
+      return { winId: asTab.id, offsetX: 0, offsetY: this.locked ? 0 : TABBAR_H + NAVBAR_H }
+    }
+    return null
+  }
+
+  windowContentSize(winId: number): { width: number; height: number } | null {
+    const w = this.wins.find((x) => x.id === winId)
+    if (!w || w.win.isDestroyed()) return null
+    const b = w.win.getContentBounds()
+    return { width: b.width, height: b.height }
+  }
+
+  baseWindow(winId: number): BaseWindow | null {
+    const w = this.wins.find((x) => x.id === winId)
+    return w && !w.win.isDestroyed() ? w.win : null
+  }
+
+  /** Attach a view above everything in this window (the wheel overlay). */
+  attachOverlay(winId: number, view: WebContentsView): boolean {
+    const w = this.wins.find((x) => x.id === winId)
+    if (!w || w.win.isDestroyed()) return false
+    const b = w.win.getContentBounds()
+    view.setBounds({ x: 0, y: 0, width: b.width, height: b.height })
+    w.win.contentView.addChildView(view) // last child renders topmost
+    return true
+  }
+
+  detachOverlay(winId: number, view: WebContentsView): void {
+    const w = this.wins.find((x) => x.id === winId)
+    if (w && !w.win.isDestroyed()) w.win.contentView.removeChildView(view)
+  }
+
+  /** Every open tab across every window — the Tabs wheel's raw material. */
+  allTabs(): WheelTabInfo[] {
+    const out: WheelTabInfo[] = []
+    for (const w of this.wins) {
+      for (const t of w.tabs) {
+        out.push({ id: t.id, winId: w.id, title: t.title, icon: t.icon,
+                   kind: t.kind, address: t.address })
+      }
+    }
+    return out
+  }
+
+  /** Activate a tab wherever it lives; focuses its window if it is another's. */
+  activateTabGlobal(tabId: number): boolean {
+    const w = this.wins.find((x) => x.tabs.some((t) => t.id === tabId))
+    if (!w) return false
+    this.activate(w, tabId)
+    if (!w.win.isFocused()) w.win.focus()
+    return true
+  }
+
+  /** Open a platform route in this window: the active app tab navigates in
+   *  place; a browser tab (or nothing active) gets a fresh app tab. */
+  gotoRoute(winId: number, route: string): void {
+    const w = this.wins.find((x) => x.id === winId)
+    if (!w || this.locked) return
+    const tab = w.tabs.find((t) => t.id === w.activeId)
+    if (tab?.kind === 'app') tab.view.webContents.send('nav:route', route)
+    else this.newTab(w, route)
+  }
+
+  /** The ticker segments: focus the existing tab for this symbol anywhere,
+   *  or open one here. */
+  openTicker(winId: number, symbol: string): void {
+    const addr = `${symbol.toLowerCase()}.gs`
+    const existing = this.allTabs().find((t) => t.kind === 'app' && t.address === addr)
+    if (existing) {
+      this.activateTabGlobal(existing.id)
+      return
+    }
+    const w = this.wins.find((x) => x.id === winId)
+    if (w && !this.locked) this.newTab(w, `symbol:${symbol.toUpperCase()}`)
+  }
+
+  focusOmnibox(winId: number): void {
+    const w = this.wins.find((x) => x.id === winId)
+    if (w && !this.locked) w.chrome.webContents.send('omnibox:focus')
   }
 
   // ------------------------------------------------------------ lifecycle

@@ -31,6 +31,8 @@ PAGES = [
      "ready": False},
     {"key": "data", "title": "Data management",
      "words": ["data", "recording", "storage", "history"], "ready": True},
+    {"key": "news", "title": "News", "words": ["news", "headlines", "feed"],
+     "ready": True},
     {"key": "settings", "title": "Settings",
      "words": ["settings", "setting", "preferences", "theme", "web"], "ready": True},
 ]

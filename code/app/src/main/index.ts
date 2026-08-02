@@ -10,6 +10,7 @@ import { announceUnlockedIfSignedIn, registerApiBridge, clearSession } from './a
 import { log } from './log'
 import { Sidecar } from './sidecar'
 import { TabManager } from './tabs'
+import { WheelManager } from './wheel'
 
 const sidecar = new Sidecar()
 let tabs: TabManager | null = null
@@ -17,8 +18,12 @@ let tabs: TabManager | null = null
 app.whenReady().then(async () => {
   nativeTheme.themeSource = 'dark'
   const preload = path.join(__dirname, '../preload/index.js')
-  tabs = new TabManager(preload)
+  const browserPreload = path.join(__dirname, '../preload/browser.js')
+  tabs = new TabManager(preload, browserPreload)
   tabs.onAllClosed = () => app.quit()
+  // The gesture wheel: registers its IPC and lives for the app's lifetime.
+  const wheel = new WheelManager(tabs)
+  wheel.preloadPath = preload
 
   // Auth is WINDOW-level: main holds the session token (api.ts), so main is
   // the single source of truth for signed-in state. Sign-in unlocks the tab

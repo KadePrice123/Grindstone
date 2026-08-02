@@ -77,6 +77,7 @@ const ALLOWED_METHODS = new Set(['GET', 'POST', 'DELETE', 'PUT', 'PATCH'])
 
 let sessionToken: string | null = null
 let notifyAuth: ((signedIn: boolean) => void) | null = null
+let sidecarRef: Sidecar | null = null
 
 function setToken(t: string | null): void {
   const was = sessionToken !== null
@@ -101,6 +102,47 @@ function setToken(t: string | null): void {
 /** Called from the renderer via 'auth:unlocked' once sign-in has resolved. */
 export function announceUnlockedIfSignedIn(): void {
   if (sessionToken !== null) notifyAuth?.(true)
+}
+
+export function isSignedIn(): boolean {
+  return sessionToken !== null
+}
+
+/**
+ * Main's OWN door to the backend (the gesture wheel fetches its config and
+ * ticker quotes from here). Same transport, same tokens, no renderer in the
+ * loop — and the result never leaves this process unscrubbed because the
+ * caller IS this process.
+ */
+export async function mainRequest<T = unknown>(
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<{ status: number; body: T | null }> {
+  const state = sidecarRef?.current
+  if (!state) return { status: 503, body: null }
+  const headers: Record<string, string> = { 'X-App-Token': state.bootToken }
+  if (sessionToken) headers['Authorization'] = `Bearer ${sessionToken}`
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  try {
+    const res = await request(
+      state.port,
+      method,
+      path,
+      headers,
+      body !== undefined ? JSON.stringify(body) : null
+    )
+    let payload: T | null = null
+    try {
+      payload = res.text ? (JSON.parse(res.text) as T) : null
+    } catch {
+      payload = null
+    }
+    return { status: res.status, body: payload }
+  } catch (e) {
+    log('mainRequest FAILED', method, path, String(e).slice(0, 120))
+    return { status: 502, body: null }
+  }
 }
 
 function frameIsOurs(frame: WebFrameMain | null): boolean {
@@ -128,6 +170,7 @@ export function registerApiBridge(
   onAuthChange?: (signedIn: boolean) => void
 ): void {
   notifyAuth = onAuthChange ?? null
+  sidecarRef = sidecar
   ipcMain.handle('api:request', async (event, req: unknown) => {
     const { method, path, body } = (req ?? {}) as {
       method?: string

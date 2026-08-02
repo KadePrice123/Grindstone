@@ -198,11 +198,41 @@ Sign out, About).
   Chrome's.
 - **FR-SHELL-3 Windows.** Any number of windows; each remembers geometry; the
   full window/tab layout is restored on next launch (per user).
-- **FR-SHELL-4 Right-click.** The platform owns the context menu everywhere.
-  Menus are context-aware: on a ticker → Open chart / Trade / News / **Ask AI**;
-  on a chart → drawing tools, indicators, Ask AI about this chart; on a news
-  card → Open article / Open source site / Summarize with AI; on a tab → the
-  Chrome set (close others, move to new window…).
+- **FR-SHELL-4 Right-click: gesture wheels.** *(Delivered 2026-08-02, Kade's
+  spec.)* The platform owns right-click everywhere — including over
+  third-party pages — and it spawns a SolidWorks-style radial **gesture
+  wheel**, not a context menu:
+  - **Click** (press+release, no travel): the wheel stays up with a
+    lock/unlock hub in the center; left-click interacts; left-click outside
+    closes; right-click moves the wheel; Escape closes.
+  - **Hold + drag**: drag over a segment and release to act. Releasing over a
+    go-to-wheel segment switches wheels and keeps the wheel open in click
+    mode; releasing in the center dead-zone despawns. Selection is by angle
+    beyond the dead zone (flick-friendly). No lock hub while holding.
+  - **The hub lock** pins the currently shown wheel as the spawn default;
+    unlock reverts to Main. Persisted per user.
+  - **Wheels are user-editable** (Settings → Gesture wheels): carousel with
+    one wheel shown and arrows to page; each wheel has a name + symbol; each
+    segment is any of go-to-wheel / page / tool / ticker, position-editable,
+    12 segments max; new wheels start with 6 slots. Stored via
+    `/api/wheels` (backend/wheels.py validates and says why it rejects).
+  - **Defaults**: *Main* (8: AI wheel N, Tabs wheel E, Tickers wheel W,
+    Search S; home/news/SPY/settings between), *AI* (placeholder until the AI
+    milestone, honestly dimmed), *Tabs* (dynamic — built from open tabs at
+    spawn; >8 tabs paginate E/W), *Tickers* (SPY QQQ GLD USO VIX + Main).
+  - **Ticker segments** show the symbol plus %-change or price
+    (configurable) and can tint by day direction — green bullish, red
+    bearish — using a snapshot taken at spawn (`/api/quotes`), never
+    re-polled while open, so colors cannot flash. Reopen to refresh.
+  - Architecture: one transparent overlay `WebContentsView` per app;
+    right-button events forwarded from app views via the bridge and from
+    browser tabs via a minimal no-contextBridge preload (isTrusted-gated,
+    one fixed channel). Main is the single state machine and computes the
+    released segment itself (shared geometry module) — renderer hover is
+    never trusted for selection.
+  The context-aware menu items originally listed here (ticker → Trade/Ask
+  AI, chart → drawing tools, tab → Chrome set) become wheel segments and
+  arrive with their features.
 - **FR-SHELL-5 Sidebar.** A slim rail on the right edge of every window,
   toggled by a top-right button. Collapsed: icon buttons only. Each button opens
   one panel: **AI chat**, **Trade panel**, **Related news** (scoped to the

@@ -791,6 +791,242 @@ input {
   cursor: default;
 }
 
+/* ---------- gesture wheel ---------- */
+/* The overlay view is transparent; only the wheel itself paints. */
+html.wheel-mode,
+html.wheel-mode body,
+html.wheel-mode #root {
+  background: transparent !important;
+}
+.wheel-stage {
+  position: fixed;
+  inset: 0;
+  /* no background: the page below stays fully visible */
+}
+.wheel-holder {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  transition: left 0.12s ease, top 0.12s ease; /* right-click move glides */
+}
+.wheel-face {
+  filter: drop-shadow(0 8px 28px rgba(0, 0, 0, 0.5));
+}
+/* Spawn: one-shot bloom. NOTHING here loops — an at-rest wheel is static
+   (the permanently-spinning-logo lesson, measured at 10% of a core). */
+.wheel-face.spawn {
+  animation: wheel-bloom 0.16s cubic-bezier(0.2, 0.9, 0.3, 1.2) 1;
+}
+@keyframes wheel-bloom {
+  from {
+    opacity: 0;
+    transform: scale(0.82) rotate(-4deg);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+}
+.wheel-face.spawn .wf-seg {
+  animation: wheel-seg-in 0.18s ease-out 1 backwards;
+}
+@keyframes wheel-seg-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.wf-sector {
+  fill: color-mix(in srgb, var(--surface) 92%, transparent);
+  stroke: var(--border);
+  stroke-width: 1;
+  transition: fill 0.08s ease;
+}
+.wf-seg {
+  cursor: pointer;
+}
+.wf-seg:hover .wf-sector,
+.wf-seg.hover .wf-sector {
+  fill: color-mix(in srgb, var(--accent) 26%, var(--surface));
+  stroke: var(--accent);
+}
+.wf-seg.dead {
+  cursor: default;
+  opacity: 0.42;
+}
+.wf-seg.dead:hover .wf-sector {
+  fill: color-mix(in srgb, var(--surface) 92%, transparent);
+  stroke: var(--border);
+}
+.wf-glyph {
+  font-size: 15px;
+  fill: var(--text-dim);
+  text-anchor: middle;
+  pointer-events: none;
+}
+.wf-label {
+  font-size: 11.5px;
+  fill: var(--text);
+  text-anchor: middle;
+  pointer-events: none;
+}
+.wf-label.wf-ticker {
+  font-weight: 600;
+  font-size: 13px;
+}
+.wf-sub {
+  font-size: 11px;
+  fill: var(--text-dim);
+  text-anchor: middle;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.wf-seg.wf-up .wf-sector {
+  fill: color-mix(in srgb, var(--gain) 13%, var(--surface));
+}
+.wf-seg.wf-down .wf-sector {
+  fill: color-mix(in srgb, var(--loss) 13%, var(--surface));
+}
+.wf-seg.wf-up:hover .wf-sector,
+.wf-seg.wf-up.hover .wf-sector {
+  fill: color-mix(in srgb, var(--gain) 30%, var(--surface));
+  stroke: var(--gain);
+}
+.wf-seg.wf-down:hover .wf-sector,
+.wf-seg.wf-down.hover .wf-sector {
+  fill: color-mix(in srgb, var(--loss) 30%, var(--surface));
+  stroke: var(--loss);
+}
+.wf-sub.wf-up {
+  fill: var(--gain);
+}
+.wf-sub.wf-down {
+  fill: var(--loss);
+}
+.wf-hub-disc {
+  fill: var(--bg);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.wf-hub.lockable {
+  cursor: pointer;
+}
+.wf-hub.lockable:hover .wf-hub-disc {
+  stroke: var(--accent);
+}
+.wf-hub-symbol {
+  font-size: 20px;
+  font-weight: 600;
+  fill: var(--text-dim);
+  text-anchor: middle;
+  pointer-events: none;
+}
+.wf-hub-name {
+  font-size: 9.5px;
+  fill: var(--text-dim);
+  text-anchor: middle;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+.wf-lock-body {
+  fill: var(--text-dim);
+  pointer-events: none;
+}
+.wf-lock-shackle {
+  stroke: var(--text-dim);
+  stroke-width: 2.5;
+  pointer-events: none;
+}
+.wf-hub.locked .wf-lock-body {
+  fill: var(--accent);
+}
+.wf-hub.locked .wf-lock-shackle {
+  stroke: var(--accent);
+}
+
+/* ---------- gesture wheel editor (settings) ---------- */
+.wheel-carousel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+.wheel-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.wheel-preview .wheel-face {
+  filter: none;
+}
+.wheel-carousel-name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.wheel-symbol {
+  color: var(--accent);
+  font-weight: 600;
+}
+.wheel-edit-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.wheel-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.wheel-field.sm .field {
+  width: 70px;
+}
+.wheel-edit-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+.wheel-seg-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wheel-seg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wheel-seg-row .field {
+  padding: 6px 8px;
+  font-size: 12.5px;
+  min-width: 0;
+}
+.wheel-seg-pos {
+  width: 68px;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.wheel-seg-note {
+  flex: 1;
+}
+.wheel-seg-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.news-filter {
+  margin-left: auto;
+  width: 260px;
+}
+
 /* ---------- article reader ---------- */
 .article-page {
   max-width: 760px;

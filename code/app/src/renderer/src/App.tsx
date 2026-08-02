@@ -1,13 +1,16 @@
 /**
- * Mode dispatcher. One renderer bundle serves three view types, chosen by
+ * Mode dispatcher. One renderer bundle serves four view types, chosen by
  * the ?mode= query the main process loads each view with:
  *   auth    — full-window lock screen (owns the whole window while locked)
  *   chrome  — the tab strip (top TABBAR_H px of an unlocked window)
  *   content — one tab's page, starting at ?route=...
+ *   wheel   — the transparent gesture-wheel overlay (attached on demand)
  */
 import { TabStrip } from './components/TabStrip'
 import { AuthShell } from './modes/AuthShell'
 import { ContentApp } from './modes/ContentApp'
+import { WheelOverlay } from './modes/WheelOverlay'
+import { installWheelEvents } from './wheelEvents'
 
 export type Route =
   | { name: 'idle' }
@@ -16,6 +19,7 @@ export type Route =
   | { name: 'symbol'; symbol: string }
   | { name: 'search'; query: string }
   | { name: 'settings' }
+  | { name: 'news' }
   | { name: 'article'; id?: number; url?: string }
 
 export function parseRoute(raw: string | null): Route {
@@ -26,7 +30,9 @@ export function parseRoute(raw: string | null): Route {
     const rest = raw.slice(8)
     return /^\d+$/.test(rest) ? { name: 'article', id: Number(rest) } : { name: 'article', url: rest }
   }
-  if (raw === 'accounts' || raw === 'data' || raw === 'settings') return { name: raw }
+  if (raw === 'accounts' || raw === 'data' || raw === 'settings' || raw === 'news') {
+    return { name: raw }
+  }
   return { name: 'idle' }
 }
 
@@ -37,10 +43,18 @@ export function routeKey(r: Route): string {
   return r.name
 }
 
+const params = new URLSearchParams(window.location.search)
+const mode = params.get('mode') ?? 'auth'
+
+// The gesture wheel listens in the chrome and every content page (browser
+// tabs forward from their own preload; auth has none — no wheel while
+// locked; the overlay must not re-forward its own clicks as spawns).
+if (mode === 'chrome' || mode === 'content') installWheelEvents()
+if (mode === 'wheel') document.documentElement.classList.add('wheel-mode')
+
 export default function App() {
-  const params = new URLSearchParams(window.location.search)
-  const mode = params.get('mode') ?? 'auth'
   if (mode === 'chrome') return <TabStrip />
   if (mode === 'content') return <ContentApp initial={parseRoute(params.get('route'))} />
+  if (mode === 'wheel') return <WheelOverlay />
   return <AuthShell />
 }

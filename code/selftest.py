@@ -1025,6 +1025,125 @@ def _tab_system():
     assert "e2e" in pkg["scripts"], "npm run e2e is not wired"
 
 
+@check("gesture wheels: spec layout, honest validation, safe browser preload")
+def _gesture_wheels():
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from backend import wheels
+    from backend.db import connect
+
+    # ---- the document: defaults match Kade's spec exactly -----------------
+    doc = wheels.validate(wheels.default_doc())
+    ids = [w["id"] for w in doc["wheels"]]
+    assert set(wheels.BUILTIN_IDS) <= set(ids), "a default wheel is missing"
+    main = next(w for w in doc["wheels"] if w["id"] == "main")
+    segs = main["segments"]
+    assert len(segs) == 8, "the main wheel is 8 segments: 4 corners + 4 cardinal"
+    # N=AI wheel, E=tabs wheel, S=search tool, W=tickers wheel (spec)
+    assert segs[0] == {"type": "wheel", "wheel": "ai", "label": "AI"}, segs[0]
+    assert segs[2]["type"] == "wheel" and segs[2]["wheel"] == "tabs", segs[2]
+    assert segs[4]["type"] == "tool" and segs[4]["tool"] == "search", segs[4]
+    assert segs[6]["type"] == "wheel" and segs[6]["wheel"] == "tickers", segs[6]
+    # between them: home, news, SPY, settings — all four present
+    others = {s.get("route") or s.get("ticker") for s in (segs[1], segs[3], segs[5], segs[7])}
+    assert others == {"idle", "news", "SPY", "settings"}, others
+    tabs_wheel = next(w for w in doc["wheels"] if w["id"] == "tabs")
+    assert tabs_wheel.get("dynamic") == "tabs", "the tabs wheel must be dynamic"
+    ai = next(w for w in doc["wheels"] if w["id"] == "ai")
+    assert any(s["type"] == "placeholder" for s in ai["segments"]), \
+        "the AI wheel is a placeholder and must say so"
+    assert any(s["type"] == "wheel" and s["wheel"] == "main" for s in ai["segments"]), \
+        "every non-main default wheel needs a way back to main"
+
+    # ---- validation says WHY, and corrupt data falls back -----------------
+    for bad, why in [
+        ({"config": {}, "wheels": []}, "empty"),
+        ({"config": {}, "wheels": [{"id": "main", "name": "M", "symbol": "x",
+                                    "segments": [{"type": "warp"}] * 3}]}, "bad type"),
+        ({"config": {"locked": "ghost"}, "wheels": wheels.default_doc()["wheels"]},
+         "ghost lock"),
+    ]:
+        try:
+            wheels.validate(bad)
+            raise AssertionError(f"validator accepted {why}")
+        except ValueError:
+            pass
+    bad = wheels.default_doc()
+    bad["wheels"] = [w for w in bad["wheels"] if w["id"] != "tickers"]
+    try:
+        wheels.validate(bad)
+        raise AssertionError("deleting a built-in wheel was accepted")
+    except ValueError:
+        pass
+
+    # round-trip through the real storage, corrupt row falls back to defaults
+    with tempfile.TemporaryDirectory() as tmp:
+        with connect(Path(tmp) / "a.db") as db:
+            db.execute("INSERT INTO users (username, pw_hash, kdf_salt, wrapped_dek)"
+                       " VALUES ('u','h',x'00',x'00')")
+            d1 = wheels.default_doc()
+            d1["config"]["locked"] = "tickers"
+            stored = wheels.put(db, 1, d1)
+            assert stored["config"]["locked"] == "tickers"
+            assert wheels.get(db, 1)["config"]["locked"] == "tickers"
+            db.execute("UPDATE user_settings SET value='{oops' WHERE key=?",
+                       (wheels.DOC_KEY,))
+            assert wheels.get(db, 1)["config"]["locked"] is None, \
+                "a corrupt wheels doc must fall back to defaults, not crash"
+
+    # ---- geometry: ONE module, both sides import it -----------------------
+    app_src = CODE / "app" / "src"
+    shared = (app_src / "shared" / "wheelGeometry.ts").read_text(encoding="utf-8")
+    assert "export function segmentAt" in shared and "WHEEL_DEAD_ZONE" in shared
+    wheel_main = (app_src / "main" / "wheel.ts").read_text(encoding="utf-8")
+    overlay = (app_src / "renderer" / "src" / "modes" / "WheelOverlay.tsx").read_text(
+        encoding="utf-8")
+    assert "shared/wheelGeometry" in wheel_main, "main does not use the shared geometry"
+    assert "shared/wheelGeometry" in overlay, "the overlay does not use the shared geometry"
+    # Main decides what a release selects — never the renderer's hover report
+    # (the release can beat the last hover report across the IPC boundary).
+    assert "segmentAt(s.center.x" in wheel_main, \
+        "main must compute the released segment itself"
+    assert "wheelui:hover" not in wheel_main, \
+        "main is trusting renderer-reported hover again — that races the release"
+
+    # ---- the spec's interaction rules, where they are encoded -------------
+    assert "s.mode = 'click'" in wheel_main and "'wheel:mode'" in wheel_main, \
+        "hold-release on a wheel-nav must hand over to click mode"
+    assert "config.locked === s.wheelId ? null : s.wheelId" in wheel_main, \
+        "the hub must toggle lock/unlock of the current wheel"
+    assert "despawn" in wheel_main and "'blur'" in wheel_main, \
+        "the wheel must close when its window loses focus"
+
+    # ---- the browser preload stays a one-way street -----------------------
+    bp = (app_src / "preload" / "browser.ts").read_text(encoding="utf-8")
+    bp_imports = [ln for ln in bp.splitlines()
+                  if ln.strip().startswith(("import ", "from "))]
+    assert not any("contextBridge" in ln for ln in bp_imports), \
+        "the browser preload exposes an API surface to third-party pages"
+    assert "exposeInMainWorld" not in bp, \
+        "the browser preload exposes an API surface to third-party pages"
+    assert "isTrusted" in bp, "synthetic page events could puppet the wheel"
+    assert bp.count("ipcRenderer.send") == 1 and "'wheel:evt'" in bp, \
+        "the browser preload must send exactly one fixed channel"
+    tabs_src = (app_src / "main" / "tabs.ts").read_text(encoding="utf-8")
+    assert "browserPreload" in tabs_src, "browser tabs no longer forward right-clicks"
+
+    # ---- no permanent animation on the overlay ----------------------------
+    css = (app_src / "renderer" / "src" / "styles.css").read_text(encoding="utf-8")
+    for line in css.splitlines():
+        if "wheel" in line and "animation" in line and "infinite" in line:
+            raise AssertionError(f"looping wheel animation: {line.strip()}")
+
+    # ---- the ticker snapshot rule: fetched once, never re-polled ----------
+    face = (app_src / "renderer" / "src" / "components" / "WheelFace.tsx").read_text(
+        encoding="utf-8")
+    for src_name, src in (("WheelOverlay", overlay), ("WheelFace", face)):
+        assert "setInterval" not in src, \
+            f"{src_name} re-polls — wheel colors must not flash while open"
+
+
 @check("frontend: sources present; typecheck when toolchain available")
 def _frontend():
     app_dir = CODE / "app"

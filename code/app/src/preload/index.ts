@@ -60,6 +60,57 @@ const grindstone = {
     ipcRenderer.on('nav:route', listener)
     return () => ipcRenderer.removeListener('nav:route', listener)
   },
+  /** Raw right-button events for the gesture wheel (chrome + content modes).
+   *  Browser tabs forward the same events from their own minimal preload. */
+  wheelEvt: (kind: 'down' | 'move' | 'up', x: number, y: number): void => {
+    ipcRenderer.send('wheel:evt', kind, x, y)
+  },
+}
+
+/** The gesture-wheel overlay's own surface (mode=wheel only). */
+const grindstoneWheel = {
+  onSpawn: (cb: (payload: unknown) => void): (() => void) => {
+    const listener = (_e: unknown, p: unknown) => cb(p)
+    ipcRenderer.on('wheel:spawn', listener)
+    return () => ipcRenderer.removeListener('wheel:spawn', listener)
+  },
+  onUpdate: (cb: (payload: unknown) => void): (() => void) => {
+    const listener = (_e: unknown, p: unknown) => cb(p)
+    ipcRenderer.on('wheel:update', listener)
+    return () => ipcRenderer.removeListener('wheel:update', listener)
+  },
+  onMode: (cb: (mode: string) => void): (() => void) => {
+    const listener = (_e: unknown, m: string) => cb(m)
+    ipcRenderer.on('wheel:mode', listener)
+    return () => ipcRenderer.removeListener('wheel:mode', listener)
+  },
+  onPointer: (cb: (x: number, y: number) => void): (() => void) => {
+    const listener = (_e: unknown, x: number, y: number) => cb(x, y)
+    ipcRenderer.on('wheel:pointer', listener)
+    return () => ipcRenderer.removeListener('wheel:pointer', listener)
+  },
+  onQuotes: (cb: (quotes: unknown) => void): (() => void) => {
+    const listener = (_e: unknown, q: unknown) => cb(q)
+    ipcRenderer.on('wheel:quotes', listener)
+    return () => ipcRenderer.removeListener('wheel:quotes', listener)
+  },
+  onDespawn: (cb: () => void): (() => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('wheel:despawn', listener)
+    return () => ipcRenderer.removeListener('wheel:despawn', listener)
+  },
+  /** Mount handshake: the first spawn can beat the overlay's listeners, so
+   *  main re-sends the live session when the page says it is ready. */
+  ready: (): void => ipcRenderer.send('wheelui:ready'),
+  act: (index: number): void => ipcRenderer.send('wheelui:act', index),
+  lockToggle: (): void => ipcRenderer.send('wheelui:lock'),
+  close: (): void => ipcRenderer.send('wheelui:close'),
+  move: (x: number, y: number): void => ipcRenderer.send('wheelui:move', x, y),
+  /** Hold-mode input that Chromium routed to the overlay instead of the
+   *  origin view — forwarded so main hears it from wherever it lands. */
+  evt: (kind: 'move' | 'up', x: number, y: number): void => {
+    ipcRenderer.send('wheel:evt', kind, x, y)
+  },
 }
 
 export interface StripTab {
@@ -102,6 +153,12 @@ const grindstoneTabs = {
   goto: (kind: 'url' | 'route', value: string): void =>
     ipcRenderer.send('nav:goto', kind, value),
   home: (): void => ipcRenderer.send('nav:home'),
+  /** The wheel's Search tool asks the strip to focus the address bar. */
+  onFocusOmnibox: (cb: () => void): (() => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('omnibox:focus', listener)
+    return () => ipcRenderer.removeListener('omnibox:focus', listener)
+  },
   minimize: (): void => ipcRenderer.send('win:minimize'),
   maximizeToggle: (): void => ipcRenderer.send('win:maximize'),
   closeWindow: (): void => ipcRenderer.send('win:close'),
@@ -109,6 +166,8 @@ const grindstoneTabs = {
 
 contextBridge.exposeInMainWorld('grindstone', grindstone)
 contextBridge.exposeInMainWorld('grindstoneTabs', grindstoneTabs)
+contextBridge.exposeInMainWorld('grindstoneWheel', grindstoneWheel)
 
 export type GrindstoneBridge = typeof grindstone
 export type GrindstoneTabsBridge = typeof grindstoneTabs
+export type GrindstoneWheelBridge = typeof grindstoneWheel

@@ -448,6 +448,152 @@ try {
   // ...and the bar shows the page's own address back, not a blank.
   const finalUrl = (await chromeA.eval('window.grindstoneTabs.getState()')).activeUrl
   check(/\.gs/.test(finalUrl ?? ''), 'addressing: the bar reports a .gs address', finalUrl)
+
+  // -------------------------------------------------------- gesture wheels
+  // Driven through the same wheel:evt channel real input uses, from a real
+  // content view — main's state machine, the overlay renderer, and the
+  // backend wheels doc all get exercised, not a mock of any of them.
+  const sendWheel = (target, kind, x, y) =>
+    target.eval(`(window.grindstone.wheelEvt(${JSON.stringify(kind)}, ${x}, ${y}), 'ok')`)
+
+  // CLICK mode: press, idle, release without travel → wheel stays with hub.
+  await sendWheel(spy, 'down', 420, 320)
+  await sleep(350)
+  await sendWheel(spy, 'up', 420, 320)
+  const wheelTarget = await waitFor(
+    async () => (await targets()).find((t) => t.url.includes('mode=wheel')),
+    'the wheel overlay view'
+  )
+  const wheelUi = await connect(wheelTarget)
+  const clickState = await waitFor(
+    async () => {
+      const s = await wheelUi.eval(
+        `JSON.stringify({
+           segs: document.querySelectorAll('.wf-seg').length,
+           mode: document.querySelector('.wheel-face')?.dataset.mode ?? null,
+           id: document.querySelector('.wheel-face')?.dataset.wheel ?? null,
+           hub: !!document.querySelector('.wf-hub.lockable')
+         })`
+      )
+      const st = JSON.parse(s)
+      return st.mode === 'click' ? st : null
+    },
+    'the wheel to reach click mode',
+    8000
+  ).catch(() => null)
+  check(
+    !!clickState && clickState.segs === 8 && clickState.id === 'main' && clickState.hub,
+    'wheel: right-click spawns the 8-segment main wheel with the lock hub',
+    JSON.stringify(clickState)
+  )
+
+  // Left-clicking the SPY segment (SW, index 5) opens/focuses the SPY tab
+  // and the wheel closes.
+  await wheelUi.eval(
+    `(document.querySelector('[data-seg="5"]')
+        .dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`
+  )
+  const afterTicker = await waitFor(
+    async () => {
+      const gone = await wheelUi.eval(`document.querySelector('.wheel-stage') === null`)
+      if (!gone) return null
+      const st = await chromeA.eval('window.grindstoneTabs.getState()')
+      const active = st.tabs.find((t) => t.id === st.activeId)
+      return active && active.title === 'SPY' ? active : null
+    },
+    'the SPY segment to open the ticker and close the wheel',
+    8000
+  ).catch(() => null)
+  check(!!afterTicker, 'wheel: the SPY segment opens the ticker page and closes the wheel')
+
+  // HOLD mode: press, drag due WEST (segment 6 = Tickers wheel nav),
+  // release → switches wheel and STAYS OPEN in click mode (the spec's
+  // "after a wheel nav while holding, enter left-click mode").
+  await sendWheel(spy, 'down', 420, 320)
+  await sleep(350)
+  for (const dx of [40, 90, 150]) await sendWheel(spy, 'move', 420 - dx, 320)
+  await sendWheel(spy, 'up', 420 - 170, 320)
+  const holdState = await waitFor(
+    async () => {
+      const s = await wheelUi.eval(
+        `JSON.stringify({
+           id: document.querySelector('.wheel-face')?.dataset.wheel ?? null,
+           mode: document.querySelector('.wheel-face')?.dataset.mode ?? null,
+           segs: document.querySelectorAll('.wf-seg').length
+         })`
+      )
+      const st = JSON.parse(s)
+      return st.id === 'tickers' && st.mode === 'click' ? st : null
+    },
+    'hold-drag west to switch to the Tickers wheel and stay open',
+    8000
+  ).catch(() => null)
+  check(
+    !!holdState && holdState.segs === 6,
+    'wheel: hold-drag onto a wheel-nav switches wheels and stays open',
+    JSON.stringify(holdState)
+  )
+
+  // The hub locks THIS wheel as the default; a fresh spawn opens it first.
+  await wheelUi.eval(
+    `(document.querySelector('.wf-hub')
+        .dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`
+  )
+  const lockedCfg = await waitFor(
+    async () => {
+      const r = await spy.eval(
+        `window.grindstone.request('GET','/api/wheels').then(r => r.body?.config?.locked ?? null)`
+      )
+      return r === 'tickers' ? r : null
+    },
+    'the lock to persist',
+    8000
+  ).catch(() => null)
+  check(lockedCfg === 'tickers', 'wheel: the center hub locks the shown wheel as default')
+
+  // Close (left click outside), respawn: the locked wheel comes up first.
+  await wheelUi.eval(
+    `(document.querySelector('.wheel-stage')
+        .dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`
+  )
+  await sleep(250)
+  await sendWheel(spy, 'down', 420, 320)
+  await sleep(350)
+  await sendWheel(spy, 'up', 420, 320)
+  const respawn = await waitFor(
+    async () => {
+      const id = await wheelUi.eval(
+        `document.querySelector('.wheel-face')?.dataset.wheel ?? null`
+      )
+      return id === 'tickers' ? id : null
+    },
+    'the locked wheel to spawn first',
+    8000
+  ).catch(() => null)
+  check(respawn === 'tickers', 'wheel: a locked wheel is the new default on spawn')
+
+  // Unlock reverts to the true default; clean up for whatever runs next.
+  await wheelUi.eval(
+    `(document.querySelector('.wf-hub')
+        .dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`
+  )
+  const unlocked = await waitFor(
+    async () => {
+      // JSON.stringify to tell "locked: null" (unlocked — what we want)
+      // apart from "no answer at all" (undefined) — ?? would eat the null.
+      const r = await spy.eval(
+        `window.grindstone.request('GET','/api/wheels').then(r => JSON.stringify(r.body?.config?.locked))`
+      )
+      return r === 'null' ? 'ok' : null
+    },
+    'the unlock to persist',
+    8000
+  ).catch(() => null)
+  check(unlocked === 'ok', 'wheel: unlocking the hub reverts to the true default')
+  await wheelUi.eval(
+    `(document.querySelector('.wheel-stage')
+        .dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`
+  )
 } catch (err) {
   console.log('FAIL  harness error —', err.message)
   failures += 1

@@ -16,6 +16,21 @@ declare global {
       openUrl: (url: string) => void
       onNav: (cb: (what: 'back' | 'home') => void) => () => void
       onRoute: (cb: (route: string) => void) => () => void
+      wheelEvt: (kind: 'down' | 'move' | 'up', x: number, y: number) => void
+    }
+    grindstoneWheel: {
+      onSpawn: (cb: (payload: unknown) => void) => () => void
+      onUpdate: (cb: (payload: unknown) => void) => () => void
+      onMode: (cb: (mode: string) => void) => () => void
+      onPointer: (cb: (x: number, y: number) => void) => () => void
+      onQuotes: (cb: (quotes: unknown) => void) => () => void
+      onDespawn: (cb: () => void) => () => void
+      ready: () => void
+      act: (index: number) => void
+      lockToggle: () => void
+      close: () => void
+      move: (x: number, y: number) => void
+      evt: (kind: 'move' | 'up', x: number, y: number) => void
     }
   }
 }

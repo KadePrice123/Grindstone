@@ -30,6 +30,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
 from . import settings as settings_mod
+from . import wheels as wheels_mod
 from . import universe as universe_mod
 from .providers import reader, websearch
 from .logs import LOG
@@ -446,6 +447,64 @@ def create_app(state: State) -> FastAPI:
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
         return {"values": values}
+
+    # ------------------------------------------------------- gesture wheels
+    @app.get("/api/wheels")
+    def wheels_get(s=Depends(current_session)) -> dict[str, Any]:
+        with state.db() as db:
+            return wheels_mod.get(db, s.user_id)
+
+    @app.put("/api/wheels")
+    def wheels_put(body: dict[str, Any], s=Depends(current_session)) -> dict[str, Any]:
+        try:
+            with state.db() as db:
+                return wheels_mod.put(db, s.user_id, body)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+
+    @app.get("/api/quotes")
+    def quotes_batch(symbols: str = "", s=Depends(current_session)) -> dict[str, Any]:
+        """A small batch of quotes for the wheel's ticker segments — fetched
+        once per wheel spawn, in parallel, under one deadline. The wheel's
+        colors deliberately do NOT update while it is open (spec: no
+        flashing), so a single snapshot per spawn is the whole contract."""
+        import concurrent.futures
+
+        syms = [t.strip().upper() for t in symbols.split(",") if t.strip()][:12]
+        if not syms:
+            return {"quotes": {}}
+        creds = state.creds_for(s.user_id)
+
+        def one(sym: str) -> tuple[str, dict[str, Any]]:
+            entry = state.universe.exact(sym)
+            q = market.quote_for(sym, (entry or {}).get("asset_class", "us_equity"), creds)
+            return sym, {
+                "available": bool(q.get("available")),
+                "price": q.get("price"),
+                "change_pct": q.get("change_pct"),
+            }
+
+        out: dict[str, Any] = {}
+        # One deadline for the whole batch: the wheel is already on screen and
+        # numbers fade in — a slow provider must cost at most this, not hang.
+        # NOT a `with` block: exiting one joins every worker, which would make
+        # this endpoint wait out a stuck provider despite the 6s wait() below.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=6,
+                                                     thread_name_prefix="quotes")
+        try:
+            futs = [pool.submit(one, sym) for sym in syms]
+            done, _pending = concurrent.futures.wait(futs, timeout=6.0)
+            for f in done:
+                try:
+                    sym, q = f.result()
+                    out[sym] = q
+                except Exception:  # noqa: BLE001 — a bad symbol stays absent
+                    pass
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        for sym in syms:
+            out.setdefault(sym, {"available": False, "price": None, "change_pct": None})
+        return {"quotes": out}
 
     @app.get("/api/symbols/{symbol}/bars")
     def symbol_bars(symbol: str, timeframe: str = "1Day", limit: int = 500,

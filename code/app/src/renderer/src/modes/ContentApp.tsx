@@ -14,6 +14,7 @@ import { Accounts } from '../pages/Accounts'
 import { ArticlePage } from '../pages/ArticlePage'
 import { DataPage } from '../pages/DataPage'
 import { Idle } from '../pages/Idle'
+import { NewsPage } from '../pages/NewsPage'
 import { SearchPage } from '../pages/SearchPage'
 import { SettingsPage } from '../pages/SettingsPage'
 import { SymbolPage } from '../pages/SymbolPage'
@@ -30,6 +31,8 @@ function meta(route: Route): { title: string; icon: string } {
       return { title: route.query, icon: 'search' }
     case 'settings':
       return { title: 'Settings', icon: 'settings' }
+    case 'news':
+      return { title: 'News', icon: 'news' }
     case 'article':
       return { title: 'Article', icon: 'news' }
     default:
@@ -100,6 +103,8 @@ export function ContentApp({ initial }: { initial: Route }) {
         return <SearchPage query={route.query} onNavigate={navigate} />
       case 'settings':
         return <SettingsPage />
+      case 'news':
+        return <NewsPage onNavigate={navigate} />
       case 'article':
         return <ArticlePage id={route.id} url={route.url} onNavigate={navigate} />
       default:

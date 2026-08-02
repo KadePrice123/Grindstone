@@ -4,6 +4,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '../api'
+import { GesturesPanel } from '../components/GesturesPanel'
 import { SettingsIcon } from '../components/icons'
 
 interface SettingSpec {
@@ -131,6 +132,8 @@ export function SettingsPage() {
           ) : null}
         </div>
       )}
+
+      <GesturesPanel />
     </div>
   )
 }

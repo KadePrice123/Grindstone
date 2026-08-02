@@ -61,6 +61,7 @@ declare global {
       reload: () => void
       goto: (kind: 'url' | 'route', value: string) => void
       home: () => void
+      onFocusOmnibox: (cb: () => void) => () => void
       minimize: () => void
       maximizeToggle: () => void
       closeWindow: () => void
@@ -108,11 +109,21 @@ export function TabStrip() {
   const [addr, setAddr] = useState('')
   const [editing, setEditing] = useState(false)
   const drag = useRef<{ id: number; startX: number; startY: number; live: boolean } | null>(null)
+  const addrRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     window.grindstoneTabs.getState().then((s) => s && setState(s))
     const off = window.grindstoneTabs.onState(setState)
     return () => off()
+  }, [])
+
+  // The gesture wheel's Search tool lands here: focus the bar, ready to type.
+  useEffect(() => {
+    const off = window.grindstoneTabs.onFocusOmnibox(() => {
+      addrRef.current?.focus()
+      addrRef.current?.select()
+    })
+    return off
   }, [])
 
   // Follow the page's URL unless the user is mid-edit in the address bar.
@@ -183,6 +194,7 @@ export function TabStrip() {
           {state.loading ? '×' : '⟳'}
         </button>
         <input
+          ref={addrRef}
           className={state.activeKind === 'browser' ? 'addr' : 'addr gs'}
           value={addr}
           spellCheck={false}
