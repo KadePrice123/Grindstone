@@ -1,0 +1,47 @@
+{
+  "productName": "Grindstone Investments",
+  "shortName": "Grindstone",
+  "assistantName": "AI",
+  "placeholder": true,
+  "logo": {
+    "main": "assets/branding/logo.svg",
+    "dark": "assets/branding/logo-dark.svg",
+    "light": "assets/branding/logo-light.svg",
+    "spinAnimation": true,
+    "windowIcon": "assets/branding/app.ico"
+  },
+  "pageIcons": {
+    "accounts": "assets/branding/icons/accounts.svg",
+    "apis": "assets/branding/icons/apis.svg",
+    "ai": "assets/branding/icons/ai.svg",
+    "positions": "assets/branding/icons/positions.svg",
+    "chart": "assets/branding/icons/chart.svg",
+    "news": "assets/branding/icons/news.svg",
+    "browser": "assets/branding/icons/browser.svg",
+    "settings": "assets/branding/icons/settings.svg",
+    "trade": "assets/branding/icons/trade.svg"
+  },
+  "theme": {
+    "accent": "#D98324",
+    "dark": {
+      "bg": "#101214",
+      "surface": "#191C1F",
+      "surfaceRaised": "#22262A",
+      "border": "#2E3338",
+      "text": "#E8EAED",
+      "textDim": "#9AA0A6",
+      "gain": "#2EBD85",
+      "loss": "#E5484D"
+    },
+    "light": {
+      "bg": "#FAFAF8",
+      "surface": "#FFFFFF",
+      "surfaceRaised": "#F2F2EF",
+      "border": "#E0E0DC",
+      "text": "#1C1E21",
+      "textDim": "#6B7075",
+      "gain": "#1E9E6A",
+      "loss": "#D33B40"
+    }
+  }
+}

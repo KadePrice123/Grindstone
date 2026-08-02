@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Accounts: bank with the family's triangle pediment -->
+  <path d="M4 9 L12 3.5 L20 9 Z"/>
+  <path d="M6.5 12 V17"/>
+  <path d="M12 12 V17"/>
+  <path d="M17.5 12 V17"/>
+  <path d="M4.5 20 H19.5"/>
+</svg>

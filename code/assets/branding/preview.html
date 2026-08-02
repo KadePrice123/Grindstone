@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Grindstone branding preview</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: "Segoe UI", system-ui, sans-serif; display: flex; min-height: 100vh; }
+  .half { flex: 1; padding: 40px; }
+  .dark  { background: #101214; color: #E8EAED; }
+  .light { background: #FAFAF8; color: #1C1E21; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; opacity: .6; margin-bottom: 28px; }
+  .hero { display: flex; align-items: center; gap: 18px; margin-bottom: 36px; }
+  .hero .mark { width: 56px; height: 56px; color: #D98324; }
+  .hero .name { font-size: 22px; font-weight: 600; letter-spacing: .01em; }
+  .hero .tag { font-size: 12px; opacity: .55; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; max-width: 460px; }
+  .tile { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 18px 8px 14px;
+          border-radius: 10px; border: 1px solid; }
+  .dark .tile  { border-color: #2E3338; background: #191C1F; }
+  .light .tile { border-color: #E0E0DC; background: #FFFFFF; }
+  .tile svg { width: 26px; height: 26px; }
+  .tile span { font-size: 11.5px; opacity: .7; }
+  object, img { display: block; }
+</style>
+</head>
+<body>
+  <section class="half dark">
+    <h1>Dark</h1>
+    <div class="hero">
+      <object class="mark" data="logo-dark.svg" type="image/svg+xml"></object>
+      <div><div class="name">Grindstone Investments</div><div class="tag">placeholder identity</div></div>
+    </div>
+    <div class="grid" id="grid-dark"></div>
+  </section>
+  <section class="half light">
+    <h1>Light</h1>
+    <div class="hero">
+      <object class="mark" data="logo-light.svg" type="image/svg+xml"></object>
+      <div><div class="name">Grindstone Investments</div><div class="tag">placeholder identity</div></div>
+    </div>
+    <div class="grid" id="grid-light"></div>
+  </section>
+<script>
+  const icons = ["accounts","apis","ai","positions","chart","news","browser","settings","trade"];
+  for (const theme of ["dark","light"]) {
+    const grid = document.getElementById("grid-" + theme);
+    for (const name of icons) {
+      fetch("icons/" + name + ".svg").then(r => r.text()).then(svg => {
+        const tile = document.createElement("div");
+        tile.className = "tile";
+        tile.innerHTML = svg + "<span>" + name + "</span>";
+        grid.appendChild(tile);
+      });
+    }
+  }
+</script>
+</body>
+</html>
