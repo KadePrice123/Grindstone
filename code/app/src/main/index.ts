@@ -1,31 +1,35 @@
-import { app, BaseWindow } from 'electron'
+import { app } from 'electron'
 import path from 'node:path'
 import { registerApiBridge, clearSession } from './api'
 import { Sidecar } from './sidecar'
-import { createMainWindow, AppWindow } from './window'
+import { TabManager } from './tabs'
 
 const sidecar = new Sidecar()
-let mainWindow: AppWindow | null = null
-
-function broadcastSidecarStatus(status: string, detail?: string): void {
-  mainWindow?.view.webContents.send('sidecar:status', { status, detail })
-}
+let tabs: TabManager | null = null
 
 app.whenReady().then(async () => {
-  registerApiBridge(sidecar)
+  const preload = path.join(__dirname, '../preload/index.js')
+  tabs = new TabManager(preload)
+  tabs.onAllClosed = () => app.quit()
+
+  // Auth is WINDOW-level: main holds the session token (api.ts), so main is
+  // the single source of truth for signed-in state. Sign-in unlocks the tab
+  // UI; lock/logout/expiry collapses back to the lock screen.
+  registerApiBridge(sidecar, (signedIn) => tabs?.setLocked(!signedIn))
+
   sidecar.onStatus((status, detail) => {
-    if (status === 'crashed') clearSession() // sessions died with the process
-    broadcastSidecarStatus(status, detail)
+    if (status === 'crashed') {
+      clearSession()
+      tabs?.setLocked(true)
+    }
+    tabs?.broadcastToContent('sidecar:status', { status, detail })
   })
 
-  const preload = path.join(__dirname, '../preload/index.js')
-  mainWindow = createMainWindow(preload)
-
+  tabs.bootstrap() // lock screen first; the auth view probes backend health
   try {
     await sidecar.start()
-    broadcastSidecarStatus('ready')
-  } catch (e) {
-    broadcastSidecarStatus('crashed', String(e))
+  } catch {
+    /* the auth view reports backend-down itself; restarts are scheduled */
   }
 })
 
@@ -34,11 +38,6 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  tabs?.shutdown()
   sidecar.stop()
-})
-
-app.on('activate', () => {
-  if (BaseWindow.getAllWindows().length === 0 && app.isReady()) {
-    mainWindow = createMainWindow(path.join(__dirname, '../preload/index.js'))
-  }
 })

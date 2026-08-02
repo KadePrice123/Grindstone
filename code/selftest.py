@@ -648,7 +648,8 @@ def _no_idle_animation():
     # static screen — and made pointer movement feel laggy. Static at rest
     # measured 0.2%. Screens the user sits on must not pass spin.
     renderer = CODE / "app" / "src" / "renderer" / "src"
-    for rel in ("pages/Idle.tsx", "pages/AuthGate.tsx", "pages/Accounts.tsx"):
+    for rel in ("pages/Idle.tsx", "pages/AuthGate.tsx", "pages/Accounts.tsx",
+                "modes/ContentApp.tsx"):
         p = renderer / rel
         if not p.exists():
             continue
@@ -660,13 +661,49 @@ def _no_idle_animation():
                 )
 
 
+@check("tab system: live re-parenting, no view leaks, drag protocol wired")
+def _tab_system():
+    app_dir = CODE / "app"
+    tabs = (app_dir / "src/main/tabs.ts").read_text(encoding="utf-8")
+
+    # Tabs must MOVE between windows, never be recreated — the whole point of
+    # WebContentsView. A loadURL/loadFile inside adoptTab would mean a reload.
+    adopt = tabs.split("adoptTab(")[1].split("detachToNewWindow")[0]
+    for banned in ("loadURL", "loadFile", "new WebContentsView", "reload"):
+        assert banned not in adopt, (
+            f"adoptTab contains {banned!r} — tabs would reload when moved "
+            "between windows, losing Chrome parity")
+
+    # REGRESSION (2026-08-02): Electron does not destroy a window's views when
+    # the window closes; the chrome view leaked as an orphan renderer that
+    # still answered IPC.
+    # Split on the DEFINITION, not the call site.
+    closed = tabs.split("private onWindowClosed(")[1].split("private layout")[0]
+    assert "chrome.webContents.close()" in closed, \
+        "closing a window leaks its chrome view"
+
+    # The cross-window drag protocol needs all three legs plus screen-space
+    # hit testing (HTML5 DnD cannot cross OS windows).
+    for piece in ("tabdrag:start", "tabdrag:move", "tabdrag:end", "stripHit"):
+        assert piece in tabs, f"drag protocol missing {piece}"
+
+    preload = (app_dir / "src/preload/index.ts").read_text(encoding="utf-8")
+    assert "grindstoneTabs" in preload and "dragEnd" in preload, \
+        "preload does not expose the tab bridge"
+    # The live e2e is the only thing that crosses the real proxy + real
+    # windows; it must stay runnable.
+    assert (app_dir / "e2e/run.mjs").exists(), "the live e2e diagnostic is missing"
+    pkg = json.loads((app_dir / "package.json").read_text(encoding="utf-8"))
+    assert "e2e" in pkg["scripts"], "npm run e2e is not wired"
+
+
 @check("frontend: sources present; typecheck when toolchain available")
 def _frontend():
     app_dir = CODE / "app"
     for rel in ("package.json", "electron.vite.config.ts",
                 "src/main/index.ts", "src/main/sidecar.ts", "src/main/api.ts",
-                "src/preload/index.ts", "src/renderer/index.html",
-                "src/renderer/src/App.tsx"):
+                "src/main/tabs.ts", "src/preload/index.ts",
+                "src/renderer/index.html", "src/renderer/src/App.tsx"):
         assert (app_dir / rel).exists(), f"missing app source {rel}"
     pkg = json.loads((app_dir / "package.json").read_text(encoding="utf-8"))
     assert pkg["name"] == "grindstone"

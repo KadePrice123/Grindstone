@@ -242,6 +242,10 @@ def create_app(state: State) -> FastAPI:
         n = state.sessions.revoke_user(s.user_id)
         return {"ok": True, "revoked": n}
 
+    @app.get("/api/auth/me")
+    def auth_me(s=Depends(current_session)) -> dict[str, Any]:
+        return {"username": s.username}
+
     # ------------------------------------------------------------ accounts
     def _adapter(broker: str, kind: str, creds: dict[str, str]):
         if kind not in ("live", "paper", "data"):

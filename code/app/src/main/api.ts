@@ -19,6 +19,14 @@ const AUTH_CLEAR_PATHS = new Set(['/api/auth/logout', '/api/auth/lock'])
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'DELETE', 'PUT', 'PATCH'])
 
 let sessionToken: string | null = null
+let notifyAuth: ((signedIn: boolean) => void) | null = null
+
+function setToken(t: string | null): void {
+  const was = sessionToken !== null
+  sessionToken = t
+  const is = sessionToken !== null
+  if (was !== is) notifyAuth?.(is)
+}
 
 function frameIsOurs(frame: WebFrameMain | null): boolean {
   if (!frame) return false
@@ -40,7 +48,11 @@ function scrub(body: unknown): unknown {
   return out
 }
 
-export function registerApiBridge(sidecar: Sidecar): void {
+export function registerApiBridge(
+  sidecar: Sidecar,
+  onAuthChange?: (signedIn: boolean) => void
+): void {
+  notifyAuth = onAuthChange ?? null
   ipcMain.handle('api:request', async (event, req: unknown) => {
     if (!frameIsOurs(event.senderFrame)) {
       return { status: 403, body: { detail: 'unknown sender' } }
@@ -108,14 +120,14 @@ export function registerApiBridge(sidecar: Sidecar): void {
 
     if (res.ok && AUTH_CAPTURE_PATHS.has(route)) {
       const t = (payload as { token?: string } | null)?.token
-      if (typeof t === 'string' && t) sessionToken = t
+      if (typeof t === 'string' && t) setToken(t)
     }
     if (AUTH_CLEAR_PATHS.has(route)) {
-      sessionToken = null
+      setToken(null)
     }
     // A 401 on any non-login route means the backend dropped our session.
     if (res.status === 401 && route !== '/api/auth/login') {
-      sessionToken = null
+      setToken(null)
     }
 
     return { status: res.status, body: scrub(payload) }
@@ -123,5 +135,5 @@ export function registerApiBridge(sidecar: Sidecar): void {
 }
 
 export function clearSession(): void {
-  sessionToken = null
+  setToken(null)
 }

@@ -8,7 +8,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
-    "start": "electron-vite preview"
+    "start": "electron-vite preview",
+    "e2e": "electron-vite build && node e2e/run.mjs"
   },
   "dependencies": {
     "react": "^19.0.0",

@@ -1,6 +1,7 @@
 /**
- * The ONLY surface the renderer gets. No tokens, no Node, no direct network —
- * just a typed request bridge and a sidecar-status subscription.
+ * The ONLY surface renderers get. No tokens, no Node, no direct network.
+ * `grindstone` is the data bridge; `grindstoneTabs` is the shell bridge the
+ * tab strip uses (and content pages use a small slice of: meta + open).
  */
 import { contextBridge, ipcRenderer } from 'electron'
 
@@ -21,8 +22,49 @@ const grindstone = {
     ipcRenderer.on('sidecar:status', listener)
     return () => ipcRenderer.removeListener('sidecar:status', listener)
   },
+
+  /** Content pages report their tab identity as the user navigates. */
+  setTabMeta: (title: string, icon: string): void => {
+    ipcRenderer.send('tab:meta', { title, icon })
+  },
+  /** Open a route in a NEW tab of this window. */
+  openTab: (route: string): void => {
+    ipcRenderer.send('tab:open', route)
+  },
+}
+
+export interface StripTab {
+  id: number
+  title: string
+  icon: string
+}
+export interface StripState {
+  tabs: StripTab[]
+  activeId: number | null
+  maximized: boolean
+}
+
+const grindstoneTabs = {
+  getState: (): Promise<StripState | null> => ipcRenderer.invoke('tabs:state'),
+  onState: (cb: (s: StripState) => void): (() => void) => {
+    const listener = (_e: unknown, s: StripState) => cb(s)
+    ipcRenderer.on('tabs:state', listener)
+    return () => ipcRenderer.removeListener('tabs:state', listener)
+  },
+  newTab: (): void => ipcRenderer.send('tabs:new'),
+  activate: (id: number): void => ipcRenderer.send('tabs:activate', id),
+  close: (id: number): void => ipcRenderer.send('tabs:close', id),
+  reorder: (id: number, toIndex: number): void => ipcRenderer.send('tabs:reorder', id, toIndex),
+  dragStart: (id: number): void => ipcRenderer.send('tabdrag:start', id),
+  dragMove: (sx: number, sy: number): void => ipcRenderer.send('tabdrag:move', sx, sy),
+  dragEnd: (sx: number, sy: number): void => ipcRenderer.send('tabdrag:end', sx, sy),
+  minimize: (): void => ipcRenderer.send('win:minimize'),
+  maximizeToggle: (): void => ipcRenderer.send('win:maximize'),
+  closeWindow: (): void => ipcRenderer.send('win:close'),
 }
 
 contextBridge.exposeInMainWorld('grindstone', grindstone)
+contextBridge.exposeInMainWorld('grindstoneTabs', grindstoneTabs)
 
 export type GrindstoneBridge = typeof grindstone
+export type GrindstoneTabsBridge = typeof grindstoneTabs

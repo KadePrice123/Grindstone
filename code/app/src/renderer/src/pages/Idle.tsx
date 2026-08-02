@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api, SearchResult } from '../api'
 import { Logo } from '../components/Logo'
 import { Omnibox } from '../components/Omnibox'
@@ -19,15 +19,20 @@ const FAVORITES: {
 ]
 
 export function Idle({
-  username,
   onNavigate,
   onLocked,
 }: {
-  username: string
   onNavigate: (r: Route) => void
   onLocked: () => void
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
+  const [username, setUsername] = useState('')
+
+  useEffect(() => {
+    api<{ username: string }>('GET', '/api/auth/me')
+      .then((r) => setUsername(r.username))
+      .catch(() => setUsername(''))
+  }, [])
 
   const openResult = (r: SearchResult) => {
     if (r.type === 'symbol' && r.symbol) {
@@ -79,13 +84,13 @@ export function Idle({
 
       <div className="user-chip">
         <button
-          title={username}
+          title={username || 'Profile'}
           onClick={(e) => {
             e.stopPropagation()
             setMenuOpen((v) => !v)
           }}
         >
-          {username.slice(0, 1).toUpperCase()}
+          {(username || '?').slice(0, 1).toUpperCase()}
         </button>
       </div>
       {menuOpen ? (
