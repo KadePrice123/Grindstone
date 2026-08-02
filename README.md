@@ -76,7 +76,15 @@ stays a separate diagnostic, never part of the gate.
 
 ## Status
 
-M1 (spine) — the app boots: Electron shell + supervised Python sidecar,
-login/first-run, idle page, Accounts page storing envelope-encrypted Alpaca
-keys with live connection test. Roadmap: REQUIREMENTS.md §10.
-Alpaca paper key verified working 2026-08-01 (stored in `env/alpaca.env`).
+M1 (spine) + search/data (early M4 slice) — the app boots and *works*:
+- Omnibox with live results: ~14k tickers (Alpaca assets + SPX/VIX//ES
+  supplement), fuzzy + prefix matching, news search (FTS5 trigram), page
+  routing, and an intent grammar — `SPY news` answers scoped headlines with a
+  live-Alpaca fallthrough when the local store is thin.
+- Symbol pages: live IEX quote (labeled with its source) + recent news.
+- Data management: recording jobs for bars / options-chain snapshots / news
+  at chosen intervals with retention pruning; verified live with a 13,897-
+  contract SPY chain snapshot including greeks.
+- Yahoo Finance keyless fallback (delayed, labeled) for users with no data API.
+Roadmap: REQUIREMENTS.md §10. Alpaca paper key verified working (in
+`env/alpaca.env`).

@@ -101,6 +101,22 @@ def search(con: sqlite3.Connection, q: str, limit: int = 8,
     return items[:limit]
 
 
+def backfill(con: sqlite3.Connection, client, page_limit: int = 5) -> int:
+    """Incremental backfill: newest-first from where the store left off; on a
+    fresh store, walk page_limit pages of history via page_token. REGRESSION
+    (review 2026-08-02, high): dropping the token refetched the identical
+    first page five times and 'multi-day backfill' meant 50 articles."""
+    newest = stats(con)["newest"]
+    items, token = client.news(limit=50, start=newest)
+    if not newest:
+        for _ in range(page_limit):
+            if not token:
+                break
+            more, token = client.news(limit=50, page_token=token)
+            items.extend(more)
+    return upsert(con, items)
+
+
 def stats(con: sqlite3.Connection) -> dict[str, Any]:
     n = con.execute("SELECT COUNT(*) FROM news").fetchone()[0]
     newest = con.execute("SELECT MAX(created_at) FROM news").fetchone()[0]

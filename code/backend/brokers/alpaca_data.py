@@ -105,10 +105,18 @@ def parse_chain_snapshot(underlying: str, j: dict[str, Any]) -> list[dict[str, A
     snaps = j.get("snapshots")
     if not isinstance(snaps, dict):
         raise BrokerError("alpaca: unrecognized chain payload")
+    # OCC roots never contain dots: BRK.B options carry root "BRKB", and
+    # corporate-action-adjusted series get a digit suffix ("BRKB1"). A naive
+    # startswith(underlying) filtered ENTIRE chains of dotted-class shares to
+    # zero rows (review 2026-08-02).
+    clean_root = underlying.replace(".", "").upper()
     out = []
     for occ, s in snaps.items():
         parsed = parse_occ(occ)
-        if parsed is None or not occ.startswith(underlying):
+        if parsed is None:
+            continue
+        root = parsed["root"].upper().rstrip("0123456789")
+        if root != clean_root:
             continue
         quote = s.get("latestQuote") or {}
         trade = s.get("latestTrade") or {}

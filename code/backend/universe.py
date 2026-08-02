@@ -84,35 +84,45 @@ class Universe:
     # cutoff silently drops the right answer while near-miss tickers pass.
     # RRF fusion + the exact/prefix pins keep the extra noise ranked low.
     def fuzzy(self, q: str, limit: int = 10, cutoff: float = 62.0) -> list[tuple[dict[str, Any], float]]:
+        # Capture ALL THREE structures under one lock: indexing a post-swap
+        # _by_symbol with pre-swap indices KeyError'd mid-keystroke when a
+        # sync's load() landed concurrently (review 2026-08-02).
         with self._lock:
             hay = self._haystack
             syms = self._symbols
+            by = self._by_symbol
         if not hay or len(q) < 2:
             return []
         hits = process.extract(
             q, hay, scorer=fuzz.WRatio, processor=utils.default_process,
             limit=limit, score_cutoff=cutoff,
         )
-        return [(self._by_symbol[syms[idx].upper()], score) for (_, score, idx) in hits]
+        return [(by[syms[idx].upper()], score) for (_, score, idx) in hits]
 
 
 def sync_from_alpaca(con: sqlite3.Connection, data_client, trading_base: str) -> int:
-    """Replace the assets table from Alpaca. Returns row count."""
-    total = 0
+    """Replace the assets table from Alpaca. Returns row count.
+
+    INVARIANT (review 2026-08-02, high): never hold a market.db write
+    transaction across network I/O. iter_assets is a lazy generator doing
+    multi-MB downloads; consuming it inside `with con:` held the write lock
+    for the whole download, and every other writer (recorder, live-news
+    upsert) burned through busy_timeout and 500'd — observed in production
+    the moment a user searched during first sync. Drain the network FIRST;
+    the transaction then lasts milliseconds."""
+    rows = [r for batch in data_client.iter_assets(trading_base) for r in batch]
     with con:
         con.execute("DELETE FROM assets")
-        for batch in data_client.iter_assets(trading_base):
-            con.executemany(
-                "INSERT OR REPLACE INTO assets (symbol, name, exchange, asset_class, tradable)"
-                " VALUES (:symbol, :name, :exchange, :asset_class, :tradable)",
-                batch,
-            )
-            total += len(batch)
+        con.executemany(
+            "INSERT OR REPLACE INTO assets (symbol, name, exchange, asset_class, tradable)"
+            " VALUES (:symbol, :name, :exchange, :asset_class, :tradable)",
+            rows,
+        )
         con.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('universe_synced_at', ?)",
             (dt.datetime.now(dt.timezone.utc).isoformat(),),
         )
-    return total
+    return len(rows)
 
 
 def sync_status(con: sqlite3.Connection) -> dict[str, Any]:

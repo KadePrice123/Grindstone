@@ -21,10 +21,17 @@ export function SymbolPage({ symbol, onBack }: { symbol: string; onBack: () => v
 
   useEffect(() => {
     let stop = false
+    // Navigating SPY -> AAPL must not render AAPL's header over SPY's price
+    // and news while the fetch is in flight (review 2026-08-02).
+    setData(null)
+    setError(null)
     const load = async () => {
       try {
         const d = await api<SymbolSummary>('GET', `/api/symbols/${encodeURIComponent(symbol)}/summary`)
-        if (!stop) setData(d)
+        if (!stop) {
+          setData(d)
+          setError(null) // a transient failure must not leave a permanent banner
+        }
       } catch (e) {
         if (!stop) setError(e instanceof ApiError ? e.message : String(e))
       }

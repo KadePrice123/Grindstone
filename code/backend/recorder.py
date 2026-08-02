@@ -55,6 +55,9 @@ def validate_job(kind: str, symbol: str, timeframe: str, interval_seconds: int,
     if asset_class in ("future", "index") and kind in ("bars", "chain"):
         return (f"{symbol}: no connected data source carries {asset_class} data yet — "
                 "arrives with the TastyTrade adapter (REQUIREMENTS.md 6.9)")
+    if asset_class == "crypto" and kind in ("bars", "chain"):
+        return (f"{symbol}: crypto recording isn't wired yet — crypto bars use a "
+                "different Alpaca endpoint (v1beta3) and crypto has no options chain")
     if kind == "bars" and timeframe not in TIMEFRAMES:
         return f"timeframe must be one of {', '.join(TIMEFRAMES)}"
     if interval_seconds < MIN_INTERVAL:
@@ -186,23 +189,38 @@ class Recorder:
 
     # ----------------------------------------------------------------- prune
     def prune(self) -> dict[str, int]:
-        """Delete rows older than each job's retention. News uses the longest
-        news-job retention (default 90d) so the KB keeps its window."""
+        """Delete rows older than the LONGEST retention any job declares for
+        that data — never per-job (review 2026-08-02, high: a 7-day job on
+        SPY silently deleted the 365-day history another SPY job was keeping;
+        the tables are shared, so the most protective promise wins). Data
+        with NO remaining job is kept forever — the UI says deleting a job
+        keeps its data, and prune must honor that."""
         removed = {"bars": 0, "chain": 0, "news": 0}
         jobs = [dict(j) for j in self._con.execute("SELECT * FROM record_jobs").fetchall()]
+
+        bars_keep: dict[tuple[str, str], int] = {}
+        chain_keep: dict[str, int] = {}
+        for j in jobs:
+            if j["kind"] == "bars":
+                k = (j["symbol"], j["timeframe"])
+                bars_keep[k] = max(bars_keep.get(k, 0), j["retention_days"])
+            elif j["kind"] == "chain":
+                chain_keep[j["symbol"]] = max(chain_keep.get(j["symbol"], 0),
+                                              j["retention_days"])
+
         with self._con:
-            for j in jobs:
-                cutoff = _iso(_utcnow() - dt.timedelta(days=j["retention_days"]))
-                if j["kind"] == "bars":
-                    cur = self._con.execute(
-                        "DELETE FROM rec_bars WHERE symbol=? AND timeframe=? AND ts<?",
-                        (j["symbol"], j["timeframe"], cutoff))
-                    removed["bars"] += cur.rowcount
-                elif j["kind"] == "chain":
-                    cur = self._con.execute(
-                        "DELETE FROM rec_chain WHERE underlying=? AND ts<?",
-                        (j["symbol"], cutoff))
-                    removed["chain"] += cur.rowcount
+            for (symbol, timeframe), days in bars_keep.items():
+                cutoff = _iso(_utcnow() - dt.timedelta(days=days))
+                cur = self._con.execute(
+                    "DELETE FROM rec_bars WHERE symbol=? AND timeframe=? AND ts<?",
+                    (symbol, timeframe, cutoff))
+                removed["bars"] += cur.rowcount
+            for underlying, days in chain_keep.items():
+                cutoff = _iso(_utcnow() - dt.timedelta(days=days))
+                cur = self._con.execute(
+                    "DELETE FROM rec_chain WHERE underlying=? AND ts<?",
+                    (underlying, cutoff))
+                removed["chain"] += cur.rowcount
             news_days = max([j["retention_days"] for j in jobs if j["kind"] == "news"],
                             default=90)
             cutoff = _iso(_utcnow() - dt.timedelta(days=news_days))

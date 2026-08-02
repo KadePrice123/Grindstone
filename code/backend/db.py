@@ -68,6 +68,7 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
     con = sqlite3.connect(path or (data_dir() / "app.db"))
     try:
         con.row_factory = sqlite3.Row
+        con.execute("PRAGMA busy_timeout=5000")
         con.execute("PRAGMA journal_mode=DELETE")
         con.execute("PRAGMA foreign_keys=ON")
         con.executescript(_SCHEMA)

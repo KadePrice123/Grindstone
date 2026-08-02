@@ -486,6 +486,131 @@ def _alpaca_data_parsers():
     assert n["updated_at"] == "T", "missing updated_at must fall back to created_at"
 
 
+@check("review regressions: sync lock scope, backfill pagination, prune, BRK.B, cooldown")
+def _review_regressions():
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from backend import newsstore
+    from backend.app import State
+    from backend.brokers.alpaca_data import parse_chain_snapshot
+    from backend.marketdb import connect_market
+    from backend.recorder import Recorder
+    from backend.universe import sync_from_alpaca
+
+    with tempfile.TemporaryDirectory() as tmp:
+        con = connect_market(Path(tmp) / "m.db")
+
+        # 1. sync must NEVER hold a write transaction across network I/O —
+        #    the generator is consumed while con.in_transaction is False.
+        class FakeAssets:
+            def iter_assets(self, base):
+                assert not con.in_transaction, \
+                    "sync holds a write transaction across the network fetch"
+                yield [{"symbol": "AAA", "name": "A", "exchange": "X",
+                        "asset_class": "us_equity", "tradable": True}]
+                assert not con.in_transaction
+                yield [{"symbol": "BBB", "name": "B", "exchange": "X",
+                        "asset_class": "us_equity", "tradable": True}]
+
+        assert sync_from_alpaca(con, FakeAssets(), "http://x") == 2
+
+        # 2. first-run backfill must follow page_token, not refetch page one.
+        class FakeNews:
+            def __init__(self):
+                self.calls = []
+
+            def news(self, symbols=None, limit=50, start=None, page_token=None):
+                self.calls.append(page_token)
+                n = len(self.calls)
+                item = {"id": n, "headline": f"h{n}", "summary": "", "source": "t",
+                        "url": "", "symbols": ["AAA"],
+                        "created_at": f"2026-08-0{n}T00:00:00Z",
+                        "updated_at": f"2026-08-0{n}T00:00:00Z"}
+                return [item], (f"tok{n}" if n < 3 else None)
+
+        fake = FakeNews()
+        wrote = newsstore.backfill(con, fake, page_limit=5)
+        assert fake.calls == [None, "tok1", "tok2"], \
+            f"backfill did not paginate: {fake.calls}"
+        assert wrote == 3
+
+        # 3. prune: the LONGEST retention for the same data wins, and data
+        #    with no job is untouched.
+        rec = Recorder(con, lambda _u: None)
+        with con:
+            con.execute("INSERT INTO record_jobs (user_id, kind, symbol, timeframe,"
+                        " interval_seconds, retention_days) VALUES (1,'chain','SPY','',900,7)")
+            con.execute("INSERT INTO record_jobs (user_id, kind, symbol, timeframe,"
+                        " interval_seconds, retention_days) VALUES (2,'chain','SPY','',900,3650)")
+            con.executemany(
+                "INSERT INTO rec_chain (underlying, ts, occ_symbol, expiration, strike, right)"
+                " VALUES (?,?,?,?,?,?)",
+                [("SPY", "2024-01-01T00:00:00Z", "SPY240119C1", "2024-01-19", 1, "C"),
+                 ("QQQ", "2000-01-01T00:00:00Z", "QQQ000121C1", "2000-01-21", 1, "C")])
+        rec.prune()
+        left = {r[0] for r in con.execute("SELECT underlying FROM rec_chain").fetchall()}
+        assert left == {"SPY", "QQQ"}, (
+            f"prune violated its promises (left={left}): shortest retention must "
+            "not beat longest, and job-less data must be kept")
+
+        # 4. dotted-class chains survive the root filter (BRK.B -> root BRKB).
+        chain = parse_chain_snapshot("BRK.B", {"snapshots": {
+            "BRKB260821C00500000": {"latestQuote": {"bp": 1, "ap": 2}},
+            "BRKB1260821C00500000": {"latestQuote": {"bp": 1, "ap": 2}},  # adjusted series
+            "SPY260821C00500000": {"latestQuote": {"bp": 1, "ap": 2}},
+        }})
+        occs = {c["occ_symbol"] for c in chain}
+        assert occs == {"BRKB260821C00500000", "BRKB1260821C00500000"}, occs
+
+        # 5. live-news fallthrough is rate-gated per symbol.
+        st = State("t")
+        assert st.live_news_allowed("SPY") is True
+        assert st.live_news_allowed("SPY") is False, "no cooldown — omnibox is a request amplifier"
+        assert st.live_news_allowed("QQQ") is True, "cooldown must be per-symbol"
+        con.close()
+
+
+@check("market.db writers collide politely (busy_timeout regression)")
+def _busy_timeout():
+    # REGRESSION (production, 2026-08-02): a user searching during the initial
+    # universe sync got 'database is locked' 500s — SQLite's default
+    # busy_timeout is zero, and WAL only saves readers, not writer-vs-writer.
+    import tempfile
+    import threading
+
+    sys.path.insert(0, str(CODE))
+    from backend.marketdb import connect_market
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "m.db"
+        a = connect_market(p)
+        assert a.execute("PRAGMA busy_timeout").fetchone()[0] >= 1000, \
+            "busy_timeout not set — writer collisions become instant 500s"
+        errors: list[str] = []
+
+        def writer(n: int) -> None:
+            try:
+                con = connect_market(p)
+                for i in range(60):
+                    with con:
+                        con.execute(
+                            "INSERT OR REPLACE INTO assets (symbol, name) VALUES (?,?)",
+                            (f"S{n}_{i}", "x" * 200),
+                        )
+                con.close()
+            except Exception as e:  # noqa: BLE001
+                errors.append(str(e))
+
+        threads = [threading.Thread(target=writer, args=(k,)) for k in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        a.close()
+        assert not errors, f"concurrent writers failed: {errors[:2]}"
+
+
 @check("provider fallback: yahoo stays lazy, index symbols map, honesty labels")
 def _providers():
     import importlib

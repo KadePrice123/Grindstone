@@ -36,30 +36,38 @@ export function Omnibox({
 }) {
   const [q, setQ] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
+  const [notice, setNotice] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
   const [sel, setSel] = useState(0)
   const timer = useRef<number | null>(null)
   const seq = useRef(0)
   const boxRef = useRef<HTMLDivElement>(null)
 
+  // The dropdown must always answer a non-empty query — silence reads as
+  // "search is broken" (it did, on a fresh install with no synced universe).
   const run = useCallback(async (text: string) => {
     const mine = ++seq.current
     if (!text.trim()) {
       setResults([])
+      setNotice(null)
       setOpen(false)
       return
     }
     try {
-      const res = await api<{ results: SearchResult[] }>(
+      const res = await api<{ results: SearchResult[]; empty?: boolean }>(
         'GET',
         `/api/search?q=${encodeURIComponent(text)}`
       )
       if (mine !== seq.current) return // a newer keystroke superseded us
       setResults(res.results)
+      setNotice(res.results.length === 0 ? `No matches for “${text.trim()}”` : null)
       setSel(0)
-      setOpen(res.results.length > 0)
-    } catch {
-      /* backend hiccup: keep the previous dropdown rather than flashing */
+      setOpen(true)
+    } catch (e) {
+      if (mine !== seq.current) return
+      setResults([])
+      setNotice('Search is unavailable — backend error. Try again in a moment.')
+      setOpen(true)
     }
   }, [])
 
@@ -100,7 +108,13 @@ export function Omnibox({
       if (boxRef.current && !boxRef.current.contains(ev.target as Node)) setOpen(false)
     }
     document.addEventListener('mousedown', away)
-    return () => document.removeEventListener('mousedown', away)
+    return () => {
+      document.removeEventListener('mousedown', away)
+      // A pending debounce firing after unmount would setState on a dead
+      // component and waste a backend call.
+      if (timer.current) window.clearTimeout(timer.current)
+      seq.current += 1
+    }
   }, [])
 
   return (
@@ -117,6 +131,7 @@ export function Omnibox({
       />
       {open ? (
         <div className="omni-drop">
+          {notice ? <div className="omni-notice">{notice}</div> : null}
           {results.map((r, i) => (
             <div
               key={`${r.type}:${r.symbol ?? r.id ?? r.page ?? r.action}:${i}`}

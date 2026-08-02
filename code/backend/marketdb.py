@@ -80,12 +80,28 @@ def market_path() -> Path:
     return data_dir() / "market.db"
 
 
+SCHEMA_VERSION = 1
+
+
 def connect_market(path: Path | None = None) -> sqlite3.Connection:
     """Long-lived connections are fine here (recorder thread owns one);
-    request handlers should still open-use-close."""
+    request handlers should still open-use-close.
+
+    busy_timeout is load-bearing: three writers share this file (recorder,
+    login-time refresh, the search route's live-news upsert). SQLite's default
+    timeout is ZERO — the first collision was an instant 'database is locked'
+    500 in production (observed the moment a user searched during the initial
+    universe sync). 5s of politeness fixes what no amount of WAL does,
+    because WAL only de-conflicts readers from writers, not writers from
+    writers."""
     con = sqlite3.connect(path or market_path(), check_same_thread=False)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA busy_timeout=5000")
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
-    con.executescript(_SCHEMA)
+    # DDL on every connect also takes write locks; run it once per schema
+    # version instead of on every request.
+    if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+        con.executescript(_SCHEMA)
+        con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return con

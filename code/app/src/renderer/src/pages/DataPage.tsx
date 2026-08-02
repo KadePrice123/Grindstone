@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, DataUsage, RecordJob } from '../api'
 import { DataIcon } from '../components/icons'
 
@@ -31,11 +31,20 @@ export function DataPage({ onBack }: { onBack: () => void }) {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  // Monotonic guard: the 20s tick racing a post-add refresh made a
+  // just-added job vanish when the older response landed last.
+  const refreshSeq = useRef(0)
   const refresh = useCallback(async () => {
+    const mine = ++refreshSeq.current
     try {
-      setJobs(await api<RecordJob[]>('GET', '/api/datamgmt/jobs'))
-      setUsage(await api<DataUsage>('GET', '/api/datamgmt/usage'))
+      const j = await api<RecordJob[]>('GET', '/api/datamgmt/jobs')
+      const u = await api<DataUsage>('GET', '/api/datamgmt/usage')
+      if (mine !== refreshSeq.current) return
+      setJobs(j)
+      setUsage(u)
+      setError(null)
     } catch (e) {
+      if (mine !== refreshSeq.current) return
       setError(e instanceof ApiError ? e.message : String(e))
     }
   }, [])
@@ -66,13 +75,21 @@ export function DataPage({ onBack }: { onBack: () => void }) {
   }
 
   const toggle = async (j: RecordJob) => {
-    await api('PATCH', `/api/datamgmt/jobs/${j.id}`, { enabled: !j.enabled })
-    await refresh()
+    try {
+      await api('PATCH', `/api/datamgmt/jobs/${j.id}`, { enabled: !j.enabled })
+      await refresh()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    }
   }
   const remove = async (j: RecordJob) => {
     if (!confirm(`Delete this ${j.kind} job? Recorded data is kept.`)) return
-    await api('DELETE', `/api/datamgmt/jobs/${j.id}`)
-    await refresh()
+    try {
+      await api('DELETE', `/api/datamgmt/jobs/${j.id}`)
+      await refresh()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    }
   }
 
   return (

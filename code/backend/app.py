@@ -17,6 +17,7 @@ from __future__ import annotations
 import hmac
 import sqlite3
 import threading
+import time
 import traceback
 from contextlib import AbstractContextManager
 from typing import Any
@@ -51,6 +52,8 @@ class State:
         self.universe = Universe()
         self.recorder = None  # set by main.py; tests may leave it None
         self._refresh_thread: threading.Thread | None = None
+        self._refresh_lock = threading.Lock()
+        self._live_news_last: dict[str, float] = {}
 
     def db(self) -> AbstractContextManager[sqlite3.Connection]:
         """`with state.db() as db:` — one transaction, always closed."""
@@ -69,11 +72,23 @@ class State:
         with self.db() as db:
             return market.alpaca_creds_for(db, user_id, snap.dek)
 
+    def live_news_allowed(self, symbol: str, cooldown: float = 60.0) -> bool:
+        """Rate-gate for the omnibox live-news fallthrough: without this,
+        every keystroke of '<TICKER> news' for an unknown-news symbol was an
+        uncached Alpaca request — an amplifier against the shared 200/min
+        budget (review 2026-08-02). One live attempt per symbol per minute."""
+        now = time.monotonic()
+        last = self._live_news_last.get(symbol.upper(), -1e12)
+        if now - last < cooldown:
+            return False
+        self._live_news_last[symbol.upper()] = now
+        return True
+
     def kick_market_refresh(self, user_id: int) -> None:
-        """After login: sync the symbol universe and backfill news if stale.
-        Background thread; failures degrade to an empty index, never a crash."""
-        if self._refresh_thread and self._refresh_thread.is_alive():
-            return
+        """After login/account-add: sync the symbol universe and backfill news
+        if stale. Background thread; failures degrade to an empty index,
+        never a crash. Lock closes the check-then-act gap — two concurrent
+        logins used to double-spawn the sync."""
 
         def run() -> None:
             try:
@@ -86,24 +101,19 @@ class State:
                         universe_mod.sync_from_alpaca(con, client, PAPER_URL)
                     self.universe.load(con)
                     if creds:
-                        newest = newsstore.stats(con)["newest"]
                         client = AlpacaData(creds["key_id"], creds["secret_key"])
-                        items, _ = client.news(limit=50, start=newest)
-                        if not newest:  # first run: pull a few days back
-                            for _ in range(5):
-                                more, token = client.news(limit=50)
-                                items.extend(more)
-                                if not token:
-                                    break
-                        newsstore.upsert(con, items)
+                        newsstore.backfill(con, client)
                 finally:
                     con.close()
             except Exception:  # noqa: BLE001 — background refresh must not kill the app
                 traceback.print_exc()
 
-        self._refresh_thread = threading.Thread(target=run, daemon=True,
-                                                name="market-refresh")
-        self._refresh_thread.start()
+        with self._refresh_lock:
+            if self._refresh_thread and self._refresh_thread.is_alive():
+                return
+            self._refresh_thread = threading.Thread(target=run, daemon=True,
+                                                    name="market-refresh")
+            self._refresh_thread.start()
 
 
 # ------------------------------------------------------------------ schemas
@@ -341,6 +351,8 @@ def create_app(state: State) -> FastAPI:
         con = state.market()
 
         def live_news(symbol: str) -> list[dict[str, Any]]:
+            if not state.live_news_allowed(symbol):
+                return []
             creds = state.creds_for(s.user_id)
             if creds is None:
                 return []
@@ -353,9 +365,21 @@ def create_app(state: State) -> FastAPI:
             return items
 
         try:
-            return search_mod.query(q, state.universe, con, live_news=live_news)
+            res = search_mod.query(q, state.universe, con, live_news=live_news)
         finally:
             con.close()
+        # An empty answer must explain itself (observed: a fresh install has
+        # no synced universe, so every ticker search returned silent nothing).
+        if q.strip() and not res["results"]:
+            if state.universe.size <= len(universe_mod.SUPPLEMENT) + 2:
+                res["results"] = [{
+                    "type": "page", "page": "accounts",
+                    "title": "Add an Alpaca account to enable symbol & news search",
+                    "subtitle": "The ticker universe syncs from your account — Accounts page",
+                }]
+            else:
+                res["empty"] = True
+        return res
 
     @app.get("/api/symbols/{symbol}/summary")
     def symbol_summary(symbol: str, s=Depends(current_session)) -> dict[str, Any]:
@@ -461,6 +485,8 @@ def create_app(state: State) -> FastAPI:
                 raise HTTPException(422, f"interval must be at least {recorder_mod.MIN_INTERVAL}s")
             sets.append("interval_seconds=?"); vals.append(body.interval_seconds)
         if body.retention_days is not None:
+            if not 1 <= body.retention_days <= 3650:
+                raise HTTPException(422, "retention must be 1..3650 days")
             sets.append("retention_days=?"); vals.append(body.retention_days)
         if not sets:
             raise HTTPException(422, "nothing to change")

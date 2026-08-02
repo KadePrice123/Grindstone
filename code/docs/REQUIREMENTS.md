@@ -148,6 +148,19 @@ Decided in §6; summarized here so the requirements below have a spine:
 - **FR-DATA-4** News pipeline: every incoming article is (a) stored locally,
   (b) embedded into the KB (§4.8), (c) available to omnibox search within
   seconds.
+- **FR-DATA-5 Recording jobs (data management).** The user chooses what to
+  record, how often, and how long to keep it: price bars (1Min–1Day), options
+  chain snapshots (per underlying, every 1min–daily), and news capture — each
+  with a retention window, managed from a **Data management** page showing
+  per-job status, what's stored, and store size. Jobs run only while the
+  owner is unlocked (credentials never leave the vault); chain rows record
+  the feed they came from; futures/index jobs are rejected with the real
+  reason until a source exists (§6.9). *(Delivered early with the search
+  milestone.)*
+- **FR-DATA-6 Keyless fallback.** Users without any data API still get
+  delayed quotes and daily history via Yahoo Finance (yfinance, pinned, own
+  throttle, personal-use terms), always labeled *delayed* and never used to
+  price orders. Provider policy per instrument: §6.9.
 
 ### 4.4 Browser-style shell
 
@@ -812,7 +825,7 @@ Per workspace rules the project declares one offline gate in
 | **M1 Spine** | Electron shell + Python sidecar handshake; login; encrypted key store; Alpaca account connect | gate v1 passes; app boots to idle page |
 | **M2 Browser UX** | tabs, tear-off/regroup, windows, context menus, sidebar rail, favorites, session restore | Chrome-parity drag test script |
 | **M3 Data + charts** | stream hub, bars cache, chart page, drawings, built-in indicators | 60fps/50k-candle check |
-| **M4 Omnibox** | fuzzy+semantic+intent search over tickers/pages/news | latency budget met |
+| **M4 Omnibox** | fuzzy+semantic+intent search over tickers/pages/news | latency budget met — *lexical tier + intent grammar + news + recording engine delivered early (2026-08-02); semantic tier rides the AI milestone* |
 | **M5 Trading** | chain viewer, trade panel, analytics, order tickets (paper), positions page, chart trade graphics | TastyTrade dry-run parity on BP numbers |
 | **M6 AI** | Open WebUI integration, Claude pipe, MCP server, context piping, news KB pipeline | drag-chart-to-AI demo; KB freshness check |
 | **M7 Ship** | installer, update script + GitHub Releases channel, logos, theming polish, Webull/Fidelity flags | **installer built and executed on this machine; update applied over old version** |
