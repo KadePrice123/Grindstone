@@ -1,18 +1,78 @@
 /**
- * Drawing layer for lightweight-charts: an SVG overlay sized to pane 0, with
- * drawings stored in DATA space {time, price} and projected to pixels only
- * when something actually changes. Re-render triggers are all event-driven —
- * visible-range changes, container resizes (ResizeObserver), crosshair moves
- * while a trend line is half-placed, and drawing edits. NO rAF loop, NO
- * setInterval: anything that repaints at rest holds the GPU forever (the
- * spinning-logo lesson, measured at ~10% of a core).
+ * ChartDraw v2 — the drawing + measuring engine for every price chart.
  *
- * Drawings are keyed per chart (e.g. "SPY|1Day") in a module-level Map so a
+ * An SVG overlay (geometry) plus an HTML label layer (measurement chips,
+ * candle readouts) sized to pane 0. Objects live in DATA space {time, price}
+ * and are projected to pixels only when something changes. Re-render triggers
+ * are all event-driven — visible-range changes, ResizeObserver, crosshair
+ * moves while a tool is armed, clicks, edits. NO rAF loop, NO setInterval:
+ * anything that repaints at rest holds the GPU forever (the spinning-logo
+ * lesson). The gate greps this file for polling.
+ *
+ * ENGINE API (what the pages consume):
+ *   new ChartDraw(key, chart, mainSeries, opts?)
+ *     opts.bars    Bar[] or () => Bar[] — the bars the chart is showing;
+ *                  needed by measure (candle snap, bar counts) and inspect
+ *                  (OHLC). A plain array is a snapshot — call setBars() when
+ *                  the data refetches. Without bars those features degrade
+ *                  honestly: no candle snap, no bar counts, inspect is inert.
+ *     opts.percent () => boolean — true when the price axis is % (normalize
+ *                  mode); measure labels then show Δ% only. Falls back to the
+ *                  charts-page key convention (key ends in '|%').
+ *   setKey(key)            switch session bucket (symbol/timeframe/scale)
+ *   setSeries(series)      re-anchor after Chart.tsx rebuilds its series
+ *   setBars(bars)          refresh the bars source on the re-anchor path
+ *   setTool(tool)          any DrawTool; arms previews, resets placements
+ *   updateDrawing(id, pts) exact-value edit from DrawEditor (times snapped
+ *                          to the nearest bar so the point stays projectable)
+ *   deleteSelected()       remove every selected drawing
+ *   clearSelection()       deselect without deleting (DrawEditor's ×)
+ *   clearDrawings()        drawings only (alias clear() kept for old callers)
+ *   clearMeasures()        measures + inspect pins only
+ *   setDrawingsHidden(b)   hide/show all drawings+measures without deleting
+ *   getState()             {tool, drawings, measures, selection, selected,
+ *                          hidden} — drawings/measures are COUNTS (they feed
+ *                          data-draw-count / data-measure-count directly;
+ *                          measures folds in inspect pins, which clearmeasure
+ *                          also removes); selection is the selected Drawing
+ *                          objects for DrawEditor, selected their ids
+ *   onChange(cb)           fires with getState() on ANY state change (and
+ *                          once on subscribe, so pages start synced); this is
+ *                          how pages feed data-draw-* attrs and DrawEditor
+ *   destroy()
+ *
+ * Buckets are keyed per chart (e.g. "SPY|1Day") in a module-level Map so a
  * tab revisit within the session keeps them. The key must include the
- * timeframe: anchors are bar timestamps and timeToCoordinate() only resolves
- * times that exist on the current scale, so a 1Min anchor is unprojectable
- * on a 1Day axis. Separate buckets keep every stored drawing renderable in
- * the bucket it was drawn in.
+ * timeframe (a 1Min anchor is unprojectable on a 1Day axis) and the axis
+ * semantics (a $ anchor is meaningless on a % axis — the charts page keys
+ * '|$' / '|%' for exactly that reason).
+ *
+ * TRIM (SolidWorks-style, the arrangement model):
+ *   Clicking a line removes ONLY the clicked span — the piece between the
+ *   nearest intersections on either side of the click (segment ends when
+ *   there is none). All intersection math runs in PIXEL space: intersections
+ *   must match what the eye sees, and data-space math breaks the moment the
+ *   scale is % or log. The surviving spans come back as independent trend
+ *   drawings, and the drawing that provided each cut boundary is split at
+ *   that intersection too — so after a trim every visible span is its own
+ *   selectable/deletable object (two crossing trends = 4 spans; trim one and
+ *   3 remain as 3 separate drawings).
+ *   - hline spans become 2-pt trends with equal prices, outer ends bounded
+ *     at the DATA extent (first/last loaded bar) — an hline is infinite, the
+ *     data is the honest bound.
+ *   - vlines have no price extent: spans become equal-time 2-pt trends
+ *     (which project as vertical segments), outer ends bounded at the
+ *     VISIBLE price range at trim time.
+ *   - hlines/vlines with no intersections delete whole on trim, same as a
+ *     lone trend.
+ *   - circles are excluded from trim v1 entirely (neither trimmable nor a
+ *     cut boundary) — ellipse/segment intersection buys little at this stage.
+ *   Trend span endpoints are quantized to bar times (times must exist on the
+ *   scale to project), and the price is recomputed ON the original pixel
+ *   line at the quantized x so the cut edges stay collinear — no kinks.
+ *   Spans that quantize away (shorter than a bar / than MIN_SPAN_PX) are
+ *   dropped; a boundary drawing whose both halves vanish is kept whole
+ *   rather than evaporated by an operation on another line.
  */
 import type {
   IChartApi,
@@ -21,41 +81,240 @@ import type {
   SeriesType,
   UTCTimestamp,
 } from 'lightweight-charts'
+import type { Bar } from './Chart'
 
-export type DrawTool = 'pointer' | 'trend' | 'hline'
+// ---------------------------------------------------------------------------
+// Public model
+// ---------------------------------------------------------------------------
 
-interface Anchor {
+export const DRAW_TOOL_IDS = [
+  'pointer', 'trend', 'hline', 'vline', 'circle',
+  'select', 'delete', 'trim', 'measure', 'inspect',
+] as const
+export type DrawTool = (typeof DRAW_TOOL_IDS)[number]
+export function isDrawTool(v: string): v is DrawTool {
+  return (DRAW_TOOL_IDS as readonly string[]).includes(v)
+}
+
+export interface Pt {
   time: UTCTimestamp
   price: number
 }
 
-type Drawing =
-  | { kind: 'trend'; a: Anchor; b: Anchor }
-  | { kind: 'hline'; at: Anchor } // price is the line; time only places the handle
+export type DrawKind = 'trend' | 'hline' | 'vline' | 'circle'
 
-const sessionStore = new Map<string, Drawing[]>()
+/** trend: 2 pts. hline: 1 pt (price is the line; time only places the
+ *  handle). vline: 1 pt (time is the line; price only places the handle).
+ *  circle: center + edge, rendered as an ellipse (rx/ry from the projected
+ *  deltas, so it tracks zoom in both axes). */
+export interface Drawing {
+  id: string
+  kind: DrawKind
+  points: Pt[]
+}
+
+/** Measure anchors snap at click time and stay attached:
+ *  - candle: the bar's identity; position/price resolve live from its close.
+ *  - line: rides the drawing (u = fraction along a trend; hlines pin price,
+ *    vlines pin time). time/price are the snap-moment snapshot, used as the
+ *    free-anchor fallback if the drawing is later deleted or trimmed away.
+ *  - free: a fixed data-space point. */
+export type MeasureAnchor =
+  | { kind: 'candle'; time: UTCTimestamp }
+  | { kind: 'line'; drawingId: string; u: number; time: UTCTimestamp; price: number }
+  | { kind: 'free'; time: UTCTimestamp; price: number }
+
+export interface Measure {
+  id: string
+  a: MeasureAnchor
+  b: MeasureAnchor
+}
+
+/** A pinned inspect readout: the bar keeps its identity, OHLC resolves live. */
+export interface InspectPin {
+  id: string
+  time: UTCTimestamp
+}
+
+export interface DrawState {
+  tool: DrawTool
+  /** COUNT of drawings — feeds data-draw-count as-is. */
+  drawings: number
+  /** COUNT of measures + inspect pins — feeds data-measure-count as-is
+   *  (pins are measurement annotations: clearmeasure removes both). */
+  measures: number
+  /** The selected Drawing objects, in selection order — feeds DrawEditor. */
+  selection: Drawing[]
+  /** Their ids, same order. */
+  selected: string[]
+  hidden: boolean
+}
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
+interface Bucket {
+  drawings: Drawing[]
+  measures: Measure[]
+  pins: InspectPin[]
+}
+
+const sessionStore = new Map<string, Bucket>()
+
+let nextId = 1
+const mkId = (prefix: string) => `${prefix}${nextId++}`
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
 /** A press that travelled further than this before release is a pan. */
 const CLICK_SLOP_PX = 4
+/** Generous hit target for select/delete/trim and line snapping. */
+const HIT_PX = 8
+/** Horizontal distance to a bar center that snaps a measure anchor to it. */
+const CANDLE_SNAP_PX = 6
+/** Trim spans shorter than this are slivers, not drawings. */
+const MIN_SPAN_PX = 12
+const TRIM_EPS = 1e-6
+const ELLIPSE_HIT_SAMPLES = 48
+
+const STROKE = 'var(--accent)'
+const STROKE_DANGER = 'var(--loss)'
+const HALO = 'color-mix(in srgb, var(--accent) 25%, transparent)'
+const HALO_DANGER = 'color-mix(in srgb, var(--loss) 30%, transparent)'
+const MEASURE_STROKE = 'var(--text-dim)'
+
+interface XY {
+  x: number
+  y: number
+}
+interface Seg {
+  a: XY
+  b: XY
+}
+
+function distToSeg(px: number, py: number, a: XY, b: XY): { dist: number; t: number; nx: number; ny: number } {
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const len2 = dx * dx + dy * dy
+  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / len2))
+  const nx = a.x + t * dx
+  const ny = a.y + t * dy
+  return { dist: Math.hypot(px - nx, py - ny), t, nx, ny }
+}
+
+/** Segment-segment intersection, standard param form; returns t along the
+ *  TARGET or null. Parallel lines return null — no single crossing to cut at. */
+function segSegIntersect(target: Seg, other: Seg): number | null {
+  const rx = target.b.x - target.a.x
+  const ry = target.b.y - target.a.y
+  const sx = other.b.x - other.a.x
+  const sy = other.b.y - other.a.y
+  const denom = rx * sy - ry * sx
+  if (Math.abs(denom) < 1e-9) return null
+  const qx = other.a.x - target.a.x
+  const qy = other.a.y - target.a.y
+  const t = (qx * sy - qy * sx) / denom
+  const u = (qx * ry - qy * rx) / denom
+  if (t < -1e-9 || t > 1 + 1e-9 || u < -1e-9 || u > 1 + 1e-9) return null
+  return t
+}
+
+const lerpSeg = (s: Seg, t: number): XY => ({
+  x: s.a.x + (s.b.x - s.a.x) * t,
+  y: s.a.y + (s.b.y - s.a.y) * t,
+})
+
+// ---- formatting -----------------------------------------------------------
+
+function fmtNum(v: number): string {
+  const a = Math.abs(v)
+  return v.toFixed(a >= 1 || a === 0 ? 2 : 4)
+}
+function signOf(v: number): string {
+  return v < 0 ? '-' : '+'
+}
+function fmtVol(v: number): string {
+  if (v >= 1e9) return `${(v / 1e9).toFixed(1)}B`
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`
+  if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`
+  return String(Math.round(v))
+}
+/** UTC on purpose: bar timestamps are UTC and the axis shows UTC — a local-
+ *  time label here would disagree with the scale under it. */
+function fmtDate(t: number): string {
+  const d = new Date(t * 1000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  const base = `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`
+  return d.getUTCHours() === 0 && d.getUTCMinutes() === 0 ? base : `${base} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`
+}
+function fmtSpan(sec: number): string {
+  const s = Math.abs(sec)
+  if (s < 60) return '0m'
+  if (s < 86400) {
+    const h = Math.floor(s / 3600)
+    const m = Math.round((s % 3600) / 60)
+    return h > 0 ? `${h}h ${m}m` : `${m}m`
+  }
+  return `${Math.round(s / 86400)}d`
+}
+
+interface ChipRow {
+  text: string
+  cls?: string
+}
+
+interface ResolvedAnchor {
+  x: number
+  y: number
+  price: number
+  time: UTCTimestamp
+}
+
+// ---------------------------------------------------------------------------
+// The engine
+// ---------------------------------------------------------------------------
 
 export class ChartDraw {
   readonly chart: IChartApi
   private series: ISeriesApi<SeriesType>
   private key: string
   private tool: DrawTool = 'pointer'
-  private pending: Anchor | null = null
-  private cursor: { x: number; y: number } | null = null
+  private barsOpt?: () => Bar[]
+  private percentOpt?: () => boolean
+
+  /** First click of a two-click placement (trend/circle). */
+  private pendingPt: Pt | null = null
+  /** First click of a measure. */
+  private pendingAnchor: MeasureAnchor | null = null
+  private cursor: { x: number; y: number; time: UTCTimestamp | null } | null = null
+  private selected: string[] = []
+  private hidden = false
+  private changeCb: ((s: DrawState) => void) | null = null
+
   private readonly host: HTMLElement
   private readonly svg: SVGSVGElement
+  private readonly labels: HTMLDivElement
   private readonly ro: ResizeObserver
-  private downAt: { x: number; y: number } | null = null
+  private downAt: XY | null = null
   private teardown: (() => void)[] = []
 
-  constructor(key: string, chart: IChartApi, series: ISeriesApi<SeriesType>) {
+  // bars index cache, keyed by array identity — pages hand the same array
+  // until data actually changes, so this rebuilds only on real reloads.
+  private barsCacheSrc: Bar[] | null = null
+  private barsCacheTimes: number[] = []
+  private barsCacheMap = new Map<number, number>()
+
+  constructor(
+    key: string,
+    chart: IChartApi,
+    series: ISeriesApi<SeriesType>,
+    opts?: { bars?: Bar[] | (() => Bar[]); percent?: () => boolean }
+  ) {
     this.key = key
     this.chart = chart
     this.series = series
+    this.setBarsSource(opts?.bars)
+    this.percentOpt = opts?.percent
     this.host = chart.chartElement()
     if (getComputedStyle(this.host).position === 'static') this.host.style.position = 'relative'
 
@@ -69,6 +328,21 @@ export class ChartDraw {
     st.zIndex = '3' // above the library's canvases
     this.host.appendChild(this.svg)
 
+    // HTML layer for measurement chips / readouts — text layout and theming
+    // belong to CSS, not to hand-measured SVG rects. Class styles it
+    // (charts.css); the load-bearing bits are inlined so a missing import
+    // cannot smear block text across the chart.
+    this.labels = document.createElement('div')
+    this.labels.className = 'cd-labels'
+    const ls = this.labels.style
+    ls.position = 'absolute'
+    ls.left = '0'
+    ls.top = '0'
+    ls.overflow = 'hidden'
+    ls.pointerEvents = 'none'
+    ls.zIndex = '4'
+    this.host.appendChild(this.labels)
+
     const ts = chart.timeScale()
     const onRange = () => this.render()
     ts.subscribeVisibleLogicalRangeChange(onRange)
@@ -78,14 +352,18 @@ export class ChartDraw {
     chart.subscribeClick(onClick)
     this.teardown.push(() => chart.unsubscribeClick(onClick))
 
-    // Live preview while a trend line has one anchor down. Subscribed always
-    // but an immediate no-op unless placing — no per-move cost at rest.
+    // Live previews: every armed tool tracks the crosshair (hline/vline
+    // preview BEFORE the first click — a blind placement was the core of the
+    // clunkiness complaint). Pointer mode is an immediate no-op, so there is
+    // no per-move cost at rest.
     const onMove = (p: MouseEventParams) => {
-      if (this.pending === null) return
-      this.cursor =
-        p.point !== undefined && (p.paneIndex ?? 0) === 0
-          ? { x: p.point.x, y: p.point.y }
-          : null
+      if (this.tool === 'pointer') return
+      const ok = p.point !== undefined && (p.paneIndex ?? 0) === 0
+      const next = ok
+        ? { x: p.point!.x, y: p.point!.y, time: typeof p.time === 'number' ? p.time : null }
+        : null
+      if (next === null && this.cursor === null) return
+      this.cursor = next
       this.render()
     }
     chart.subscribeCrosshairMove(onMove)
@@ -101,13 +379,39 @@ export class ChartDraw {
     this.host.addEventListener('mousedown', onDown)
     this.teardown.push(() => this.host.removeEventListener('mousedown', onDown))
 
+    // Escape cancels an in-progress placement, then clears selection.
+    // Delete/Backspace removes the selection. Both ignore typing targets so
+    // the DrawEditor's inputs keep their own Escape/Delete semantics.
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      if (e.key === 'Escape') {
+        if (this.pendingPt !== null || this.pendingAnchor !== null) {
+          this.pendingPt = null
+          this.pendingAnchor = null
+          this.render()
+        } else if (this.selected.length > 0) {
+          this.selected = []
+          this.render()
+          this.emit()
+        }
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.selected.length > 0) {
+        this.deleteSelected()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    this.teardown.push(() => window.removeEventListener('keydown', onKey))
+
     // Fires only on actual size changes — event-driven, not a poll.
     this.ro = new ResizeObserver(() => this.render())
     this.ro.observe(this.host)
     this.teardown.push(() => this.ro.disconnect())
 
+    this.applyCursor()
     this.render()
   }
+
+  // ---- public surface -----------------------------------------------------
 
   /** Chart.tsx rebuilds its series on every data change; re-point at the live one. */
   setSeries(series: ISeriesApi<SeriesType>): void {
@@ -115,28 +419,135 @@ export class ChartDraw {
     this.render()
   }
 
-  /** Switch store bucket (symbol/timeframe change) — drops any half-placed line. */
+  /** Refresh the bars source. Pages that pass a snapshot array at
+   *  construction call this on the cheap re-anchor path so measure/inspect
+   *  don't keep reading pre-refetch data. */
+  setBars(bars: Bar[] | (() => Bar[])): void {
+    this.setBarsSource(bars)
+    this.render()
+  }
+
+  private setBarsSource(bars: Bar[] | (() => Bar[]) | undefined): void {
+    if (bars === undefined) this.barsOpt = undefined
+    else if (typeof bars === 'function') this.barsOpt = bars
+    else this.barsOpt = () => bars
+  }
+
+  /** Switch store bucket (symbol/timeframe/scale change) — drops any
+   *  half-placed object and the selection (ids belong to the old bucket). */
   setKey(key: string): void {
     if (key === this.key) return
     this.key = key
-    this.pending = null
+    this.pendingPt = null
+    this.pendingAnchor = null
+    this.selected = []
     this.cursor = null
     this.render()
+    this.emit()
   }
 
   setTool(tool: DrawTool): void {
     if (tool === this.tool) return
     this.tool = tool
-    this.pending = null
+    this.pendingPt = null
+    this.pendingAnchor = null
     this.cursor = null
+    this.applyCursor()
     this.render()
+    this.emit()
   }
 
-  clear(): void {
-    sessionStore.set(this.key, [])
-    this.pending = null
-    this.cursor = null
+  /** DrawEditor commit: exact values in, times snapped to the nearest bar so
+   *  the point stays projectable (timeToCoordinate only resolves times that
+   *  exist on the scale — a typed 'Saturday' would silently hide the line).
+   *  Without a bars getter the typed time is kept as-is. */
+  updateDrawing(id: string, points: Pt[]): void {
+    const d = this.bucket().drawings.find((x) => x.id === id)
+    if (!d) return
+    const want = d.kind === 'trend' || d.kind === 'circle' ? 2 : 1
+    if (points.length !== want) return
+    d.points = points.map((p) => ({
+      time: (this.nearestBarTime(p.time) ?? p.time) as UTCTimestamp,
+      price: p.price,
+    }))
     this.render()
+    this.emit()
+  }
+
+  deleteSelected(): void {
+    if (this.selected.length === 0) return
+    const b = this.bucket()
+    const doomed = new Set(this.selected)
+    b.drawings = b.drawings.filter((d) => !doomed.has(d.id))
+    this.selected = []
+    this.render()
+    this.emit()
+  }
+
+  /** Deselect everything without deleting (DrawEditor's × / page escape hatch). */
+  clearSelection(): void {
+    if (this.selected.length === 0) return
+    this.selected = []
+    this.render()
+    this.emit()
+  }
+
+  /** Drawings only. Measures anchored to a deleted line degrade to their
+   *  snap-moment free position rather than vanishing. */
+  clearDrawings(): void {
+    const b = this.bucket()
+    b.drawings = []
+    this.selected = []
+    this.pendingPt = null
+    this.render()
+    this.emit()
+  }
+
+  /** Kept for pre-v2 callers. */
+  clear(): void {
+    this.clearDrawings()
+  }
+
+  /** Measures + inspect pins only. */
+  clearMeasures(): void {
+    const b = this.bucket()
+    b.measures = []
+    b.pins = []
+    this.pendingAnchor = null
+    this.render()
+    this.emit()
+  }
+
+  /** vis:draw — hide/show everything without deleting. Placement previews
+   *  still render while hidden: a tool that draws an invisible line is a
+   *  dead cursor, and pages un-hide on the next state change anyway. */
+  setDrawingsHidden(hidden: boolean): void {
+    if (hidden === this.hidden) return
+    this.hidden = hidden
+    this.render()
+    this.emit()
+  }
+
+  getState(): DrawState {
+    const b = this.bucket()
+    const byId = new Map(b.drawings.map((d) => [d.id, d]))
+    return {
+      tool: this.tool,
+      drawings: b.drawings.length,
+      measures: b.measures.length + b.pins.length,
+      selection: this.selected
+        .map((id) => byId.get(id))
+        .filter((d): d is Drawing => d !== undefined),
+      selected: [...this.selected],
+      hidden: this.hidden,
+    }
+  }
+
+  /** Single subscriber (the owning page). Fires immediately so the page's
+   *  data-draw-* attrs and DrawEditor start synced, then on every change. */
+  onChange(cb: (s: DrawState) => void): void {
+    this.changeCb = cb
+    cb(this.getState())
   }
 
   destroy(): void {
@@ -150,126 +561,965 @@ export class ChartDraw {
       }
     }
     this.teardown = []
+    this.changeCb = null
+    this.host.style.cursor = ''
     this.svg.remove()
+    this.labels.remove()
   }
 
-  private drawings(): Drawing[] {
-    let d = sessionStore.get(this.key)
-    if (!d) {
-      d = []
-      sessionStore.set(this.key, d)
+  // ---- store / projection helpers ----------------------------------------
+
+  private bucket(): Bucket {
+    let b = sessionStore.get(this.key)
+    if (!b) {
+      b = { drawings: [], measures: [], pins: [] }
+      sessionStore.set(this.key, b)
     }
-    return d
+    return b
   }
+
+  private emit(): void {
+    this.changeCb?.(this.getState())
+  }
+
+  private percentMode(): boolean {
+    if (this.percentOpt) return this.percentOpt()
+    return this.key.endsWith('|%') // charts-page bucket convention
+  }
+
+  private applyCursor(): void {
+    // Crosshair while any tool is armed: the cursor itself says "the chart
+    // is a placement surface right now", pointer mode hands it back.
+    this.host.style.cursor = this.tool === 'pointer' ? '' : 'crosshair'
+  }
+
+  private xForTime(t: UTCTimestamp): number | null {
+    try {
+      return this.chart.timeScale().timeToCoordinate(t)
+    } catch {
+      return null
+    }
+  }
+
+  private timeAtX(x: number): UTCTimestamp | null {
+    try {
+      const t = this.chart.timeScale().coordinateToTime(x)
+      return typeof t === 'number' ? t : null
+    } catch {
+      return null
+    }
+  }
+
+  private yForPrice(p: number): number | null {
+    try {
+      return this.series.priceToCoordinate(p)
+    } catch {
+      return null
+    }
+  }
+
+  private priceAtY(y: number): number | null {
+    try {
+      return this.series.coordinateToPrice(y)
+    } catch {
+      return null
+    }
+  }
+
+  private project(pt: Pt): XY | null {
+    const x = this.xForTime(pt.time)
+    const y = this.yForPrice(pt.price)
+    return x === null || y === null ? null : { x, y }
+  }
+
+  private barsIdx(): { bars: Bar[]; times: number[]; map: Map<number, number> } | null {
+    const arr = this.barsOpt?.()
+    if (!arr || arr.length === 0) return null
+    if (arr !== this.barsCacheSrc) {
+      this.barsCacheSrc = arr
+      this.barsCacheTimes = arr.map((b) => Math.floor(new Date(b.ts).getTime() / 1000))
+      this.barsCacheMap = new Map(this.barsCacheTimes.map((t, i) => [t, i]))
+    }
+    return { bars: arr, times: this.barsCacheTimes, map: this.barsCacheMap }
+  }
+
+  private barAt(time: number): Bar | null {
+    const idx = this.barsIdx()
+    if (!idx) return null
+    const i = idx.map.get(time)
+    return i === undefined ? null : idx.bars[i]
+  }
+
+  private barCountBetween(a: number, b: number): number | null {
+    const idx = this.barsIdx()
+    if (!idx) return null
+    const ia = idx.map.get(a)
+    const ib = idx.map.get(b)
+    if (ia === undefined || ib === undefined) return null
+    return Math.abs(ib - ia)
+  }
+
+  private nearestBarTime(t: number): number | null {
+    const idx = this.barsIdx()
+    if (!idx) return null
+    const ts = idx.times
+    if (t <= ts[0]) return ts[0]
+    if (t >= ts[ts.length - 1]) return ts[ts.length - 1]
+    let lo = 0
+    let hi = ts.length - 1
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1
+      if (ts[mid] <= t) lo = mid
+      else hi = mid
+    }
+    return t - ts[lo] <= ts[hi] - t ? ts[lo] : ts[hi]
+  }
+
+  // ---- geometry -----------------------------------------------------------
+
+  private paneSizeSafe(): { width: number; height: number } | null {
+    try {
+      return this.chart.paneSize(0)
+    } catch {
+      return null
+    }
+  }
+
+  /** The pixel segment used for HIT-TESTING (and as a cut donor): hlines and
+   *  vlines act as pane-spanning (visually infinite) lines. */
+  private hitSegPx(d: Drawing, pane: { width: number; height: number }): Seg | null {
+    if (d.kind === 'trend') {
+      const a = this.project(d.points[0])
+      const b = this.project(d.points[1])
+      return a && b ? { a, b } : null
+    }
+    if (d.kind === 'hline') {
+      const y = this.yForPrice(d.points[0].price)
+      return y === null ? null : { a: { x: 0, y }, b: { x: pane.width, y } }
+    }
+    if (d.kind === 'vline') {
+      const x = this.xForTime(d.points[0].time)
+      return x === null ? null : { a: { x, y: 0 }, b: { x, y: pane.height } }
+    }
+    return null // circle: sampled separately
+  }
+
+  /** The pixel segment a TRIM parameterizes: hlines bound at the data extent
+   *  (first/last bar), vlines at the visible price extent, trends at their
+   *  endpoints. See the header block for why. */
+  private trimSegPx(d: Drawing, pane: { width: number; height: number }): Seg | null {
+    if (d.kind === 'trend') return this.hitSegPx(d, pane)
+    if (d.kind === 'hline') {
+      const y = this.yForPrice(d.points[0].price)
+      if (y === null) return null
+      const idx = this.barsIdx()
+      let x0: number | null = null
+      let x1: number | null = null
+      if (idx) {
+        x0 = this.xForTime(idx.times[0] as UTCTimestamp)
+        x1 = this.xForTime(idx.times[idx.times.length - 1] as UTCTimestamp)
+      }
+      // No bars getter (or extremes unprojectable): fall back to the visible
+      // edge bars — narrower than the data, but never wrong on screen.
+      if (x0 === null) {
+        const t = this.timeAtX(0)
+        x0 = t === null ? null : this.xForTime(t)
+      }
+      if (x1 === null) {
+        const t = this.timeAtX(pane.width - 1)
+        x1 = t === null ? null : this.xForTime(t)
+      }
+      if (x0 === null || x1 === null || x0 === x1) return null
+      return { a: { x: x0, y }, b: { x: x1, y } }
+    }
+    if (d.kind === 'vline') {
+      const x = this.xForTime(d.points[0].time)
+      return x === null ? null : { a: { x, y: 0 }, b: { x, y: pane.height } }
+    }
+    return null
+  }
+
+  private ellipsePx(d: Drawing): { cx: number; cy: number; rx: number; ry: number } | null {
+    const c = this.project(d.points[0])
+    const e = this.project(d.points[1])
+    if (!c || !e) return null
+    return { cx: c.x, cy: c.y, rx: Math.max(Math.abs(e.x - c.x), 1), ry: Math.max(Math.abs(e.y - c.y), 1) }
+  }
+
+  /** Nearest object within HIT_PX of (x, y). linesOnly skips circles (trim
+   *  and line-snap vocabulary). Returns the nearest point + param for snaps. */
+  private hitTest(
+    x: number,
+    y: number,
+    linesOnly = false
+  ): { drawing: Drawing; dist: number; nx: number; ny: number; u: number } | null {
+    const pane = this.paneSizeSafe()
+    if (!pane) return null
+    let best: { drawing: Drawing; dist: number; nx: number; ny: number; u: number } | null = null
+    for (const d of this.bucket().drawings) {
+      if (d.kind === 'circle') {
+        if (linesOnly) continue
+        const g = this.ellipsePx(d)
+        if (!g) continue
+        // Ellipse boundary as a sampled polyline: exact enough at 48 samples,
+        // and reuses the one distance primitive instead of ellipse calculus.
+        let prev: XY | null = null
+        for (let i = 0; i <= ELLIPSE_HIT_SAMPLES; i += 1) {
+          const ang = (i / ELLIPSE_HIT_SAMPLES) * Math.PI * 2
+          const pt = { x: g.cx + g.rx * Math.cos(ang), y: g.cy + g.ry * Math.sin(ang) }
+          if (prev) {
+            const h = distToSeg(x, y, prev, pt)
+            if (!best || h.dist < best.dist) best = { drawing: d, dist: h.dist, nx: h.nx, ny: h.ny, u: 0 }
+          }
+          prev = pt
+        }
+      } else {
+        const s = this.hitSegPx(d, pane)
+        if (!s) continue
+        const h = distToSeg(x, y, s.a, s.b)
+        if (!best || h.dist < best.dist) best = { drawing: d, dist: h.dist, nx: h.nx, ny: h.ny, u: h.t }
+      }
+    }
+    return best !== null && best.dist <= HIT_PX ? best : null
+  }
+
+  // ---- trim ---------------------------------------------------------------
+
+  private computeTrim(
+    d: Drawing,
+    x: number,
+    y: number
+  ):
+    | { whole: true }
+    | {
+        whole: false
+        removed: Seg
+        spans: Drawing[]
+        boundaries: { donor: Drawing; at: XY }[]
+      }
+    | null {
+    if (d.kind === 'circle') return null
+    const pane = this.paneSizeSafe()
+    if (!pane) return null
+    const seg = this.trimSegPx(d, pane)
+    if (!seg) return null
+
+    const cuts: { t: number; donor: Drawing }[] = []
+    for (const o of this.bucket().drawings) {
+      if (o.id === d.id || o.kind === 'circle') continue
+      const os = this.hitSegPx(o, pane)
+      if (!os) continue
+      const t = segSegIntersect(seg, os)
+      if (t !== null && t > TRIM_EPS && t < 1 - TRIM_EPS) cuts.push({ t, donor: o })
+    }
+    if (cuts.length === 0) return { whole: true }
+
+    const tc = distToSeg(x, y, seg.a, seg.b).t
+    let lo = 0
+    let hi = 1
+    let loDonor: Drawing | null = null
+    let hiDonor: Drawing | null = null
+    for (const c of cuts) {
+      if (c.t <= tc) {
+        if (c.t > lo) {
+          lo = c.t
+          loDonor = c.donor
+        }
+      } else if (c.t < hi) {
+        hi = c.t
+        hiDonor = c.donor
+      }
+    }
+
+    const segLen = Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y)
+    const spans: Drawing[] = []
+    const mk = (t0: number, t1: number) => {
+      if ((t1 - t0) * segLen < MIN_SPAN_PX) return
+      const s = this.spanToDrawing(d, seg, t0, t1)
+      if (s) spans.push(s)
+    }
+    mk(0, lo)
+    mk(hi, 1)
+
+    const boundaries: { donor: Drawing; at: XY }[] = []
+    if (loDonor) boundaries.push({ donor: loDonor, at: lerpSeg(seg, lo) })
+    if (hiDonor) boundaries.push({ donor: hiDonor, at: lerpSeg(seg, hi) })
+    return { whole: false, removed: { a: lerpSeg(seg, lo), b: lerpSeg(seg, hi) }, spans, boundaries }
+  }
+
+  /** Convert a [t0, t1] sub-span of a trimmed line back to a data-space
+   *  drawing. Trend endpoint times quantize to bars with the price recomputed
+   *  on the original pixel line — spans stay collinear with what was drawn. */
+  private spanToDrawing(d: Drawing, seg: Seg, t0: number, t1: number): Drawing | null {
+    const p0 = lerpSeg(seg, t0)
+    const p1 = lerpSeg(seg, t1)
+    if (d.kind === 'vline') {
+      const time = d.points[0].time
+      const pr0 = this.priceAtY(p0.y)
+      const pr1 = this.priceAtY(p1.y)
+      if (pr0 === null || pr1 === null || pr0 === pr1) return null
+      return { id: mkId('dw'), kind: 'trend', points: [{ time, price: pr0 }, { time, price: pr1 }] }
+    }
+    if (d.kind === 'hline') {
+      const price = d.points[0].price
+      const ta = this.timeAtX(p0.x)
+      const tb = this.timeAtX(p1.x)
+      if (ta === null || tb === null || ta === tb) return null
+      return { id: mkId('dw'), kind: 'trend', points: [{ time: ta, price }, { time: tb, price }] }
+    }
+    // trend
+    const mkPt = (p: XY): Pt | null => {
+      if (Math.abs(seg.b.x - seg.a.x) < 1) {
+        // Vertical trend (both anchors on one bar): time is fixed, split by price.
+        const price = this.priceAtY(p.y)
+        return price === null ? null : { time: d.points[0].time, price }
+      }
+      const tQ = this.timeAtX(p.x)
+      if (tQ === null) return null
+      const xQ = this.xForTime(tQ)
+      if (xQ === null) return null
+      const yQ = seg.a.y + ((xQ - seg.a.x) * (seg.b.y - seg.a.y)) / (seg.b.x - seg.a.x)
+      const price = this.priceAtY(yQ)
+      return price === null ? null : { time: tQ, price }
+    }
+    const q0 = mkPt(p0)
+    const q1 = mkPt(p1)
+    if (!q0 || !q1) return null
+    if (q0.time === q1.time && q0.price === q1.price) return null // quantized away
+    return { id: mkId('dw'), kind: 'trend', points: [q0, q1] }
+  }
+
+  /** Split a cut-boundary drawing at the intersection point. Returns the
+   *  replacement pieces, or null to keep the donor whole (intersection at an
+   *  endpoint, unprojectable, or both halves would vanish). */
+  private splitDonor(o: Drawing, at: XY): Drawing[] | null {
+    const pane = this.paneSizeSafe()
+    if (!pane) return null
+    const seg = this.trimSegPx(o, pane)
+    if (!seg) return null
+    const u = distToSeg(at.x, at.y, seg.a, seg.b).t
+    if (u < 0.001 || u > 0.999) return null
+    const s1 = this.spanToDrawing(o, seg, 0, u)
+    const s2 = this.spanToDrawing(o, seg, u, 1)
+    const pieces = [s1, s2].filter((s): s is Drawing => s !== null)
+    return pieces.length === 0 ? null : pieces
+  }
+
+  // ---- measure snapping ---------------------------------------------------
+
+  /** Resolve where a click/hover lands: nearest line within HIT_PX, a candle
+   *  when within CANDLE_SNAP_PX of its center x (and vertically near its
+   *  high-low band), else a free point. Line and candle compete by pixel
+   *  distance so the closer magnet wins. Circles are not snap targets (v1). */
+  private snapAnchor(
+    x: number,
+    y: number,
+    time: UTCTimestamp | null
+  ): { anchor: MeasureAnchor; x: number; y: number; snapped: 'line' | 'candle' | null; drawing?: Drawing } | null {
+    // line candidate
+    const lineHit = this.hitTest(x, y, true)
+    // candle candidate
+    let candle: { time: UTCTimestamp; cx: number; cy: number; dist: number } | null = null
+    const tNear = time ?? this.timeAtX(x)
+    if (tNear !== null) {
+      const bar = this.barAt(tNear)
+      const cx = this.xForTime(tNear)
+      if (bar && cx !== null && Math.abs(cx - x) <= CANDLE_SNAP_PX) {
+        const yHigh = this.yForPrice(bar.high)
+        const yLow = this.yForPrice(bar.low)
+        const yClose = this.yForPrice(bar.close)
+        if (yHigh !== null && yLow !== null && yClose !== null) {
+          const top = Math.min(yHigh, yLow) - 8
+          const bot = Math.max(yHigh, yLow) + 8
+          if (y >= top && y <= bot) candle = { time: tNear, cx, cy: yClose, dist: Math.abs(cx - x) }
+        }
+      }
+    }
+
+    if (lineHit && (!candle || lineHit.dist <= candle.dist)) {
+      const d = lineHit.drawing
+      const t = this.timeAtX(lineHit.nx) ?? tNear
+      const p = this.priceAtY(lineHit.ny)
+      if (t !== null && p !== null) {
+        return {
+          anchor: { kind: 'line', drawingId: d.id, u: lineHit.u, time: t, price: p },
+          x: lineHit.nx,
+          y: lineHit.ny,
+          snapped: 'line',
+          drawing: d,
+        }
+      }
+    }
+    if (candle) {
+      return {
+        anchor: { kind: 'candle', time: candle.time },
+        x: candle.cx,
+        y: candle.cy,
+        snapped: 'candle',
+      }
+    }
+    const t = tNear
+    const p = this.priceAtY(y)
+    if (t === null || p === null) return null
+    return { anchor: { kind: 'free', time: t, price: p }, x, y, snapped: null }
+  }
+
+  /** Where an anchor sits NOW: candles ride their bar, line anchors ride the
+   *  drawing (and degrade to their snap-moment position if it was deleted),
+   *  free anchors project directly. Null = unprojectable, measure hides. */
+  private resolveAnchor(a: MeasureAnchor): ResolvedAnchor | null {
+    if (a.kind === 'candle') {
+      const bar = this.barAt(a.time)
+      if (!bar) return null
+      const x = this.xForTime(a.time)
+      const y = this.yForPrice(bar.close)
+      return x === null || y === null ? null : { x, y, price: bar.close, time: a.time }
+    }
+    if (a.kind === 'free') {
+      const x = this.xForTime(a.time)
+      const y = this.yForPrice(a.price)
+      return x === null || y === null ? null : { x, y, price: a.price, time: a.time }
+    }
+    const d = this.bucket().drawings.find((x) => x.id === a.drawingId)
+    if (!d || d.kind === 'circle') {
+      // Drawing deleted/trimmed away: the snapshot keeps the measure honest.
+      const x = this.xForTime(a.time)
+      const y = this.yForPrice(a.price)
+      return x === null || y === null ? null : { x, y, price: a.price, time: a.time }
+    }
+    if (d.kind === 'hline') {
+      const x = this.xForTime(a.time)
+      const y = this.yForPrice(d.points[0].price)
+      return x === null || y === null ? null : { x, y, price: d.points[0].price, time: a.time }
+    }
+    if (d.kind === 'vline') {
+      const x = this.xForTime(d.points[0].time)
+      const y = this.yForPrice(a.price)
+      return x === null || y === null ? null : { x, y, price: a.price, time: d.points[0].time }
+    }
+    // trend: u is stable in data space, so the anchor stays put through
+    // pan/zoom and follows the line through DrawEditor edits.
+    const pa = this.project(d.points[0])
+    const pb = this.project(d.points[1])
+    if (!pa || !pb) return null
+    const x = pa.x + (pb.x - pa.x) * a.u
+    const y = pa.y + (pb.y - pa.y) * a.u
+    const price = this.priceAtY(y)
+    const time = this.timeAtX(x) ?? a.time
+    return price === null ? null : { x, y, price, time }
+  }
+
+  // ---- click handling -----------------------------------------------------
 
   private handleClick(p: MouseEventParams): void {
     if (this.tool === 'pointer') return
-    // No time = the whitespace right of the last bar (or off the data); no
-    // point / another pane (RSI) = not a placement surface.
-    if (p.point === undefined || typeof p.time !== 'number') return
-    if ((p.paneIndex ?? 0) !== 0) return
+    // No point / another pane (RSI) = not a placement surface.
+    if (p.point === undefined || (p.paneIndex ?? 0) !== 0) return
     if (
       this.downAt !== null &&
       Math.hypot(p.point.x - this.downAt.x, p.point.y - this.downAt.y) > CLICK_SLOP_PX
     ) {
       return // travelled: that was a pan, not a placement
     }
-    let price: number | null = null
-    try {
-      price = this.series.coordinateToPrice(p.point.y)
-    } catch {
-      return // series disposed mid-rebuild
+    const x = p.point.x
+    const y = p.point.y
+    const time = typeof p.time === 'number' ? p.time : null
+
+    switch (this.tool) {
+      case 'trend':
+      case 'circle':
+        this.clickTwoPoint(x, y, time)
+        break
+      case 'hline':
+        this.clickHline(x, y, time)
+        break
+      case 'vline':
+        this.clickVline(y, time)
+        break
+      case 'select':
+        this.clickSelect(x, y)
+        break
+      case 'delete':
+        this.clickDelete(x, y)
+        break
+      case 'trim':
+        this.clickTrim(x, y)
+        break
+      case 'measure':
+        this.clickMeasure(x, y, time)
+        break
+      case 'inspect':
+        this.clickInspect(time)
+        break
     }
+  }
+
+  private clickTwoPoint(_x: number, y: number, time: UTCTimestamp | null): void {
+    // Whitespace right of the last bar has no time — nothing to anchor to.
+    // The preview dims out there so the dead zone is visible before the click.
+    if (time === null) return
+    const price = this.priceAtY(y)
     if (price === null) return
-    const anchor: Anchor = { time: p.time, price }
-    if (this.tool === 'hline') {
-      this.drawings().push({ kind: 'hline', at: anchor })
+    const pt: Pt = { time, price }
+    if (this.pendingPt === null) {
+      this.pendingPt = pt
       this.render()
       return
     }
-    // trend: first click anchors, second completes. The tool stays armed so
-    // several lines can go down without a toolbar round-trip.
-    if (this.pending === null) {
-      this.pending = anchor
-    } else {
-      this.drawings().push({ kind: 'trend', a: this.pending, b: anchor })
-      this.pending = null
-      this.cursor = null
-    }
+    // Tool stays armed so several can go down without a toolbar round-trip.
+    this.bucket().drawings.push({
+      id: mkId('dw'),
+      kind: this.tool === 'circle' ? 'circle' : 'trend',
+      points: [this.pendingPt, pt],
+    })
+    this.pendingPt = null
     this.render()
+    this.emit()
   }
 
-  private project(a: Anchor): { x: number; y: number } | null {
-    try {
-      const x = this.chart.timeScale().timeToCoordinate(a.time)
-      const y = this.series.priceToCoordinate(a.price)
-      return x === null || y === null ? null : { x, y }
-    } catch {
-      return null // chart or series disposed between an event and this render
-    }
+  private clickHline(x: number, y: number, time: UTCTimestamp | null): void {
+    const price = this.priceAtY(y)
+    if (price === null) return
+    // The price IS the line; the time only places the handle, so clicking the
+    // whitespace right of the data still works — handle falls to the last bar.
+    const idx = this.barsIdx()
+    const t =
+      time ?? this.timeAtX(x) ?? (idx ? (idx.times[idx.times.length - 1] as UTCTimestamp) : null)
+    if (t === null) return
+    this.bucket().drawings.push({ id: mkId('dw'), kind: 'hline', points: [{ time: t, price }] })
+    this.render()
+    this.emit()
   }
 
-  private render(): void {
-    let pane: { width: number; height: number }
-    try {
-      pane = this.chart.paneSize(0)
-    } catch {
+  private clickVline(y: number, time: UTCTimestamp | null): void {
+    if (time === null) return
+    // Price is irrelevant to the line; it remembers where the handle sits.
+    const price = this.priceAtY(y) ?? 0
+    this.bucket().drawings.push({ id: mkId('dw'), kind: 'vline', points: [{ time, price }] })
+    this.render()
+    this.emit()
+  }
+
+  private clickSelect(x: number, y: number): void {
+    const hit = this.hitTest(x, y)
+    if (!hit) {
+      if (this.selected.length > 0) {
+        this.selected = []
+        this.render()
+        this.emit()
+      }
       return
     }
-    // Sizing the svg to pane 0 clips drawings off the price scale and any
-    // lower pane (RSI) without needing a clipPath.
+    const id = hit.drawing.id
+    const at = this.selected.indexOf(id)
+    if (at >= 0) this.selected.splice(at, 1)
+    else this.selected.push(id)
+    this.render()
+    this.emit()
+  }
+
+  private clickDelete(x: number, y: number): void {
+    const hit = this.hitTest(x, y)
+    if (!hit) return // empty click = deliberate no-op, never "delete something"
+    const b = this.bucket()
+    // Clicking any SELECTED object deletes the whole selection; clicking an
+    // unselected one deletes just it (selection survives).
+    const doomed = this.selected.includes(hit.drawing.id)
+      ? new Set(this.selected)
+      : new Set([hit.drawing.id])
+    b.drawings = b.drawings.filter((d) => !doomed.has(d.id))
+    this.selected = this.selected.filter((id) => !doomed.has(id))
+    this.render()
+    this.emit()
+  }
+
+  private clickTrim(x: number, y: number): void {
+    const hit = this.hitTest(x, y, true)
+    if (!hit) return
+    const res = this.computeTrim(hit.drawing, x, y)
+    if (!res) return
+    const b = this.bucket()
+    const dead = new Set([hit.drawing.id])
+    const added: Drawing[] = []
+    if (!res.whole) {
+      added.push(...res.spans)
+      for (const bd of res.boundaries) {
+        const pieces = this.splitDonor(bd.donor, bd.at)
+        if (pieces) {
+          dead.add(bd.donor.id)
+          added.push(...pieces)
+        }
+      }
+    }
+    b.drawings = b.drawings.filter((d) => !dead.has(d.id))
+    b.drawings.push(...added)
+    this.selected = this.selected.filter((id) => !dead.has(id))
+    this.render()
+    this.emit()
+  }
+
+  private clickMeasure(x: number, y: number, time: UTCTimestamp | null): void {
+    const snap = this.snapAnchor(x, y, time)
+    if (!snap) return
+    if (this.pendingAnchor === null) {
+      this.pendingAnchor = snap.anchor
+      this.render()
+      return
+    }
+    this.bucket().measures.push({ id: mkId('ms'), a: this.pendingAnchor, b: snap.anchor })
+    this.pendingAnchor = null
+    this.render()
+    this.emit()
+  }
+
+  private clickInspect(time: UTCTimestamp | null): void {
+    if (time === null) return
+    if (!this.barAt(time)) return
+    const b = this.bucket()
+    // Click a pinned bar again to unpin — the pin is a toggle, not a stack.
+    const at = b.pins.findIndex((p) => p.time === time)
+    if (at >= 0) b.pins.splice(at, 1)
+    else b.pins.push({ id: mkId('pin'), time })
+    this.render()
+    this.emit()
+  }
+
+  // ---- SVG / label primitives --------------------------------------------
+
+  private el<K extends keyof SVGElementTagNameMap>(
+    name: K,
+    attrs: Record<string, string | number>
+  ): SVGElementTagNameMap[K] {
+    const e = document.createElementNS(SVG_NS, name)
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v))
+    this.svg.appendChild(e)
+    return e
+  }
+
+  private line(a: XY, b: XY, stroke: string, width: number, dashed = false, opacity = 1): void {
+    this.el('line', {
+      x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+      stroke, 'stroke-width': width,
+      ...(dashed ? { 'stroke-dasharray': '4 3' } : {}),
+      ...(opacity !== 1 ? { 'stroke-opacity': opacity } : {}),
+    })
+  }
+
+  private handleDot(x: number, y: number): void {
+    this.el('circle', {
+      cx: x, cy: y, r: 4,
+      fill: STROKE, stroke: 'var(--surface)', 'stroke-width': 1.5,
+    })
+  }
+
+  private ring(x: number, y: number, r = 5, stroke = STROKE): void {
+    this.el('circle', { cx: x, cy: y, r, fill: 'none', stroke, 'stroke-width': 1.5 })
+  }
+
+  /** A positioned text chip in the HTML layer. ax/ay anchor the box on the
+   *  point (0 = left/top edge at it, 1 = right/bottom). Always clamped into
+   *  the pane so a label near an edge stays readable. */
+  private chip(
+    x: number,
+    y: number,
+    rows: ChipRow[],
+    cls: string,
+    ax: number,
+    ay: number,
+    pane: { width: number; height: number }
+  ): { left: number; top: number; w: number; h: number } {
+    const el = document.createElement('div')
+    el.className = `cd-chip${cls ? ` ${cls}` : ''}`
+    for (const r of rows) {
+      const row = document.createElement('div')
+      if (r.cls) row.className = r.cls
+      row.textContent = r.text
+      el.appendChild(row)
+    }
+    this.labels.appendChild(el)
+    const w = el.offsetWidth
+    const h = el.offsetHeight
+    const left = Math.max(4, Math.min(x - w * ax, pane.width - w - 4))
+    const top = Math.max(4, Math.min(y - h * ay, pane.height - h - 4))
+    el.style.left = `${left}px`
+    el.style.top = `${top}px`
+    return { left, top, w, h }
+  }
+
+  // ---- rendering ----------------------------------------------------------
+
+  private render(): void {
+    const pane = this.paneSizeSafe()
+    if (!pane) return
+    // Sizing to pane 0 clips everything off the price scale and any lower
+    // pane (RSI) without needing a clipPath.
     this.svg.setAttribute('width', String(pane.width))
     this.svg.setAttribute('height', String(pane.height))
+    this.labels.style.width = `${pane.width}px`
+    this.labels.style.height = `${pane.height}px`
     while (this.svg.firstChild) this.svg.removeChild(this.svg.firstChild)
+    while (this.labels.firstChild) this.labels.removeChild(this.labels.firstChild)
 
-    const line = (x1: number, y1: number, x2: number, y2: number, dashed = false) => {
-      const el = document.createElementNS(SVG_NS, 'line')
-      el.setAttribute('x1', String(x1))
-      el.setAttribute('y1', String(y1))
-      el.setAttribute('x2', String(x2))
-      el.setAttribute('y2', String(y2))
-      el.setAttribute('stroke', 'var(--accent)')
-      el.setAttribute('stroke-width', '1.5')
-      if (dashed) el.setAttribute('stroke-dasharray', '4 3')
-      this.svg.appendChild(el)
+    const b = this.bucket()
+    const cur = this.cursor
+
+    // Hover resolution feeds hover states INTO the object render below —
+    // every interacting tool telegraphs its target before the click.
+    const hover =
+      cur && (this.tool === 'select' || this.tool === 'delete' || this.tool === 'trim')
+        ? this.hitTest(cur.x, cur.y, this.tool === 'trim')
+        : null
+    const trimPrev =
+      this.tool === 'trim' && hover ? this.computeTrim(hover.drawing, cur!.x, cur!.y) : null
+    const dangerIds = new Set<string>()
+    if (this.tool === 'delete' && hover) {
+      if (this.selected.includes(hover.drawing.id)) for (const id of this.selected) dangerIds.add(id)
+      else dangerIds.add(hover.drawing.id)
     }
-    const handle = (x: number, y: number) => {
-      const el = document.createElementNS(SVG_NS, 'circle')
-      el.setAttribute('cx', String(x))
-      el.setAttribute('cy', String(y))
-      el.setAttribute('r', '3.5')
-      el.setAttribute('fill', 'var(--accent)')
-      this.svg.appendChild(el)
+    if (trimPrev?.whole) dangerIds.add(hover!.drawing.id) // no intersections: trim deletes whole
+
+    if (!this.hidden) {
+      for (const d of b.drawings) {
+        this.renderDrawing(pane, d, {
+          selected: this.selected.includes(d.id),
+          hover: this.tool === 'select' && hover?.drawing.id === d.id,
+          danger: dangerIds.has(d.id),
+        })
+      }
+      for (const m of b.measures) this.renderMeasure(pane, m)
+      for (const pin of b.pins) this.renderPin(pane, pin)
     }
 
-    for (const d of this.drawings()) {
-      if (d.kind === 'hline') {
-        let y: number | null = null
-        try {
-          y = this.series.priceToCoordinate(d.at.price)
-        } catch {
-          y = null
+    // Trim preview: the exact span the click would remove, plus rings at the
+    // cut points — SolidWorks shows you the doomed span, so do we.
+    if (trimPrev && !trimPrev.whole) {
+      this.line(trimPrev.removed.a, trimPrev.removed.b, STROKE_DANGER, 2.5, true)
+      this.ring(trimPrev.removed.a.x, trimPrev.removed.a.y, 4, STROKE_DANGER)
+      this.ring(trimPrev.removed.b.x, trimPrev.removed.b.y, 4, STROKE_DANGER)
+    }
+
+    this.renderPreview(pane)
+  }
+
+  private renderDrawing(
+    pane: { width: number; height: number },
+    d: Drawing,
+    st: { selected: boolean; hover: boolean; danger: boolean }
+  ): void {
+    const stroke = st.danger ? STROKE_DANGER : STROKE
+    const width = st.selected || st.hover || st.danger ? 2.5 : 1.5
+    const halo = st.danger ? HALO_DANGER : HALO
+    const wantHalo = st.selected || st.hover || st.danger
+
+    if (d.kind === 'circle') {
+      const g = this.ellipsePx(d)
+      if (!g) return
+      if (wantHalo)
+        this.el('ellipse', {
+          cx: g.cx, cy: g.cy, rx: g.rx, ry: g.ry,
+          fill: 'none', stroke: halo, 'stroke-width': 8,
+        })
+      this.el('ellipse', {
+        cx: g.cx, cy: g.cy, rx: g.rx, ry: g.ry,
+        fill: 'none', stroke, 'stroke-width': width,
+      })
+      if (st.selected) {
+        const c = this.project(d.points[0])
+        const e = this.project(d.points[1])
+        if (c) this.handleDot(c.x, c.y)
+        if (e) this.handleDot(e.x, e.y)
+      }
+      return
+    }
+
+    const seg = this.hitSegPx(d, pane)
+    if (!seg) return // unprojectable now; back when the range returns
+    if (wantHalo) this.line(seg.a, seg.b, halo, 8)
+    this.line(seg.a, seg.b, stroke, width)
+    if (st.selected) {
+      // Handles sit on the DATA anchors (an hline handle can scroll away
+      // with its bar; the line itself stays full-width).
+      for (const p of d.points) {
+        const at = this.project(p)
+        if (at) this.handleDot(at.x, at.y)
+      }
+    }
+  }
+
+  /** Overlay-only emphasis for a snapped line during measure hover. */
+  private highlightDrawing(pane: { width: number; height: number }, d: Drawing): void {
+    const seg = this.hitSegPx(d, pane)
+    if (seg) this.line(seg.a, seg.b, HALO, 8)
+  }
+
+  private measureRows(aKind: string, bKind: string, A: ResolvedAnchor, B: ResolvedAnchor): ChipRow[] {
+    const dp = B.price - A.price
+    let priceTxt: string
+    if (this.percentMode()) {
+      // The axis is % change already — a $ delta here would be a lie.
+      priceTxt = `Δ ${signOf(dp)}${Math.abs(dp).toFixed(2)}%`
+    } else {
+      const pct = A.price !== 0 ? (dp / Math.abs(A.price)) * 100 : null
+      priceTxt = `Δ ${signOf(dp)}$${fmtNum(Math.abs(dp))}${
+        pct === null ? '' : ` (${signOf(pct)}${Math.abs(pct).toFixed(2)}%)`
+      }`
+    }
+    const dt = (B.time as number) - (A.time as number)
+    const nBars = this.barCountBetween(A.time, B.time)
+    const timeTxt = `${fmtSpan(dt)}${nBars === null ? '' : ` · ${nBars} bars`}`
+    const priceRow: ChipRow = { text: priceTxt }
+    const timeRow: ChipRow = { text: timeTxt }
+    if (aKind === 'candle' && bKind === 'candle') {
+      timeRow.cls = 'em' // candle↔candle is a how-long question
+      return [timeRow, priceRow]
+    }
+    if (aKind === 'line' && bKind === 'line') {
+      priceRow.cls = 'em' // line↔line (two hlines) is a how-far question
+      return [priceRow, timeRow]
+    }
+    return [priceRow, timeRow] // mixed: both, no thumb on the scale
+  }
+
+  /** liveB carries the in-progress second point during placement. */
+  private renderMeasure(
+    pane: { width: number; height: number },
+    m: Measure,
+    liveB?: { anchor: MeasureAnchor; x: number; y: number }
+  ): void {
+    const A = this.resolveAnchor(m.a)
+    const B = liveB
+      ? (() => {
+          const r = this.resolveAnchor(liveB.anchor)
+          return r ?? null
+        })()
+      : this.resolveAnchor(m.b)
+    if (!A || !B) return
+    this.line(A, B, MEASURE_STROKE, 1.25, true)
+    // Dimension end ticks, perpendicular to the connector.
+    const len = Math.hypot(B.x - A.x, B.y - A.y)
+    if (len > 1) {
+      const px = -(B.y - A.y) / len
+      const py = (B.x - A.x) / len
+      for (const e of [A, B]) {
+        this.line(
+          { x: e.x - px * 5, y: e.y - py * 5 },
+          { x: e.x + px * 5, y: e.y + py * 5 },
+          MEASURE_STROKE,
+          1.25
+        )
+      }
+    }
+    this.el('circle', { cx: A.x, cy: A.y, r: 2, fill: MEASURE_STROKE })
+    this.el('circle', { cx: B.x, cy: B.y, r: 2, fill: MEASURE_STROKE })
+    const rows = this.measureRows(m.a.kind, liveB ? liveB.anchor.kind : m.b.kind, A, B)
+    this.chip((A.x + B.x) / 2, (A.y + B.y) / 2 - 10, rows, '', 0.5, 1, pane)
+  }
+
+  private inspectRows(bar: Bar, time: number): ChipRow[] {
+    const range = bar.high - bar.low
+    const body = Math.abs(bar.close - bar.open)
+    const rangePct = bar.low !== 0 ? ` (${((range / bar.low) * 100).toFixed(2)}%)` : ''
+    const bodyPct = bar.open !== 0 ? ` (${((body / bar.open) * 100).toFixed(2)}%)` : ''
+    return [
+      { text: fmtDate(time), cls: 'dim' },
+      {
+        text: `O ${fmtNum(bar.open)}  H ${fmtNum(bar.high)}  L ${fmtNum(bar.low)}  C ${fmtNum(bar.close)}`,
+        cls: 'em',
+      },
+      { text: `Range $${fmtNum(range)}${rangePct} · Body $${fmtNum(body)}${bodyPct}` },
+      { text: `Vol ${fmtVol(bar.volume)}` },
+    ]
+  }
+
+  private renderPin(pane: { width: number; height: number }, pin: InspectPin): void {
+    const bar = this.barAt(pin.time)
+    if (!bar) return
+    const x = this.xForTime(pin.time)
+    const yHigh = this.yForPrice(bar.high)
+    if (x === null || yHigh === null) return
+    const box = this.chip(x, yHigh - 12, this.inspectRows(bar, pin.time), 'cd-inspect cd-pin', 0.5, 1, pane)
+    // Stem from the chip down to the bar it belongs to — a floating box with
+    // no stem stops meaning anything the moment two pins share a screen.
+    this.line({ x, y: box.top + box.h }, { x, y: yHigh - 2 }, MEASURE_STROKE, 1)
+  }
+
+  private renderPreview(pane: { width: number; height: number }): void {
+    const cur = this.cursor
+    switch (this.tool) {
+      case 'hline': {
+        // The line follows the crosshair BEFORE the click — placement is
+        // never blind (the core clunkiness fix).
+        if (!cur) return
+        this.line({ x: 0, y: cur.y }, { x: pane.width, y: cur.y }, STROKE, 1.5, true)
+        const price = this.priceAtY(cur.y)
+        if (price !== null)
+          this.chip(pane.width - 6, cur.y - 6, [{ text: fmtNum(price), cls: 'em' }], '', 1, 1, pane)
+        return
+      }
+      case 'vline': {
+        if (!cur) return
+        const dead = cur.time === null // whitespace right of the data: unplaceable
+        this.line({ x: cur.x, y: 0 }, { x: cur.x, y: pane.height }, STROKE, 1.5, true, dead ? 0.35 : 1)
+        if (!dead)
+          this.chip(cur.x + 6, pane.height - 6, [{ text: fmtDate(cur.time!), cls: 'em' }], '', 0, 1, pane)
+        return
+      }
+      case 'trend':
+      case 'circle': {
+        if (this.pendingPt === null) return
+        const a = this.project(this.pendingPt)
+        if (!a) return
+        this.handleDot(a.x, a.y)
+        if (!cur) return
+        const dead = cur.time === null
+        const op = dead ? 0.35 : 1
+        if (this.tool === 'trend') {
+          this.line(a, cur, STROKE, 1.5, true, op)
+        } else {
+          this.el('ellipse', {
+            cx: a.x, cy: a.y,
+            rx: Math.max(Math.abs(cur.x - a.x), 1), ry: Math.max(Math.abs(cur.y - a.y), 1),
+            fill: 'none', stroke: STROKE, 'stroke-width': 1.5,
+            'stroke-dasharray': '4 3', 'stroke-opacity': op,
+          })
         }
-        if (y === null) continue
-        line(0, y, pane.width, y)
-        const at = this.project(d.at)
-        if (at) handle(at.x, at.y) // handle hides when its bar scrolls away
-      } else {
-        const a = this.project(d.a)
-        const b = this.project(d.b)
-        if (!a || !b) continue // unprojectable now; back when the range returns
-        line(a.x, a.y, b.x, b.y)
-        handle(a.x, a.y)
-        handle(b.x, b.y)
+        // Live deltas beside the cursor: what the line will span if committed.
+        if (!dead) {
+          const price = this.priceAtY(cur.y)
+          if (price !== null) {
+            const A: ResolvedAnchor = { x: a.x, y: a.y, price: this.pendingPt.price, time: this.pendingPt.time }
+            const B: ResolvedAnchor = { x: cur.x, y: cur.y, price, time: cur.time! }
+            this.chip(cur.x + 14, cur.y + 14, this.measureRows('free', 'free', A, B), '', 0, 0, pane)
+          }
+        }
+        return
       }
-    }
-
-    if (this.pending !== null) {
-      const a = this.project(this.pending)
-      if (a) {
-        handle(a.x, a.y)
-        if (this.cursor) line(a.x, a.y, this.cursor.x, this.cursor.y, true)
+      case 'measure': {
+        if (!cur) return
+        const snap = this.snapAnchor(cur.x, cur.y, cur.time)
+        if (snap) {
+          // The magnet is visible before the click: ring on the snap point,
+          // halo on a snapped line.
+          if (snap.snapped === 'line' && snap.drawing) this.highlightDrawing(pane, snap.drawing)
+          if (snap.snapped !== null) this.ring(snap.x, snap.y, 5)
+          if (this.pendingAnchor !== null) {
+            this.renderMeasure(pane, { id: 'live', a: this.pendingAnchor, b: snap.anchor }, snap)
+          }
+        } else if (this.pendingAnchor !== null) {
+          const A = this.resolveAnchor(this.pendingAnchor)
+          if (A) this.line(A, cur, MEASURE_STROKE, 1.25, true, 0.35)
+        }
+        return
       }
+      case 'inspect': {
+        if (!cur || cur.time === null) return
+        const bar = this.barAt(cur.time)
+        if (!bar) return
+        this.chip(cur.x + 16, cur.y + 16, this.inspectRows(bar, cur.time), 'cd-inspect', 0, 0, pane)
+        return
+      }
+      default:
+        return
     }
   }
 }

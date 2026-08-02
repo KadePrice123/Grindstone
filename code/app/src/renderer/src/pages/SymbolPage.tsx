@@ -1,10 +1,28 @@
+/**
+ * Single-symbol chart page. This page OWNS the chart-tool ux state (armed
+ * tool, visibility flags, indicator periods); the ChartDraw engine owns the
+ * drawings themselves and reports back through onChange, which is what
+ * feeds the data-draw-* testability attrs and the floating DrawEditor.
+ */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, SymbolSummary } from '../api'
-import { Bar, Chart, ChartReadyApi, IndicatorKey } from '../components/Chart'
+import {
+  Bar,
+  Chart,
+  ChartReadyApi,
+  IndicatorKey,
+  IndicatorParams,
+} from '../components/Chart'
 import { ChartDraw, DrawTool } from '../components/ChartDraw'
+import { DrawEditor } from '../components/DrawEditor'
+import { IndicatorSettings } from '../components/IndicatorSettings'
 import { Metrics, barRange } from '../components/Metrics'
 import { ChartMiniIcon } from '../components/icons'
 import '../charts.css'
+import '../charttools.css'
+
+/** Engine report shape — single source for counts/selection (contract). */
+type EngineState = ReturnType<ChartDraw['getState']>
 
 const TIMEFRAMES: { key: string; label: string }[] = [
   { key: '1Min', label: '1m' },
@@ -16,17 +34,49 @@ const TIMEFRAMES: { key: string; label: string }[] = [
 
 const INDICATORS: { key: IndicatorKey; label: string }[] = [
   { key: 'vol', label: 'Volume' },
-  { key: 'sma20', label: 'SMA 20' },
-  { key: 'sma50', label: 'SMA 50' },
-  { key: 'ema20', label: 'EMA 20' },
-  { key: 'rsi14', label: 'RSI 14' },
+  { key: 'sma20', label: 'SMA' },
+  { key: 'sma50', label: 'SMA 2' },
+  { key: 'ema20', label: 'EMA' },
+  { key: 'rsi14', label: 'RSI' },
 ]
 
-const DRAW_TOOLS: { key: DrawTool; label: string }[] = [
-  { key: 'pointer', label: 'Pointer' },
-  { key: 'trend', label: 'Trend' },
-  { key: 'hline', label: 'H-line' },
+/* Toolbar groups mirror the wheel's chart vocabulary exactly — every wheel
+   action has a button twin, so the no-mouse path reaches everything. */
+const PLACE_TOOLS: { key: DrawTool; label: string; title: string }[] = [
+  { key: 'pointer', label: 'Ptr', title: 'Pointer — pan/zoom, no drawing' },
+  { key: 'trend', label: 'Line', title: 'Trend line — click two anchors' },
+  { key: 'hline', label: 'H', title: 'Horizontal price line' },
+  { key: 'vline', label: 'V', title: 'Vertical time line' },
+  { key: 'circle', label: 'Circle', title: 'Circle — click center, then edge' },
 ]
+const EDIT_TOOLS: { key: DrawTool; label: string; title: string }[] = [
+  { key: 'select', label: 'Sel', title: 'Select drawings to edit or delete' },
+]
+const TRIM_TOOL: { key: DrawTool; label: string; title: string } = {
+  key: 'trim',
+  label: 'Trim',
+  title: 'Trim a line back to an intersection',
+}
+const MEASURE_TOOLS: { key: DrawTool; label: string; title: string }[] = [
+  { key: 'measure', label: 'Measure', title: 'Measure Δprice / Δbars between two anchors' },
+  { key: 'inspect', label: 'Inspect', title: 'Inspect a candle — OHLC, body, volume' },
+]
+
+/** Tools that ARM a mode via engine.setTool; the rest are one-shot actions. */
+const ARMABLE = [
+  'pointer',
+  'trend',
+  'hline',
+  'vline',
+  'circle',
+  'select',
+  'trim',
+  'measure',
+  'inspect',
+] as const
+
+const NO_IND: IndicatorKey[] = []
+const DEFAULT_PARAMS: IndicatorParams = {}
 
 function age(iso: string): string {
   const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000)
@@ -51,6 +101,16 @@ export function SymbolPage({
   const [yearBars, setYearBars] = useState<Bar[]>([])
   const [error, setError] = useState<string | null>(null)
   const [drawTool, setDrawTool] = useState<DrawTool>('pointer')
+  // Engine mirror: instance in state for rendering DrawEditor, report for
+  // counts/selection. The ref twin serves the stable wheel handler.
+  const [engine, setEngine] = useState<ChartDraw | null>(null)
+  const [drawState, setDrawState] = useState<EngineState | null>(null)
+  const [drawingsHidden, setDrawingsHidden] = useState(false)
+  const [indHidden, setIndHidden] = useState(false)
+  const [showIndSettings, setShowIndSettings] = useState(false)
+  // Session-scoped periods (IndicatorSettings notes this); stable identity —
+  // it sits in the Chart's rebuild-effect deps.
+  const [indicatorParams, setIndicatorParams] = useState<IndicatorParams>(DEFAULT_PARAMS)
 
   // Drawing engine plumbing. The Chart unmounts when bars empty on a
   // timeframe switch, so onReady fires against a NEW chart each time — the
@@ -60,6 +120,16 @@ export function SymbolPage({
   drawKeyRef.current = `${symbol}|${timeframe}`
   const toolRef = useRef(drawTool)
   toolRef.current = drawTool
+  const barsRef = useRef<Bar[]>([])
+  barsRef.current = bars
+  const indicatorsRef = useRef(indicators)
+  indicatorsRef.current = indicators
+  const drawHiddenRef = useRef(false)
+  // vis:ind stash — the EXACT indicator array parks here while hidden and is
+  // restored identically on re-toggle. Lives outside setState updaters:
+  // StrictMode double-invokes updaters, and a stash mutated inside one
+  // toggles twice (net nothing).
+  const indStash = useRef<IndicatorKey[] | null>(null)
 
   useEffect(() => {
     let stop = false
@@ -130,22 +200,70 @@ export function SymbolPage({
     }
   }, [symbol])
 
-  const toggle = useCallback(
-    (k: IndicatorKey) =>
-      setIndicators((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k])),
-    []
-  )
+  const toggle = useCallback((k: IndicatorKey) => {
+    // Editing the set while 'indicators hidden' EXITS hidden mode and applies
+    // the edit to the empty set the user is looking at. The wheel's ○ marker
+    // promised "turn this on" against what's visible — restoring the stash
+    // underneath would flip the meaning of the click.
+    if (indStash.current !== null) {
+      indStash.current = null
+      setIndHidden(false)
+    }
+    setIndicators((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]))
+  }, [])
+
+  // vis:ind round-trip: stash current set -> [], restore EXACTLY on re-toggle.
+  const toggleIndVis = useCallback(() => {
+    if (indStash.current === null) {
+      indStash.current = indicatorsRef.current
+      setIndHidden(true)
+      setIndicators(NO_IND)
+    } else {
+      const back = indStash.current
+      indStash.current = null
+      setIndHidden(false)
+      setIndicators(back)
+    }
+  }, [])
+
+  const toggleDrawVis = useCallback(() => {
+    const next = !drawHiddenRef.current
+    drawHiddenRef.current = next
+    setDrawingsHidden(next)
+    draw.current?.setDrawingsHidden(next)
+  }, [])
+
+  // Delete: with a live selection it IS "delete the selection"; with nothing
+  // selected it arms click-to-delete. One button, two honest readings — the
+  // wheel's 'delete' action routes through the same choice.
+  const deleteAction = useCallback(() => {
+    const s = draw.current?.getState()
+    if (s && s.selection.length > 0) draw.current?.deleteSelected()
+    else setDrawTool('delete')
+  }, [])
 
   const handleChartReady = useCallback(({ chart, mainSeries }: ChartReadyApi) => {
     if (draw.current && draw.current.chart === chart) {
       draw.current.setKey(drawKeyRef.current)
       draw.current.setSeries(mainSeries)
+      // setKey may have switched buckets — re-read counts for the attrs.
+      setDrawState(draw.current.getState())
       return
     }
     draw.current?.destroy()
-    const d = new ChartDraw(drawKeyRef.current, chart, mainSeries)
+    // A GETTER, not a snapshot: the engine reads bars for measure/inspect at
+    // interaction time, and a bars refetch on this page must never leave it
+    // reading a stale array (the constructor-only-snapshot trap the build
+    // flagged — closed by handing it the ref).
+    const d = new ChartDraw(drawKeyRef.current, chart, mainSeries, {
+      bars: () => barsRef.current,
+    })
     d.setTool(toolRef.current)
+    d.setDrawingsHidden(drawHiddenRef.current)
+    d.onChange((s: EngineState) => setDrawState(s))
     draw.current = d
+    setEngine(d)
+    setDrawState(d.getState())
   }, [])
 
   useEffect(() => {
@@ -161,20 +279,46 @@ export function SymbolPage({
   )
 
   // Chart-wheel segments land here when the wheel was spawned over this
-  // page's chart. 'add'/'hide'/'normalize' belong to charts.gs — ignored.
+  // page's chart — the FULL v3 vocabulary. 'normalize'/'isolate'/'add'/
+  // 'hide' are charts.gs vocabulary: a single-symbol chart has nothing to
+  // rebase against, solo, or add — deliberate no-ops.
   useEffect(() => {
     const off = window.grindstone.onChartAction(({ tool }) => {
-      if (tool === 'pointer' || tool === 'trend' || tool === 'hline') setDrawTool(tool)
-      else if (tool === 'clear') draw.current?.clear()
-      else if (tool.startsWith('ind:')) {
+      if ((ARMABLE as readonly string[]).includes(tool)) setDrawTool(tool as DrawTool)
+      else if (tool === 'delete') deleteAction()
+      else if (tool === 'clear') draw.current?.clearDrawings()
+      else if (tool === 'clearmeasure') draw.current?.clearMeasures()
+      else if (tool === 'vis:draw') toggleDrawVis()
+      else if (tool === 'vis:ind') toggleIndVis()
+      else if (tool === 'settings') setShowIndSettings(true)
+      else if (tool.startsWith('tf:')) {
+        const k = tool.slice(3)
+        if (TIMEFRAMES.some((t) => t.key === k)) setTimeframe(k)
+      } else if (tool.startsWith('ind:')) {
         const k = tool.slice(4)
         if (INDICATORS.some((i) => i.key === k)) toggle(k as IndicatorKey)
       }
     })
     return off
-  }, [toggle])
+  }, [toggle, toggleIndVis, toggleDrawVis, deleteAction])
 
   const q = data?.quote
+  const flags = [
+    ...(drawingsHidden ? ['drawhidden'] : []),
+    ...(indHidden ? ['indhidden'] : []),
+  ]
+  const selection = drawState?.selection ?? []
+
+  const toolBtn = (t: { key: DrawTool; label: string; title: string }) => (
+    <button
+      key={t.key}
+      className={`seg-btn${drawTool === t.key ? ' on' : ''}`}
+      title={t.title}
+      onClick={() => setDrawTool(t.key)}
+    >
+      {t.label}
+    </button>
+  )
 
   return (
     <div className="page wide">
@@ -195,59 +339,139 @@ export function SymbolPage({
 
       <div className="card chart-card">
         <div className="chart-toolbar">
-          <div className="seg">
-            {TIMEFRAMES.map((t) => (
-              <button
-                key={t.key}
-                className={`seg-btn${timeframe === t.key ? ' on' : ''}`}
-                onClick={() => setTimeframe(t.key)}
-              >
-                {t.label}
-              </button>
-            ))}
+          <div className="tgrp">
+            <span className="tgrp-label">Time</span>
+            <div className="seg">
+              {TIMEFRAMES.map((t) => (
+                <button
+                  key={t.key}
+                  className={`seg-btn${timeframe === t.key ? ' on' : ''}`}
+                  onClick={() => setTimeframe(t.key)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="seg">
-            {INDICATORS.map((i) => (
+          <div className="tgrp">
+            <span className="tgrp-label">Indicators</span>
+            <div className="seg">
+              {INDICATORS.map((i) => (
+                <button
+                  key={i.key}
+                  className={`seg-btn${indicators.includes(i.key) ? ' on' : ''}`}
+                  onClick={() => toggle(i.key)}
+                >
+                  {i.label}
+                </button>
+              ))}
+              <span className="seg-sep" />
               <button
-                key={i.key}
-                className={`seg-btn${indicators.includes(i.key) ? ' on' : ''}`}
-                onClick={() => toggle(i.key)}
+                className={`seg-btn${showIndSettings ? ' on' : ''}`}
+                title="Indicator settings — edit periods"
+                onClick={() => setShowIndSettings((v) => !v)}
               >
-                {i.label}
+                ⚙
               </button>
-            ))}
+            </div>
           </div>
-          {/* Toolbar mirrors the wheel's drawing tools on purpose — the
-              no-mouse path must reach everything the wheel reaches. */}
-          <div className="seg">
-            {DRAW_TOOLS.map((t) => (
+          <div className="tgrp">
+            <span className="tgrp-label">Draw</span>
+            <div className="seg">
+              {PLACE_TOOLS.map(toolBtn)}
+              <span className="seg-sep" />
+              {EDIT_TOOLS.map(toolBtn)}
               <button
-                key={t.key}
-                className={`seg-btn${drawTool === t.key ? ' on' : ''}`}
-                onClick={() => setDrawTool(t.key)}
+                className={`seg-btn${drawTool === 'delete' ? ' on' : ''}`}
+                title="Delete — removes the selection, or arms click-to-delete"
+                onClick={deleteAction}
               >
-                {t.label}
+                Del
               </button>
-            ))}
-            <button className="seg-btn" onClick={() => draw.current?.clear()}>
-              Clear
-            </button>
+              {toolBtn(TRIM_TOOL)}
+              <span className="seg-sep" />
+              <button
+                className="seg-btn"
+                title="Clear every drawing on this timeframe"
+                onClick={() => draw.current?.clearDrawings()}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+          <div className="tgrp">
+            <span className="tgrp-label">Measure</span>
+            <div className="seg">
+              {MEASURE_TOOLS.map(toolBtn)}
+              <button
+                className="seg-btn"
+                title="Clear all measurements"
+                onClick={() => draw.current?.clearMeasures()}
+              >
+                Clear M
+              </button>
+            </div>
+          </div>
+          <div className="tgrp">
+            <span className="tgrp-label">View</span>
+            <div className="seg">
+              <button
+                className={`seg-btn${drawingsHidden ? ' vis-off' : ''}`}
+                title={drawingsHidden ? 'Show drawings' : 'Hide drawings (kept, just hidden)'}
+                onClick={toggleDrawVis}
+              >
+                Drawings
+              </button>
+              <button
+                className={`seg-btn${indHidden ? ' vis-off' : ''}`}
+                title={indHidden ? 'Restore indicators' : 'Hide all indicators (set is remembered)'}
+                onClick={toggleIndVis}
+              >
+                Indicators
+              </button>
+            </div>
           </div>
           <span className="subtle chart-source">
             {bars.length > 0 ? `${bars.length} bars · ${barSource}` : barNote || 'loading…'}
           </span>
         </div>
-        {bars.length > 0 ? (
-          <Chart
-            bars={bars}
-            indicators={indicators}
-            height={indicators.includes('rsi14') ? 480 : 400}
-            onReady={handleChartReady}
-            symbols={[symbol]}
-          />
-        ) : (
-          <div className="chart-empty dim">{barNote || 'No bars for this timeframe.'}</div>
-        )}
+        <div className="chart-stage">
+          {bars.length > 0 ? (
+            <Chart
+              bars={bars}
+              indicators={indicators}
+              indicatorParams={indicatorParams}
+              height={indicators.includes('rsi14') ? 480 : 400}
+              onReady={handleChartReady}
+              symbols={[symbol]}
+              timeframe={timeframe}
+              flags={flags}
+              drawTool={drawTool}
+              drawCount={drawState?.drawings ?? 0}
+              measureCount={drawState?.measures ?? 0}
+              selectedCount={selection.length}
+            />
+          ) : (
+            <div className="chart-empty dim">{barNote || 'No bars for this timeframe.'}</div>
+          )}
+          {/* Selection editor appears the moment something is selected and
+              leaves with the selection — gated on bars so it can't float
+              over an empty box driving a disposed engine. */}
+          {engine && selection.length > 0 && bars.length > 0 ? (
+            <div className="float-panel draw-editor-float">
+              <DrawEditor engine={engine} selection={selection} />
+            </div>
+          ) : null}
+          {showIndSettings ? (
+            <div className="float-panel indset-float">
+              <IndicatorSettings
+                params={indicatorParams}
+                onApply={setIndicatorParams}
+                onClose={() => setShowIndSettings(false)}
+              />
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <div className="card">

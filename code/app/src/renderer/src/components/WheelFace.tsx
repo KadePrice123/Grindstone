@@ -60,8 +60,13 @@ function glyph(seg: WheelSegment): string {
     case 'chart': {
       const t = seg.tool ?? ''
       if (t.startsWith('ind:')) return '∿'
-      return { pointer: '➤', trend: '╱', hline: '━', clear: '⌫',
-               normalize: '%', add: '+', hide: '◑' }[t] ?? '✦'
+      if (t.startsWith('vis:')) return '◐'
+      if (t.startsWith('tf:')) return '⏱'
+      return { pointer: '➤', trend: '╱', hline: '━', vline: '┃', circle: '◯',
+               select: '⬚', delete: '⌫', trim: '✂', clear: '⌫',
+               measure: '⤢', inspect: '🔍', clearmeasure: '⌦',
+               normalize: '%', add: '+', hide: '◑',
+               isolate: '⦿', settings: '⚙' }[t] ?? '✦'
     }
     case 'tab':
       return '▣'

@@ -63,7 +63,13 @@ async function targets() {
   return (await res.json()).filter((t) => t.type === 'page')
 }
 
+/** One live connection per target — polling loops that reconnect every tick
+ *  leak sockets until CDP wedges (this hung a full run). */
+const connCache = new Map()
+
 async function connect(target) {
+  const cached = connCache.get(target.id)
+  if (cached && cached.alive()) return cached
   const ws = new WebSocket(target.webSocketDebuggerUrl)
   let id = 0
   const pending = new Map()
@@ -74,11 +80,43 @@ async function connect(target) {
       pending.delete(m.id)
     }
   }
+  // A dying socket must SETTLE every in-flight await — an unresolved promise
+  // inside a waitFor poll is an invisible permanent hang, not a failure.
+  const settleAll = () => {
+    for (const resolve of pending.values()) resolve({ result: undefined })
+    pending.clear()
+  }
+  ws.onclose = settleAll
   await new Promise((resolve, reject) => {
     ws.onopen = resolve
-    ws.onerror = reject
+    ws.onerror = (e) => {
+      settleAll()
+      reject(e)
+    }
   })
-  return {
+  const raw = async (method, params) => {
+    const mid = ++id
+    const res = await new Promise((resolve) => {
+      pending.set(mid, resolve)
+      ws.send(JSON.stringify({ id: mid, method, params }))
+    })
+    return res.result
+  }
+  const conn = {
+    alive: () => ws.readyState === WebSocket.OPEN,
+    /** Raw CDP — Input.dispatchMouseEvent sends TRUSTED input, the only way
+     *  to exercise the chart tools the way a hand does. */
+    send: raw,
+    /** A real left click at view coordinates. The mouseMoved FIRST matters:
+     *  lightweight-charts reports click coordinates from its own tracked
+     *  crosshair, and a press with no prior move has no position — the
+     *  chart's click param arrives point-less and every guard drops it. */
+    click: async (x, y) => {
+      const base = { x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1 }
+      await raw('Input.dispatchMouseEvent', { type: 'mouseMoved', x: base.x, y: base.y })
+      await raw('Input.dispatchMouseEvent', { type: 'mousePressed', ...base })
+      await raw('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
+    },
     eval: async (expression) => {
       const mid = ++id
       const res = await new Promise((resolve) => {
@@ -94,6 +132,8 @@ async function connect(target) {
       return res.result?.result?.value
     },
   }
+  connCache.set(target.id, conn)
+  return conn
 }
 
 async function waitFor(pred, what, ms = 20000) {
@@ -682,6 +722,195 @@ try {
   ).catch(() => null)
   check(unsplit === 'ok', 'split: close split restores a single pane')
 
+  // ------------------------------------------- chart tools, driven by hand
+  // Kade: "currently it's very clunky to use the chart tools — do proper
+  // testing." Everything below is TRUSTED CDP input on the live SPY chart:
+  // real toolbar clicks, real canvas clicks, assertions on the same
+  // data-draw-* attrs the page maintains for exactly this purpose.
+  // Navigate the active tab to SPY EXPLICITLY — earlier tests reorder and
+  // renavigate tabs, so hunting a tab by title is exactly the flake this
+  // section is not allowed to have.
+  await chromeA.eval(typeAddress('spy.gs'))
+  let chartView = null
+  const chartRect = await waitFor(
+    async () => {
+      for (const t of (await targets()).filter((x) => x.url.includes('mode=content'))) {
+        const c = await connect(t)
+        const r = await c.eval(
+          `(() => { // the SYMBOL page specifically — the multi-chart page in a
+             // background tab also carries data-chart-symbols="SPY" and once
+             // stole this scan, sending every click into a detached view.
+             if (document.querySelector('.page-head h1')?.textContent !== 'SPY') return null;
+             const el = document.querySelector('[data-draw-tool]');
+             if (!el || !el.querySelector('canvas')) return null;
+             const b = el.getBoundingClientRect();
+             return b.width > 300 ? { x: b.x, y: b.y, w: b.width, h: b.height } : null })()`
+        )
+        if (r) {
+          chartView = c
+          return r
+        }
+      }
+      return null
+    },
+    'the SPY chart to render bars',
+    30000
+  )
+  const attr = (name) =>
+    chartView.eval(`document.querySelector('[data-draw-tool]')?.getAttribute('${name}') ?? null`)
+  const toolBtn = (title) =>
+    chartView.eval(
+      `(() => { const b = [...document.querySelectorAll('button')]
+          .find(x => (x.title ?? '').startsWith(${JSON.stringify(title)}));
+        if (!b) return 'missing'; b.click(); return 'ok' })()`
+    )
+  // Click through a FRESH rect every time: the metrics card above the chart
+  // populates asynchronously and shoves the chart down after the first
+  // measurement — a cached rect quietly aims clicks at the toolbar.
+  const chartClick = async (fx, fy) => {
+    const r = await chartView.eval(
+      `(() => { const el = document.querySelector('[data-draw-tool]');
+         // The metrics grid above grows after load and pushes the chart
+         // below the window fold — a click past the viewport bottom is
+         // silently dropped by the input pipeline. Center it first.
+         el.scrollIntoView({ block: 'center' });
+         const b = el.getBoundingClientRect();
+         return { x: b.x, y: b.y, w: b.width, h: b.height } })()`
+    )
+    await sleep(120) // scroll settles before coordinates are used
+    const rr = await chartView.eval(
+      `(() => { const b = document.querySelector('[data-draw-tool]').getBoundingClientRect();
+         return { x: b.x, y: b.y, w: b.width, h: b.height } })()`
+    )
+    await chartView.click(rr.x + rr.w * fx, rr.y + rr.h * fy)
+  }
+  const cx = (fx) => chartRect.x + chartRect.w * fx
+  const cy = (fy) => chartRect.y + chartRect.h * fy
+
+  // Trend line: arm from the toolbar, two real clicks, one drawing.
+  check((await toolBtn('Trend line')) === 'ok', 'tools: the Line button exists')
+  await waitFor(async () => (await attr('data-draw-tool')) === 'trend', 'trend armed', 5000)
+  await chartClick(0.30, 0.70)
+  await sleep(250)
+  await chartClick(0.60, 0.35)
+  const drew = await waitFor(
+    async () => ((await attr('data-draw-count')) === '1' ? 'ok' : null),
+    'the trend line to exist',
+    6000
+  ).catch(() => null)
+  check(drew === 'ok', 'tools: two real clicks place a trend line')
+
+  // Select it mid-span: the editor appears with per-endpoint fields.
+  await toolBtn('Select drawings')
+  await chartClick(0.45, 0.525)
+  const selected = await waitFor(
+    async () => {
+      const n = await attr('data-draw-selected')
+      if (n !== '1') return null
+      const fields = await chartView.eval(
+        `document.querySelectorAll('.draw-editor-float input').length`
+      )
+      return fields >= 4 ? { fields } : null
+    },
+    'selection + the 4-field endpoint editor',
+    6000
+  ).catch(() => null)
+  check(!!selected, 'tools: select opens the exact-value editor',
+    selected ? `${selected.fields} fields` : '')
+
+  // Delete the selection from the toolbar.
+  await toolBtn('Delete')
+  const deleted = await waitFor(
+    async () => ((await attr('data-draw-count')) === '0' ? 'ok' : null),
+    'the selection to delete',
+    6000
+  ).catch(() => null)
+  check(deleted === 'ok', 'tools: Delete removes the selected drawing')
+
+  // H-line + a crossing trend, then TRIM the trend's lower-left span:
+  // the trend splits at the intersection (clicked span dies), the h-line
+  // donor splits in two -> 3 drawings remain.
+  await toolBtn('Horizontal price line')
+  await chartClick(0.5, 0.5)
+  await toolBtn('Trend line')
+  await chartClick(0.30, 0.70)
+  await sleep(250)
+  await chartClick(0.70, 0.30)
+  await waitFor(async () => (await attr('data-draw-count')) === '2', 'h-line + trend', 6000)
+  await toolBtn('Trim')
+  await chartClick(0.35, 0.65) // the span below/left of the crossing
+  const trimmed = await waitFor(
+    async () => {
+      const n = await attr('data-draw-count')
+      return n === '3' ? 'ok' : null
+    },
+    'trim to cut back to the intersection',
+    6000
+  ).catch(() => null)
+  check(trimmed === 'ok', 'tools: trim removes only the clicked span (SolidWorks-style)',
+    `count=${await attr('data-draw-count')}`)
+
+  // Measure between two candles: one annotation, then clear it.
+  await toolBtn('Measure')
+  await chartClick(0.35, 0.45)
+  await sleep(250)
+  await chartClick(0.65, 0.55)
+  const measured = await waitFor(
+    async () => ((await attr('data-measure-count')) === '1' ? 'ok' : null),
+    'the measurement annotation',
+    6000
+  ).catch(() => null)
+  check(measured === 'ok', 'tools: measure connects two real points')
+  const clearedBtn = await toolBtn('Clear all measurements')
+  const cleared = await waitFor(
+    async () => ((await attr('data-measure-count')) === '0' ? 'ok' : null),
+    'measures cleared',
+    8000
+  ).catch(async () => `btn=${clearedBtn} count=${await attr('data-measure-count')}`)
+  check(cleared === 'ok', 'tools: clear-measures wipes the annotations', String(cleared))
+
+  // Visibility toggle reflects into the wheel-context flags.
+  await toolBtn('Hide drawings')
+  const visFlag = await waitFor(
+    async () => (((await attr('data-chart-flags')) ?? '').includes('drawhidden') ? 'ok' : null),
+    'the drawings-hidden flag',
+    5000
+  ).catch(() => null)
+  check(visFlag === 'ok', 'tools: drawings-visibility toggle sets the context flag')
+  await toolBtn('Show drawings')
+
+  // The chart wheel's Timeframe companion marks the live timeframe.
+  await chartView.eval(
+    `(window.grindstone.wheelEvt('down', 420, 320,
+        {context: 'chart', symbols: ['SPY'], indicators: ['vol'], timeframe: '1Day'}), 'ok')`
+  )
+  await sleep(350)
+  for (const d of [40, 90, 140]) {
+    await chartView.eval(`(window.grindstone.wheelEvt('move', ${420 - d}, ${320 + d}), 'ok')`)
+  }
+  await chartView.eval(`(window.grindstone.wheelEvt('up', 260, 480), 'ok')`) // SW = Timeframe
+  const tfWheel = await waitFor(
+    async () => {
+      const s = await wheelUi.eval(
+        `JSON.stringify({
+           id: document.querySelector('.wheel-face')?.dataset.wheel ?? null,
+           mark: [...document.querySelectorAll('.wf-label')]
+                   .some(t => (t.textContent ?? '').includes('● 1Day'))
+         })`
+      )
+      const st = JSON.parse(s)
+      return st.id === 'chart-tf' && st.mark ? st : null
+    },
+    'the timeframe wheel with the live mark',
+    8000
+  ).catch(() => null)
+  check(!!tfWheel, 'wheel: chart-tf marks the chart´s current timeframe')
+  await wheelUi.eval(
+    `(document.querySelector('.wheel-stage')
+        .dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`
+  )
+  await sleep(250)
+
   // ------------------------------------------------------------- charts.gs
   await chromeA.eval(typeAddress('charts.gs'))
   const chartsPage = await waitFor(
@@ -694,6 +923,52 @@ try {
     8000
   ).catch(() => null)
   check(chartsPage === 'charts.gs', 'charts: charts.gs is a real addressable page', String(chartsPage))
+
+  // Isolate: solo a ticker from its legend chip, then restore.
+  const chartsTargets = (await targets()).filter((t) => t.url.includes('mode=content'))
+  let multi = null
+  for (const t of chartsTargets) {
+    const c = await connect(t)
+    const isCharts = await c.eval(
+      `!!document.querySelector('[data-chart-isolated]') &&
+       [...document.querySelectorAll('button')].some(b => (b.textContent ?? '').includes('⦿'))`
+    )
+    if (isCharts) {
+      multi = c
+      break
+    }
+  }
+  check(!!multi, 'charts: the multi-chart page exposes isolate controls')
+  if (multi) {
+    await multi.eval(
+      `([...document.querySelectorAll('button')]
+          .find(b => (b.textContent ?? '').includes('⦿')).click(), 'ok')`
+    )
+    const iso = await waitFor(
+      async () =>
+        (await multi.eval(
+          `document.querySelector('[data-chart-isolated]')?.getAttribute('data-chart-isolated')`
+        )) || null,
+      'isolation to engage',
+      6000
+    ).catch(() => null)
+    check(iso === 'SPY', 'charts: solo isolates the ticker', String(iso))
+    await multi.eval(
+      `([...document.querySelectorAll('button')]
+          .find(b => (b.textContent ?? '').includes('⦿')).click(), 'ok')`
+    )
+    const isoOff = await waitFor(
+      async () => {
+        const v = await multi.eval(
+          `document.querySelector('[data-chart-isolated]')?.getAttribute('data-chart-isolated')`
+        )
+        return v === '' || v === null ? 'ok' : null
+      },
+      'isolation to disable',
+      6000
+    ).catch(() => null)
+    check(isoOff === 'ok', 'charts: disabling isolation restores the previous set')
+  }
 } catch (err) {
   console.log('FAIL  harness error —', err.message)
   failures += 1

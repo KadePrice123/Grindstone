@@ -68,7 +68,17 @@ const grindstone = {
     kind: 'down' | 'move' | 'up',
     x: number,
     y: number,
-    ctx?: { context: string; symbols?: string[]; indicators?: string[]; hidden?: string[] }
+    ctx?: {
+      context: string
+      symbols?: string[]
+      indicators?: string[]
+      hidden?: string[]
+      timeframe?: string
+      /** 'drawhidden' | 'indhidden' — global visibility states, for marks. */
+      flags?: string[]
+      /** The soloed symbol when isolation is active. */
+      isolated?: string
+    }
   ): void => {
     ipcRenderer.send('wheel:evt', kind, x, y, ctx ?? null)
   },

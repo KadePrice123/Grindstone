@@ -670,6 +670,10 @@ export class TabManager {
       const w = this.winFromContent(e.sender)
       const tab = w?.tabs.find((t) => t.view.webContents.id === e.sender.id)
       if (!w || !tab) return
+      if (typeof meta.title === 'string' && meta.title !== tab.title) {
+        log('tab:meta title', tab.id, JSON.stringify(tab.title), '->',
+            JSON.stringify(meta.title), 'from wc', e.sender.id)
+      }
       if (typeof meta.title === 'string') tab.title = meta.title.slice(0, 80)
       if (typeof meta.icon === 'string') tab.icon = meta.icon.slice(0, 24)
       if (typeof meta.depth === 'number') this.appHistoryDepth.set(tab.id, meta.depth)

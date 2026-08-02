@@ -1,0 +1,139 @@
+/* Chart tool UX shared by the symbol page and charts.gs: the grouped
+   toolbar, floating panels (DrawEditor / IndicatorSettings), and the
+   isolation affordances on the legend chips. Base .seg / .seg-btn / .btn
+   live in styles.css; chip basics in charts.css. */
+
+/* ---- grouped toolbar ---------------------------------------------------
+   Each group is a captioned segment: a tiny label above the buttons, thin
+   rules between sub-clusters. The caption is what makes ten small buttons
+   scannable instead of clunky. */
+.tgrp {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tgrp-label {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding-left: 5px;
+  user-select: none;
+}
+.seg-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 3px 2px;
+  background: var(--border);
+}
+/* One-letter buttons (H, V) still need a real hit target. */
+.tgrp .seg-btn {
+  min-width: 30px;
+}
+
+/* Hidden-layer toggles: the abnormal state (hidden) is what gets marked —
+   struck through and dimmed — so 'on' stays reserved for the armed tool. */
+.seg-btn.vis-off {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  opacity: 0.75;
+}
+
+/* ---- floating panels over the chart ----------------------------------- */
+.chart-stage {
+  position: relative;
+}
+.float-panel {
+  position: absolute;
+  top: 10px;
+  z-index: 5; /* above the drawing overlay svg (z 3) */
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 10px 12px;
+}
+/* Selection editor sits clear of the price scale; settings on the left so
+   both can be open without a shoving match. */
+.draw-editor-float {
+  right: 70px;
+}
+.indset-float {
+  left: 10px;
+}
+
+/* ---- indicator settings panel ------------------------------------------ */
+.indset {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 200px;
+}
+.indset-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  font-size: 12.5px;
+}
+.indset-x {
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 6px;
+}
+.indset-x:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.indset-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+.indset-row input {
+  width: 64px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 4px 8px;
+  font-size: 12.5px;
+}
+.indset-row input.bad {
+  border-color: var(--loss);
+}
+.indset-note {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.indset-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.indset-actions .btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- isolation on the legend chips ------------------------------------- */
+/* The soloed chip glows; every other chip ghosts, because its line is off
+   the chart right now no matter what its (preserved) eye state says. */
+.mc-chip.solo {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.mc-chip.ghost .mc-sym,
+.mc-chip.ghost .mc-dot {
+  opacity: 0.35;
+}
+.mc-chip-btn.solo-on {
+  color: var(--accent);
+}

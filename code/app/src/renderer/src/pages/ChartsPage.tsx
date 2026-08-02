@@ -2,25 +2,38 @@
  * charts.gs — the multi-symbol comparison chart. Several tickers as line
  * series on one chart; add/remove/show/hide per symbol; normalize rebases
  * each line to % change from its first loaded close. State {symbols,
- * normalize, timeframe, hidden} persists through the settings door
- * (values.multi_chart) with a 500ms debounce so a burst of edits is one PUT.
+ * normalize, timeframe, hidden, isolated} persists through the settings
+ * door (values.multi_chart) with a 500ms debounce so a burst of edits is
+ * one PUT.
+ *
+ * ISOLATION: isolated=SYM shows only that symbol. The stored hidden list is
+ * NOT touched — isolation is a lens over it, so switching it off restores
+ * the previous eye states exactly. Effective hidden (what the chart and the
+ * wheel context see) = isolated ? all-but-isolated : hidden.
  *
  * Drawings anchor to the FIRST VISIBLE symbol's series — its scale defines
  * {time, price} for everything drawn here (in % mode "price" is a percent).
- * Hide that symbol and drawings re-project onto the next one's scale.
+ * Hide (or isolate away) that symbol and drawings re-project onto the next
+ * one's scale.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
 import { Bar, Chart, ChartReadyApi, CompareLine } from '../components/Chart'
 import { ChartDraw, DrawTool } from '../components/ChartDraw'
+import { DrawEditor } from '../components/DrawEditor'
 import { ChartMiniIcon } from '../components/icons'
 import '../charts.css'
+import '../charttools.css'
+
+/** Engine report shape — single source for counts/selection (contract). */
+type EngineState = ReturnType<ChartDraw['getState']>
 
 interface MultiChartState {
   symbols: string[]
   normalize: boolean
   timeframe: string
   hidden: string[]
+  isolated: string | null
 }
 
 const TIMEFRAMES: { key: string; label: string }[] = [
@@ -31,11 +44,42 @@ const TIMEFRAMES: { key: string; label: string }[] = [
   { key: '1Day', label: '1D' },
 ]
 
-const DRAW_TOOLS: { key: DrawTool; label: string }[] = [
-  { key: 'pointer', label: 'Pointer' },
-  { key: 'trend', label: 'Trend' },
-  { key: 'hline', label: 'H-line' },
+/* Toolbar groups mirror the wheel's chart vocabulary exactly — every wheel
+   action has a button twin, so the no-mouse path reaches everything. */
+const PLACE_TOOLS: { key: DrawTool; label: string; title: string }[] = [
+  { key: 'pointer', label: 'Ptr', title: 'Pointer — pan/zoom, no drawing' },
+  { key: 'trend', label: 'Line', title: 'Trend line — click two anchors' },
+  { key: 'hline', label: 'H', title: 'Horizontal price line' },
+  { key: 'vline', label: 'V', title: 'Vertical time line' },
+  { key: 'circle', label: 'Circle', title: 'Circle — click center, then edge' },
 ]
+const SELECT_TOOL: { key: DrawTool; label: string; title: string } = {
+  key: 'select',
+  label: 'Sel',
+  title: 'Select drawings to edit or delete',
+}
+const TRIM_TOOL: { key: DrawTool; label: string; title: string } = {
+  key: 'trim',
+  label: 'Trim',
+  title: 'Trim a line back to an intersection',
+}
+const MEASURE_TOOLS: { key: DrawTool; label: string; title: string }[] = [
+  { key: 'measure', label: 'Measure', title: 'Measure Δprice / Δbars between two anchors' },
+  { key: 'inspect', label: 'Inspect', title: 'Inspect a bar under the cursor' },
+]
+
+/** Tools that ARM a mode via engine.setTool; the rest are one-shot actions. */
+const ARMABLE = [
+  'pointer',
+  'trend',
+  'hline',
+  'vline',
+  'circle',
+  'select',
+  'trim',
+  'measure',
+  'inspect',
+] as const
 
 /** Eight distinguishable series colors on the dark surface. Assignment is by
  *  slot (index in the symbols list), so colors shift when an earlier symbol
@@ -56,6 +100,7 @@ const DEFAULT_STATE: MultiChartState = {
   normalize: true,
   timeframe: '1Day',
   hidden: [],
+  isolated: null,
 }
 
 /** The settings blob is user data from a generic json door — trust nothing. */
@@ -73,6 +118,12 @@ function sane(v: unknown): MultiChartState {
         .map((s) => s.toUpperCase())
         .filter((s) => symbols.includes(s))
     : []
+  // isolated must name a current symbol or be null — anything else (stale
+  // blob edited elsewhere, junk through the door) degrades to "off".
+  const isolated =
+    typeof o.isolated === 'string' && symbols.includes(o.isolated.toUpperCase())
+      ? o.isolated.toUpperCase()
+      : null
   return {
     symbols,
     normalize: typeof o.normalize === 'boolean' ? o.normalize : DEFAULT_STATE.normalize,
@@ -81,6 +132,7 @@ function sane(v: unknown): MultiChartState {
         ? o.timeframe
         : DEFAULT_STATE.timeframe,
     hidden,
+    isolated,
   }
 }
 
@@ -111,21 +163,28 @@ export function ChartsPage() {
   const [tool, setTool] = useState<DrawTool>('pointer')
   const [loadErr, setLoadErr] = useState<string | null>(null)
   const [saveErr, setSaveErr] = useState<string | null>(null)
+  const [engine, setEngine] = useState<ChartDraw | null>(null)
+  const [drawState, setDrawState] = useState<EngineState | null>(null)
+  const [drawingsHidden, setDrawingsHidden] = useState(false)
 
   const dirty = useRef(false)
   const draw = useRef<ChartDraw | null>(null)
   const toolRef = useRef(tool)
   toolRef.current = tool
+  const drawHiddenRef = useRef(false)
 
   const symbols = st?.symbols
   const hiddenList = st?.hidden
   const timeframe = st?.timeframe
+  const isolated = st?.isolated ?? null
 
   // REVIEW 2026-08-02: normalize is IN the key. It swaps the whole price
   // scale between dollars and percent; one shared bucket meant $560 anchors
   // projected thousands of pixels off a ±10% axis (drawings "vanished") and
   // the bucket became a permanent dollar/percent mix. Same rule as the
-  // timeframe: a key per scale semantics.
+  // timeframe: a key per scale semantics. Isolation is NOT in the key — it
+  // changes which series drawings project through, not what a stored
+  // {time, price} means.
   const drawKeyRef = useRef('multi|1Day|%')
   drawKeyRef.current = `multi|${timeframe ?? '1Day'}|${st?.normalize ? '%' : '$'}`
 
@@ -228,6 +287,12 @@ export function ChartsPage() {
     }
   }, [symbols, timeframe])
 
+  // Effective visibility: isolation is a lens over the stored hidden list.
+  const effectiveHidden = useMemo(
+    () => (isolated ? (symbols ?? []).filter((x) => x !== isolated) : hiddenList ?? []),
+    [isolated, symbols, hiddenList]
+  )
+
   // Memoized so typing in the add box does not rebuild every chart series.
   const lines: CompareLine[] = useMemo(
     () =>
@@ -235,22 +300,38 @@ export function ChartsPage() {
         symbol: s,
         bars: data[s]?.bars ?? [],
         color: PALETTE[i % PALETTE.length],
-        hidden: hiddenList?.includes(s),
+        hidden: effectiveHidden.includes(s),
       })),
-    [symbols, hiddenList, data]
+    [symbols, effectiveHidden, data]
   )
+
+  // The engine's constructor wants the anchor series' bars (measure counts,
+  // inspect readouts) — that's the first VISIBLE line, same one Chart hands
+  // to onReady as mainSeries.
+  const mainBarsRef = useRef<Bar[]>([])
+  mainBarsRef.current = lines.find((l) => !l.hidden && l.bars.length > 0)?.bars ?? []
 
   // ---- drawing layer -----------------------------------------------------
   const handleChartReady = useCallback(({ chart, mainSeries }: ChartReadyApi) => {
     if (draw.current && draw.current.chart === chart) {
       draw.current.setKey(drawKeyRef.current)
       draw.current.setSeries(mainSeries)
+      // setKey may have switched buckets — re-read counts for the attrs.
+      setDrawState(draw.current.getState())
       return
     }
     draw.current?.destroy()
-    const d = new ChartDraw(drawKeyRef.current, chart, mainSeries)
+    // A getter, so measure/inspect always read the CURRENT anchor symbol's
+    // bars — snapshots went stale on refetch (build-flagged trap, closed).
+    const d = new ChartDraw(drawKeyRef.current, chart, mainSeries, {
+      bars: () => mainBarsRef.current,
+    })
     d.setTool(toolRef.current)
+    d.setDrawingsHidden(drawHiddenRef.current)
+    d.onChange((s: EngineState) => setDrawState(s))
     draw.current = d
+    setEngine(d)
+    setDrawState(d.getState())
   }, [])
 
   useEffect(() => {
@@ -264,6 +345,21 @@ export function ChartsPage() {
     },
     []
   )
+
+  const toggleDrawVis = useCallback(() => {
+    const next = !drawHiddenRef.current
+    drawHiddenRef.current = next
+    setDrawingsHidden(next)
+    draw.current?.setDrawingsHidden(next)
+  }, [])
+
+  // Delete: with a live selection it IS "delete the selection"; with nothing
+  // selected it arms click-to-delete. The wheel's 'delete' routes here too.
+  const deleteAction = useCallback(() => {
+    const s = draw.current?.getState()
+    if (s && s.selection.length > 0) draw.current?.deleteSelected()
+    else setTool('delete')
+  }, [])
 
   // ---- symbol actions ----------------------------------------------------
   const addSymbol = useCallback(
@@ -287,6 +383,8 @@ export function ChartsPage() {
     [edit]
   )
 
+  // The eye edits the STORED list even while isolation is active — it sets
+  // what you come back to, and the chip's eye state shows it all along.
   const toggleHidden = useCallback(
     (sym: string) =>
       edit((s) =>
@@ -308,22 +406,49 @@ export function ChartsPage() {
         ...s,
         symbols: s.symbols.filter((x) => x !== sym),
         hidden: s.hidden.filter((x) => x !== sym),
+        isolated: s.isolated === sym ? null : s.isolated,
       })),
     [edit]
   )
 
+  const toggleSolo = useCallback(
+    (sym: string) =>
+      edit((s) =>
+        s.symbols.includes(sym) ? { ...s, isolated: s.isolated === sym ? null : sym } : s
+      ),
+    [edit]
+  )
+
   // ---- gesture-wheel actions (this page owns the chart it spawned over) --
+  // Full v3 vocabulary. ind:* and 'settings' are single-symbol overlay
+  // vocabulary — the compare chart computes no indicators, so there is
+  // nothing to toggle or configure: deliberate no-ops, not omissions.
   useEffect(() => {
     const off = window.grindstone.onChartAction(({ tool: t, symbol }) => {
-      if (t === 'pointer' || t === 'trend' || t === 'hline') setTool(t)
-      else if (t === 'clear') draw.current?.clear()
+      if ((ARMABLE as readonly string[]).includes(t)) setTool(t as DrawTool)
+      else if (t === 'delete') deleteAction()
+      else if (t === 'clear') draw.current?.clearDrawings()
+      else if (t === 'clearmeasure') draw.current?.clearMeasures()
+      else if (t === 'vis:draw') toggleDrawVis()
       else if (t === 'normalize') edit((s) => ({ ...s, normalize: !s.normalize }))
-      else if (t === 'add' && symbol) addSymbol(symbol)
+      else if (t === 'isolate') {
+        // The wheel action carries no target: solo the first VISIBLE (per
+        // the stored hidden list) symbol; if anything is already isolated
+        // the same action means "isolation off". Chosen because the wheel
+        // is a toggle-shaped gesture — one segment, both directions.
+        edit((s) => {
+          if (s.isolated !== null) return { ...s, isolated: null }
+          const first = s.symbols.find((x) => !s.hidden.includes(x))
+          return first ? { ...s, isolated: first } : s
+        })
+      } else if (t.startsWith('tf:')) {
+        const k = t.slice(3)
+        if (TIMEFRAMES.some((tf) => tf.key === k)) edit((s) => ({ ...s, timeframe: k }))
+      } else if (t === 'add' && symbol) addSymbol(symbol)
       else if (t === 'hide' && symbol) toggleHidden(symbol.toUpperCase())
-      // ind:* is single-symbol overlay vocabulary — a no-op on the compare chart
     })
     return off
-  }, [edit, addSymbol, toggleHidden])
+  }, [edit, addSymbol, toggleHidden, toggleDrawVis, deleteAction])
 
   if (st === null) {
     return (
@@ -336,6 +461,20 @@ export function ChartsPage() {
       </div>
     )
   }
+
+  const flags = drawingsHidden ? ['drawhidden'] : []
+  const selection = drawState?.selection ?? []
+
+  const toolBtn = (t: { key: DrawTool; label: string; title: string }) => (
+    <button
+      key={t.key}
+      className={`seg-btn${tool === t.key ? ' on' : ''}`}
+      title={t.title}
+      onClick={() => setTool(t.key)}
+    >
+      {t.label}
+    </button>
+  )
 
   return (
     <div className="page wide">
@@ -351,41 +490,84 @@ export function ChartsPage() {
 
       <div className="card chart-card">
         <div className="chart-toolbar">
-          <div className="seg">
-            {TIMEFRAMES.map((t) => (
-              <button
-                key={t.key}
-                className={`seg-btn${st.timeframe === t.key ? ' on' : ''}`}
-                onClick={() => edit((s) => ({ ...s, timeframe: t.key }))}
-              >
-                {t.label}
-              </button>
-            ))}
+          <div className="tgrp">
+            <span className="tgrp-label">Time</span>
+            <div className="seg">
+              {TIMEFRAMES.map((t) => (
+                <button
+                  key={t.key}
+                  className={`seg-btn${st.timeframe === t.key ? ' on' : ''}`}
+                  onClick={() => edit((s) => ({ ...s, timeframe: t.key }))}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="seg">
-            <button
-              className={`seg-btn${st.normalize ? ' on' : ''}`}
-              title="Rebase every line to % change from its first close"
-              onClick={() => edit((s) => ({ ...s, normalize: !s.normalize }))}
-            >
-              % change
-            </button>
-          </div>
-          {/* Toolbar mirrors the wheel's chart tools on purpose — the
-              no-mouse path must reach everything the wheel reaches. */}
-          <div className="seg">
-            {DRAW_TOOLS.map((t) => (
+          <div className="tgrp">
+            <span className="tgrp-label">Draw</span>
+            <div className="seg">
+              {PLACE_TOOLS.map(toolBtn)}
+              <span className="seg-sep" />
+              {toolBtn(SELECT_TOOL)}
               <button
-                key={t.key}
-                className={`seg-btn${tool === t.key ? ' on' : ''}`}
-                onClick={() => setTool(t.key)}
+                className={`seg-btn${tool === 'delete' ? ' on' : ''}`}
+                title="Delete — removes the selection, or arms click-to-delete"
+                onClick={deleteAction}
               >
-                {t.label}
+                Del
               </button>
-            ))}
-            <button className="seg-btn" onClick={() => draw.current?.clear()}>
-              Clear
-            </button>
+              {toolBtn(TRIM_TOOL)}
+              <span className="seg-sep" />
+              <button
+                className="seg-btn"
+                title="Clear every drawing on this timeframe/mode"
+                onClick={() => draw.current?.clearDrawings()}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+          <div className="tgrp">
+            <span className="tgrp-label">Measure</span>
+            <div className="seg">
+              {MEASURE_TOOLS.map(toolBtn)}
+              <button
+                className="seg-btn"
+                title="Clear all measurements"
+                onClick={() => draw.current?.clearMeasures()}
+              >
+                Clear M
+              </button>
+            </div>
+          </div>
+          <div className="tgrp">
+            <span className="tgrp-label">View</span>
+            <div className="seg">
+              <button
+                className={`seg-btn${drawingsHidden ? ' vis-off' : ''}`}
+                title={drawingsHidden ? 'Show drawings' : 'Hide drawings (kept, just hidden)'}
+                onClick={toggleDrawVis}
+              >
+                Drawings
+              </button>
+              <button
+                className={`seg-btn${st.normalize ? ' on' : ''}`}
+                title="Rebase every line to % change from its first close"
+                onClick={() => edit((s) => ({ ...s, normalize: !s.normalize }))}
+              >
+                % change
+              </button>
+              {st.isolated ? (
+                <button
+                  className="seg-btn on"
+                  title={`Showing only ${st.isolated} — click to restore the previous eye states`}
+                  onClick={() => edit((s) => ({ ...s, isolated: null }))}
+                >
+                  ⦿ {st.isolated} off
+                </button>
+              ) : null}
+            </div>
           </div>
           <form
             className="mc-add"
@@ -415,10 +597,17 @@ export function ChartsPage() {
             lines.map((l) => {
               const err = data[l.symbol]?.error
               const loading = !err && l.bars.length === 0
+              // Chip styling reads STORED hidden (the eye's truth); isolation
+              // paints over it: the solo chip glows, everyone else ghosts.
+              const storedHidden = st.hidden.includes(l.symbol)
+              const solo = st.isolated === l.symbol
+              const ghost = st.isolated !== null && !solo
               return (
                 <span
                   key={l.symbol}
-                  className={`mc-chip${l.hidden ? ' off' : ''}${err ? ' err' : ''}`}
+                  className={`mc-chip${storedHidden ? ' off' : ''}${err ? ' err' : ''}${
+                    solo ? ' solo' : ''
+                  }${ghost ? ' ghost' : ''}`}
                   title={err ? `${l.symbol}: ${err}` : loading ? `${l.symbol}: loading…` : l.symbol}
                 >
                   <span className="mc-dot" style={{ background: l.color }} />
@@ -426,10 +615,17 @@ export function ChartsPage() {
                   {err ? <span className="mc-flag">!</span> : null}
                   <button
                     className="mc-chip-btn"
-                    title={l.hidden ? 'Show' : 'Hide'}
+                    title={storedHidden ? 'Show' : 'Hide'}
                     onClick={() => toggleHidden(l.symbol)}
                   >
-                    <EyeIcon off={!!l.hidden} />
+                    <EyeIcon off={storedHidden} />
+                  </button>
+                  <button
+                    className={`mc-chip-btn${solo ? ' solo-on' : ''}`}
+                    title={solo ? 'Isolation off' : `Show only ${l.symbol}`}
+                    onClick={() => toggleSolo(l.symbol)}
+                  >
+                    ⦿
                   </button>
                   <button
                     className="mc-chip-btn"
@@ -444,20 +640,35 @@ export function ChartsPage() {
           )}
         </div>
 
-        {st.symbols.length === 0 ? (
-          <div className="chart-empty dim">
-            Add a symbol above, or right-click any chart and pick a ticker.
-          </div>
-        ) : (
-          <Chart
-            lines={lines}
-            normalize={st.normalize}
-            height={460}
-            onReady={handleChartReady}
-            symbols={st.symbols}
-            hiddenSymbols={st.hidden}
-          />
-        )}
+        <div className="chart-stage">
+          {st.symbols.length === 0 ? (
+            <div className="chart-empty dim">
+              Add a symbol above, or right-click any chart and pick a ticker.
+            </div>
+          ) : (
+            <Chart
+              lines={lines}
+              normalize={st.normalize}
+              height={460}
+              onReady={handleChartReady}
+              symbols={st.symbols}
+              hiddenSymbols={effectiveHidden}
+              timeframe={st.timeframe}
+              flags={flags}
+              isolated={st.isolated}
+              drawTool={tool}
+              drawCount={drawState?.drawings ?? 0}
+              measureCount={drawState?.measures ?? 0}
+              selectedCount={selection.length}
+            />
+          )}
+          {/* Selection editor appears with the selection and leaves with it. */}
+          {engine && selection.length > 0 && st.symbols.length > 0 ? (
+            <div className="float-panel draw-editor-float">
+              <DrawEditor engine={engine} selection={selection} />
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   )

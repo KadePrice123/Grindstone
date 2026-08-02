@@ -17,6 +17,9 @@ function contextAt(target: EventTarget | null): {
   symbols?: string[]
   indicators?: string[]
   hidden?: string[]
+  timeframe?: string
+  flags?: string[]
+  isolated?: string
 } | undefined {
   if (!(target instanceof Element)) return undefined
   const host = target.closest<HTMLElement>('[data-wheel-context]')
@@ -28,6 +31,9 @@ function contextAt(target: EventTarget | null): {
     symbols: list(host.dataset.chartSymbols),
     indicators: list(host.dataset.chartIndicators),
     hidden: list(host.dataset.chartHidden),
+    timeframe: host.dataset.chartTimeframe || undefined,
+    flags: list(host.dataset.chartFlags),
+    isolated: host.dataset.chartIsolated || undefined,
   }
 }
 

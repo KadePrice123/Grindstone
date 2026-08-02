@@ -69,7 +69,18 @@ interface WheelCtx {
   symbols: string[]
   indicators: string[]
   hidden: string[]
+  /** Current bar timeframe, one of TIMEFRAMES — null when the page sent
+   *  something unrecognized (treated the same as absent: no mark). */
+  timeframe: string | null
+  /** Active global-visibility states: 'drawhidden' and/or 'indhidden'. */
+  flags: string[]
+  /** The soloed symbol while isolation is on, null otherwise. */
+  isolated: string | null
 }
+
+// Mirrors backend/wheels.py TIMEFRAMES — the tf:* vocabulary CHART_TOOLS
+// accepts. Order is the wheel order (12 o'clock clockwise).
+const TIMEFRAMES = ['1Min', '5Min', '15Min', '1Hour', '1Day'] as const
 
 /** The 4th wheel:evt arg crosses from ANY renderer, including hardened
  *  browser views — treat it as untrusted and keep only well-shaped strings. */
@@ -83,11 +94,22 @@ function sanitizeCtx(raw: unknown): WheelCtx | null {
       ? v.filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 12)
           .slice(0, 24)
       : []
+  const tf = r['timeframe']
+  const iso = r['isolated']
   return {
     context: context.slice(0, 24),
     symbols: arr(r['symbols']).map((s) => s.toUpperCase()),
     indicators: arr(r['indicators']),
     hidden: arr(r['hidden']).map((s) => s.toUpperCase()),
+    // Strict allowlist, not just shape: an unknown timeframe would silently
+    // mark nothing while looking valid downstream.
+    timeframe:
+      typeof tf === 'string' && (TIMEFRAMES as readonly string[]).includes(tf) ? tf : null,
+    flags: arr(r['flags']),
+    isolated:
+      typeof iso === 'string' && iso.length > 0 && iso.length <= 12
+        ? iso.toUpperCase()
+        : null,
   }
 }
 
@@ -183,14 +205,14 @@ export class WheelManager {
   } {
     const def = doc.wheels.find((w) => w.id === wheelId) ?? doc.wheels[0]
     if (!def.dynamic) {
-      const segments = def.segments.map((s) => ({
+      const segments = def.segments.map((s) => this.decorateChartState({
         ...s,
         disabled: s.type === 'placeholder' || s.type === 'empty',
         symbol: s.type === 'wheel'
           ? doc.wheels.find((w) => w.id === s.wheel)?.symbol
           : undefined,
         label: s.label || (s.type === 'ticker' ? (s.ticker ?? '') : s.label),
-      }))
+      }, ctx))
       return { def, segments, pages: 1 }
     }
     if (def.dynamic !== 'tabs') {
@@ -217,6 +239,28 @@ export class WheelManager {
       ...slice.slice(5),
     ]
     return { def, segments, pages }
+  }
+
+  /** Decorate STATIC-wheel chart segments whose meaning depends on live
+   *  chart state (vis:* / tf:* / isolate — users can also place these on
+   *  custom wheels via the catalog). With ctx, vis:* labels carry the
+   *  current visibility so the segment reads as the toggle it is. With NO
+   *  ctx the segments are DISABLED, labels left plain: the chart-ind review
+   *  lesson — a state-claiming action that cannot land must not look live. */
+  private decorateChartState(seg: Segment, ctx: WheelCtx | null): Segment {
+    if (seg.type !== 'chart' || !seg.tool) return seg
+    const stateful =
+      seg.tool === 'vis:draw' || seg.tool === 'vis:ind' ||
+      seg.tool === 'isolate' || seg.tool.startsWith('tf:')
+    if (!stateful) return seg
+    if (ctx === null) return { ...seg, disabled: true }
+    const hiddenFlag =
+      seg.tool === 'vis:draw' ? 'drawhidden' : seg.tool === 'vis:ind' ? 'indhidden' : null
+    if (hiddenFlag && ctx.flags.includes(hiddenFlag)) {
+      // Append, never replace — the base label may be the user's own edit.
+      return { ...seg, label: `${seg.label} ◐ hidden` }
+    }
+    return seg
   }
 
   /** The chart-* dynamic wheels, built from the session's spawn ctx plus the
@@ -265,16 +309,52 @@ export class WheelManager {
           tool: `ind:${key}`,
           label: `${indicators.includes(key) ? '●' : '○'} ${name}`,
         }))
+        // v3: the period editor rides this wheel — after the toggles,
+        // before the back-nav.
+        body.push({ type: 'chart', tool: 'settings', label: 'Settings…' })
       }
-    } else {
-      // chart-tickers: hide/show toggles. Hidden symbols stay listed —
-      // clicking one shows it again.
-      body = symbols.length < 2
-        ? [{ type: 'placeholder', label: 'Single-symbol chart', disabled: true }]
-        : symbols.slice(0, 11).map((sym) => ({
-            type: 'chart' as const, tool: 'hide', ticker: sym,
-            label: hidden.includes(sym) ? '◑ hidden' : '',
+    } else if (kind === 'chart-tf') {
+      // The timeframes, current one marked. tf: is a SWITCH, not a toggle —
+      // clicking the marked one is a no-op on the page, which is fine.
+      body = ctx === null
+        ? [{ type: 'placeholder', label: 'Right-click a chart', disabled: true }]
+        : TIMEFRAMES.map((t) => ({
+            type: 'chart' as const,
+            tool: `tf:${t}`,
+            label: `${ctx.timeframe === t ? '● ' : ''}${t}`,
           }))
+    } else {
+      // chart-tickers v3: ONE node owns the symbol set — hide/show toggles,
+      // isolation, and the nav to Add symbol (the chart wheel's NW points
+      // here now). Hidden symbols stay listed — clicking one shows it again.
+      if (ctx === null) {
+        body = [{ type: 'placeholder', label: 'Right-click a chart', disabled: true }]
+      } else {
+        // Isolation leads when active (the way OUT must be the first thing
+        // seen); offered last when inactive and there is something to solo.
+        const isolateSeg: Segment | null = ctx.isolated !== null
+          ? { type: 'chart', tool: 'isolate', label: `⦿ ${ctx.isolated} — off` }
+          : symbols.length >= 2
+            ? { type: 'chart', tool: 'isolate', label: 'Isolate top' }
+            : null
+        // 12-segment cap: symbols get the room left after [isolate?,
+        // Add-nav, back]. Excess symbols are simply not offered.
+        const room = 12 - 2 - (isolateSeg ? 1 : 0)
+        body = symbols.length < 2
+          ? [{ type: 'placeholder', label: 'Single-symbol chart', disabled: true }]
+          : symbols.slice(0, room).map((sym) => ({
+              type: 'chart' as const, tool: 'hide', ticker: sym,
+              label: hidden.includes(sym) ? '◑ hidden' : '',
+            }))
+        if (isolateSeg) {
+          if (ctx.isolated !== null) body.unshift(isolateSeg)
+          else body.push(isolateSeg)
+        }
+        body.push({
+          type: 'wheel', wheel: 'chart-add', label: 'Add symbol',
+          symbol: doc.wheels.find((w) => w.id === 'chart-add')?.symbol,
+        })
+      }
     }
     body.push({
       type: 'wheel', wheel: 'chart', label: 'Chart',

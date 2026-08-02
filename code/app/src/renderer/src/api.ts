@@ -20,7 +20,15 @@ declare global {
         kind: 'down' | 'move' | 'up',
         x: number,
         y: number,
-        ctx?: { context: string; symbols?: string[]; indicators?: string[]; hidden?: string[] }
+        ctx?: {
+          context: string
+          symbols?: string[]
+          indicators?: string[]
+          hidden?: string[]
+          timeframe?: string
+          flags?: string[]
+          isolated?: string
+        }
       ) => void
       onChartAction: (cb: (a: { tool: string; symbol?: string }) => void) => () => void
     }

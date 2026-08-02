@@ -37,10 +37,11 @@ from typing import Any
 DOC_KEY = "gesture_wheels"
 
 # Bumped when the DEFAULTS change shape or content in a way stored docs
-# should adopt (v2: the chart wheel family, charts page, SPY->Charts on
-# main). A stored doc with an older version is regenerated from defaults —
-# honest data loss, taken deliberately over silently mixing old and new.
-DOC_VERSION = 2
+# should adopt (v2: the chart wheel family; v3: the full charting toolset —
+# draw/measure/timeframe wheels, visibility toggles, select/delete/trim). A
+# stored doc with an older version is regenerated from defaults — honest
+# data loss, taken deliberately over silently mixing old and new.
+DOC_VERSION = 3
 
 MAX_WHEELS = 16
 MAX_SEGMENTS = 12
@@ -49,21 +50,35 @@ NEW_WHEEL_SEGMENTS = 6  # a freshly created wheel starts with 6 empty slots
 
 ROUTES = ("idle", "accounts", "data", "settings", "news", "charts")
 TOOLS = ("search",)
+TIMEFRAMES = ("1Min", "5Min", "15Min", "1Hour", "1Day")
 # Chart actions a wheel segment can fire at the chart it was spawned over
 # (delivered to that view as a chart:action event; pages without a chart
-# handler simply ignore them).
-CHART_TOOLS = ("pointer", "trend", "hline", "clear",
+# handler simply ignore them). v3 vocabulary:
+#   drawing     pointer trend(free-angle) hline vline circle | select delete
+#               trim (the interacting set) | clear
+#   measuring   measure(two snapped anchors) inspect(candle detail)
+#               clearmeasure
+#   indicators  ind:<key> toggles, settings (opens the period editor)
+#   view        normalize, vis:draw / vis:ind (visibility of all drawings /
+#               all indicators), isolate (solo one ticker / restore),
+#               tf:<timeframe>
+CHART_TOOLS = ("pointer", "trend", "hline", "vline", "circle",
+               "select", "delete", "trim", "clear",
+               "measure", "inspect", "clearmeasure",
                "ind:vol", "ind:sma20", "ind:sma50", "ind:ema20", "ind:rsi14",
-               "normalize")
+               "settings", "normalize", "vis:draw", "vis:ind", "isolate",
+               *[f"tf:{t}" for t in TIMEFRAMES])
 SEG_TYPES = ("wheel", "nav", "tool", "ticker", "chart", "placeholder", "empty")
 # Dynamic wheels build their segments from live state at spawn time:
 #   tabs          the open tabs (paginated past 8)
 #   chart-add     open ticker tabs not yet on the spawned-over chart
-#   chart-ind     indicator toggles, marked with their current on/off state
-#   chart-tickers the chart's symbols, to hide/show
-DYNAMIC_KINDS = ("tabs", "chart-add", "chart-ind", "chart-tickers")
+#   chart-ind     indicator toggles marked with current state, + settings
+#   chart-tickers the chart's symbols: hide/show, and isolate state
+#   chart-tf      the timeframes, current one marked
+DYNAMIC_KINDS = ("tabs", "chart-add", "chart-ind", "chart-tickers", "chart-tf")
 BUILTIN_IDS = ("main", "ai", "tabs", "tickers",
-               "chart", "chart-add", "chart-ind", "chart-tickers")
+               "chart", "chart-add", "chart-ind", "chart-tickers",
+               "chart-draw", "chart-measure", "chart-tf")
 
 
 def default_doc() -> dict[str, Any]:
@@ -88,19 +103,52 @@ def default_doc() -> dict[str, Any]:
                 ],
             },
             {
-                # The chart wheel: spawned by right-clicking ANY chart
-                # (right-clicking off a chart spawns the default wheel).
-                # Editable like any other; its dynamic companions are not.
+                # The MAIN chart wheel, v3 (Kade's spec): visibility toggles
+                # and wheel navigations — the tools themselves live one level
+                # down in the Draw / Indicators / Measure / Timeframe wheels.
+                # Spawned by right-clicking ANY working chart; off-chart
+                # spawns the default wheel. Editable; dynamics are not.
                 "id": "chart", "name": "Chart", "symbol": "📈", "builtin": True,
                 "segments": [
-                    {"type": "wheel", "wheel": "chart-add", "label": "Add symbol"},   # N
-                    {"type": "chart", "tool": "trend", "label": "Trend line"},        # NE
+                    {"type": "wheel", "wheel": "chart-draw", "label": "Draw"},        # N
+                    {"type": "chart", "tool": "vis:draw", "label": "Drawings"},       # NE
                     {"type": "wheel", "wheel": "chart-ind", "label": "Indicators"},   # E
-                    {"type": "chart", "tool": "hline", "label": "H-line"},            # SE
+                    {"type": "chart", "tool": "vis:ind", "label": "Ind. visibility"}, # SE
                     {"type": "wheel", "wheel": "main", "label": "Main"},              # S
-                    {"type": "chart", "tool": "clear", "label": "Clear drawings"},    # SW
-                    {"type": "wheel", "wheel": "chart-tickers", "label": "Hide"},     # W
-                    {"type": "chart", "tool": "pointer", "label": "Pointer"},         # NW
+                    {"type": "wheel", "wheel": "chart-tf", "label": "Timeframe"},     # SW
+                    {"type": "wheel", "wheel": "chart-measure", "label": "Measure"},  # W
+                    {"type": "wheel", "wheel": "chart-tickers", "label": "Tickers"},  # NW
+                ],
+            },
+            # Ticker management groups under chart-tickers, which now also
+            # navigates to Add symbol — one node owns show/hide/isolate/add.
+            {
+                # The drawing wheel: the four shapes plus the INTERACTING
+                # tool set — select (multi), delete (selected or clicked),
+                # trim (SolidWorks-style, back to the nearest intersection).
+                "id": "chart-draw", "name": "Draw", "symbol": "✎", "builtin": True,
+                "segments": [
+                    {"type": "chart", "tool": "trend", "label": "Line (any angle)"},  # N
+                    {"type": "chart", "tool": "hline", "label": "H-line"},            # NE
+                    {"type": "chart", "tool": "vline", "label": "V-line"},            # E
+                    {"type": "chart", "tool": "circle", "label": "Circle"},           # SE
+                    {"type": "wheel", "wheel": "chart", "label": "Chart"},            # S
+                    {"type": "chart", "tool": "select", "label": "Select"},           # SW
+                    {"type": "chart", "tool": "trim", "label": "Trim"},               # W
+                    {"type": "chart", "tool": "delete", "label": "Delete"},           # NW
+                ],
+            },
+            {
+                # The measurement wheel: two-point measurements that snap to
+                # candles and lines (price Δ, date/bar Δ), candle inspection
+                # (size + volume), and cleanup.
+                "id": "chart-measure", "name": "Measure", "symbol": "⤢", "builtin": True,
+                "segments": [
+                    {"type": "chart", "tool": "measure", "label": "Measure"},
+                    {"type": "chart", "tool": "inspect", "label": "Inspect candle"},
+                    {"type": "chart", "tool": "clearmeasure", "label": "Clear measures"},
+                    {"type": "wheel", "wheel": "chart", "label": "Chart"},
+                    {"type": "chart", "tool": "pointer", "label": "Pointer"},
                 ],
             },
             {"id": "chart-add", "name": "Add symbol", "symbol": "+", "builtin": True,
@@ -109,6 +157,8 @@ def default_doc() -> dict[str, Any]:
              "dynamic": "chart-ind", "segments": []},
             {"id": "chart-tickers", "name": "Show/Hide", "symbol": "◑", "builtin": True,
              "dynamic": "chart-tickers", "segments": []},
+            {"id": "chart-tf", "name": "Timeframe", "symbol": "⏱", "builtin": True,
+             "dynamic": "chart-tf", "segments": []},
             {
                 # Placeholder until the AI milestone: visible, honestly dead.
                 "id": "ai", "name": "AI", "symbol": "AI", "builtin": True,

@@ -77,3 +77,108 @@
   color: var(--text);
   background: var(--surface);
 }
+
+/* ---- ChartDraw v2: the label layer ------------------------------------- */
+/* Geometry lives in the SVG overlay; text (measure labels, candle readouts,
+   placement deltas) lives in .cd-labels so typography and theming are CSS,
+   not hand-measured SVG rects. Positioning is inline (engine-computed). */
+.cd-labels {
+  font-variant-numeric: tabular-nums; /* deltas must not wiggle as digits change */
+}
+.cd-chip {
+  position: absolute;
+  background: color-mix(in srgb, var(--surface-raised) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 7px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.cd-chip .em {
+  font-weight: 700;
+}
+.cd-chip .dim {
+  color: var(--text-dim);
+}
+.cd-chip.cd-inspect {
+  padding: 5px 9px;
+}
+/* A pinned readout is a kept object, not a hover ghost — the accent edge
+   says "this one stays". */
+.cd-chip.cd-pin {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+/* ---- DrawEditor: the selected-object exact-value panel ------------------ */
+/* The pages wrap this in .float-panel (charttools.css), which owns the
+   position/background/border chrome — this block only lays out its innards. */
+.draw-editor {
+  width: 196px;
+}
+.de-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.de-x {
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 5px;
+}
+.de-x:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.de-group {
+  margin: 8px 0 2px;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.de-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.de-lbl {
+  width: 38px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.de-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+/* Invalid input is a visible state: red border, draft kept, nothing committed. */
+.de-input.bad {
+  border-color: var(--loss);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--loss) 18%, transparent);
+}
+.de-del {
+  margin-top: 10px;
+  width: 100%;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--loss);
+  border-color: color-mix(in srgb, var(--loss) 45%, var(--border));
+}
+.de-del:hover {
+  border-color: var(--loss);
+}

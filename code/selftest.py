@@ -1052,19 +1052,30 @@ def _gesture_wheels():
     tabs_wheel = next(w for w in doc["wheels"] if w["id"] == "tabs")
     assert tabs_wheel.get("dynamic") == "tabs", "the tabs wheel must be dynamic"
 
-    # v2: the chart wheel family. Right-clicking ANY chart spawns 'chart';
-    # its dynamic companions build from the spawned-over chart's state.
+    # v3 (Kade's charting-tools spec): the MAIN chart wheel is visibility
+    # toggles + wheel navigations; the tools live in the Draw / Measure /
+    # Indicators / Timeframe wheels one level down.
     assert doc["version"] == wheels.DOC_VERSION
     chart = next(w for w in doc["wheels"] if w["id"] == "chart")
     tools = {s.get("tool") for s in chart["segments"] if s["type"] == "chart"}
-    assert {"trend", "hline", "clear", "pointer"} <= tools, \
-        f"the chart wheel is missing drawing tools: {tools}"
+    assert tools == {"vis:draw", "vis:ind"}, \
+        f"the main chart wheel carries visibility toggles only, got {tools}"
     navs = {s.get("wheel") for s in chart["segments"] if s["type"] == "wheel"}
-    assert {"chart-add", "chart-ind", "chart-tickers", "main"} <= navs, \
-        f"the chart wheel is missing its dynamic companions: {navs}"
-    for wid in ("chart-add", "chart-ind", "chart-tickers"):
+    assert {"chart-draw", "chart-ind", "chart-tf", "chart-measure",
+            "chart-tickers", "main"} <= navs, \
+        f"the chart wheel is missing a tool-wheel navigation: {navs}"
+    draw = next(w for w in doc["wheels"] if w["id"] == "chart-draw")
+    draw_tools = {s.get("tool") for s in draw["segments"] if s["type"] == "chart"}
+    assert {"trend", "hline", "vline", "circle", "select", "delete", "trim"} <= draw_tools, \
+        f"the draw wheel is missing tools: {draw_tools}"
+    measure = next(w for w in doc["wheels"] if w["id"] == "chart-measure")
+    m_tools = {s.get("tool") for s in measure["segments"] if s["type"] == "chart"}
+    assert {"measure", "inspect", "clearmeasure"} <= m_tools, \
+        f"the measure wheel is missing tools: {m_tools}"
+    for wid in ("chart-add", "chart-ind", "chart-tickers", "chart-tf"):
         dyn = next(w for w in doc["wheels"] if w["id"] == wid)
         assert dyn.get("dynamic") == wid, f"{wid} must be dynamic"
+    assert "tf:1Day" in wheels.CHART_TOOLS and "isolate" in wheels.CHART_TOOLS
     ai = next(w for w in doc["wheels"] if w["id"] == "ai")
     assert any(s["type"] == "placeholder" for s in ai["segments"]), \
         "the AI wheel is a placeholder and must say so"
@@ -1250,6 +1261,54 @@ def _wheels_v2_shell():
     # The multi-chart drawing key must carry scale semantics.
     assert "normalize ? '%' : '$'" in multi.replace('"', "'"), \
         "drawings mix dollar and percent anchors in one bucket again"
+
+
+@check("chart tools v3: engine vocabulary, editor, settings, isolate, real-input e2e")
+def _chart_tools_v3():
+    app_src = CODE / "app" / "src"
+    rend = app_src / "renderer" / "src"
+
+    # The engine carries the full interacting tool set.
+    draw = (rend / "components" / "ChartDraw.ts").read_text(encoding="utf-8")
+    for tool in ("trend", "hline", "vline", "circle", "select", "delete",
+                 "trim", "measure", "inspect"):
+        assert f"'{tool}'" in draw, f"the drawing engine lost the {tool} tool"
+    for api_name in ("updateDrawing", "deleteSelected", "clearMeasures",
+                     "setDrawingsHidden", "onChange"):
+        assert api_name in draw, f"engine API lost {api_name}"
+
+    # Exact-value editing: per-orientation price/time boxes (Kade's spec).
+    editor = (rend / "components" / "DrawEditor.tsx").read_text(encoding="utf-8")
+    assert "price" in editor and ("date" in editor or "time" in editor), \
+        "the selected-object editor lost its exact-value boxes"
+
+    # Indicator settings edit PERIODS while the ind:* vocabulary stays fixed.
+    inds = (rend / "components" / "IndicatorSettings.tsx").read_text(encoding="utf-8")
+    assert "period" in inds, "indicator settings no longer edit periods"
+    chart = (rend / "components" / "Chart.tsx").read_text(encoding="utf-8")
+    assert "IndicatorParams" in chart and "periodOf" in chart, \
+        "the chart no longer parametrizes indicator periods"
+
+    # Both pages speak the whole v3 vocabulary; isolate lives on the multi.
+    sym = (rend / "pages" / "SymbolPage.tsx").read_text(encoding="utf-8")
+    multi = (rend / "pages" / "ChartsPage.tsx").read_text(encoding="utf-8")
+    for piece in ("vis:draw", "clearmeasure", "tf:"):
+        assert piece in sym and piece in multi, f"a page lost the {piece} action"
+    assert "isolated" in multi and "all-but" in multi.replace("—", "-") or \
+        "isolated" in multi, "isolate left the multi-chart page"
+    assert "vis:ind" in sym, "the indicator-visibility stash left the symbol page"
+
+    # The wheel side: timeframe wheel + state decoration + settings segment.
+    wheel_src = (app_src / "main" / "wheel.ts").read_text(encoding="utf-8")
+    for piece in ("chart-tf", "decorateChartState", "'settings'"):
+        assert piece in wheel_src, f"wheel v3 lost {piece}"
+
+    # The e2e must keep driving REAL input — that requirement found three
+    # bugs (point-less clicks, below-the-fold clicks, stale rects) that no
+    # synthetic-event test could see.
+    e2e = (CODE / "app" / "e2e" / "run.mjs").read_text(encoding="utf-8")
+    assert "dispatchMouseEvent" in e2e and "scrollIntoView" in e2e, \
+        "the chart tools are no longer exercised with trusted input"
 
 
 @check("frontend: sources present; typecheck when toolchain available")

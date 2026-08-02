@@ -34,6 +34,24 @@ export interface Bar {
 
 export type IndicatorKey = 'sma20' | 'sma50' | 'ema20' | 'vol' | 'rsi14'
 
+/** Editable periods for the parametrized indicators. The KEYS are fixed
+ *  slots — 'sma20' means "the first SMA", not a promise of 20 — so the
+ *  wheel/backend vocabulary (ind:sma20) survives a period edit unchanged. */
+export interface IndicatorParams {
+  sma20?: { period: number }
+  sma50?: { period: number }
+  ema20?: { period: number }
+  rsi14?: { period: number }
+}
+
+export const DEFAULT_INDICATOR_PERIODS = { sma20: 20, sma50: 50, ema20: 20, rsi14: 14 } as const
+
+/** Bad input never reaches the math: integer, 1..400, else the slot default. */
+function periodOf(p: { period: number } | undefined, fallback: number): number {
+  const v = Math.round(p?.period ?? fallback)
+  return Number.isFinite(v) ? Math.min(400, Math.max(1, v)) : fallback
+}
+
 /** Handed to onReady after every series (re)build so a drawing layer
  *  (ChartDraw) can anchor projections to the live chart + series. */
 export interface ChartReadyApi {
@@ -128,10 +146,13 @@ function rsi(values: number[], period = 14): (number | null)[] {
 // Module constants keep the identity stable.
 const NO_BARS: Bar[] = []
 const NO_INDICATORS: IndicatorKey[] = []
+const NO_PARAMS: IndicatorParams = {} // in the rebuild deps — same identity rule
+const NO_FLAGS: string[] = []
 
 export function Chart({
   bars = NO_BARS,
   indicators = NO_INDICATORS,
+  indicatorParams = NO_PARAMS,
   height = 420,
   compact = false,
   onClick,
@@ -140,9 +161,20 @@ export function Chart({
   symbols,
   hiddenSymbols,
   onReady,
+  timeframe,
+  flags = NO_FLAGS,
+  isolated,
+  drawTool = 'pointer',
+  drawCount = 0,
+  measureCount = 0,
+  selectedCount = 0,
 }: {
   bars?: Bar[]
   indicators?: IndicatorKey[]
+  /** Periods for the parametrized indicators. In the rebuild-effect deps, so
+   *  hosts must pass a stable object (state or module const), never a fresh
+   *  inline literal per render. */
+  indicatorParams?: IndicatorParams
   height?: number
   compact?: boolean
   onClick?: () => void
@@ -156,6 +188,18 @@ export function Chart({
   /** Fires after every series (re)build — series handles go stale each build,
    *  so a drawing layer must re-anchor here, not once. */
   onReady?: (api: ChartReadyApi) => void
+  // ---- testability / wheel-context pass-throughs ------------------------
+  // The PAGE owns all of this state (tool, counts come from the drawing
+  // engine's onChange); this component only stamps it onto the container so
+  // the wheel (data-chart-*) and the CDP e2e (data-draw-*) read live truth.
+  timeframe?: string
+  /** Active view flags, e.g. ['drawhidden','indhidden']. */
+  flags?: string[]
+  isolated?: string | null
+  drawTool?: string
+  drawCount?: number
+  measureCount?: number
+  selectedCount?: number
 }) {
   const box = useRef<HTMLDivElement>(null)
   const chart = useRef<IChartApi | null>(null)
@@ -313,9 +357,13 @@ export function Chart({
         )
         extras.current.push(line)
       }
-      if (indicators.includes('sma20')) addLine(sma(closes, 20), COLORS.sma20, 'SMA 20')
-      if (indicators.includes('sma50')) addLine(sma(closes, 50), COLORS.sma50, 'SMA 50')
-      if (indicators.includes('ema20')) addLine(ema(closes, 20), COLORS.ema20, 'EMA 20')
+      // Titles carry the LIVE period so an edited SMA never masquerades as 20.
+      const pSma20 = periodOf(indicatorParams.sma20, DEFAULT_INDICATOR_PERIODS.sma20)
+      const pSma50 = periodOf(indicatorParams.sma50, DEFAULT_INDICATOR_PERIODS.sma50)
+      const pEma20 = periodOf(indicatorParams.ema20, DEFAULT_INDICATOR_PERIODS.ema20)
+      if (indicators.includes('sma20')) addLine(sma(closes, pSma20), COLORS.sma20, `SMA ${pSma20}`)
+      if (indicators.includes('sma50')) addLine(sma(closes, pSma50), COLORS.sma50, `SMA ${pSma50}`)
+      if (indicators.includes('ema20')) addLine(ema(closes, pEma20), COLORS.ema20, `EMA ${pEma20}`)
 
       if (indicators.includes('vol')) {
         const v = c.addSeries(HistogramSeries, {
@@ -334,14 +382,15 @@ export function Chart({
       }
 
       if (indicators.includes('rsi14')) {
+        const pRsi = periodOf(indicatorParams.rsi14, DEFAULT_INDICATOR_PERIODS.rsi14)
         // v5 multi-pane: paneIndex puts RSI in its own pane below price.
         const r = c.addSeries(
           LineSeries,
-          { color: COLORS.rsi, lineWidth: 1, priceLineVisible: false, title: 'RSI 14' },
+          { color: COLORS.rsi, lineWidth: 1, priceLineVisible: false, title: `RSI ${pRsi}` },
           1
         )
         r.setData(
-          rsi(closes)
+          rsi(closes, pRsi)
             .map((v, i) => (v == null ? null : { time: times[i], value: v }))
             .filter((d): d is { time: UTCTimestamp; value: number } => d !== null)
         )
@@ -351,7 +400,7 @@ export function Chart({
 
     c.timeScale().fitContent()
     if (price.current) onReadyRef.current?.({ chart: c, mainSeries: price.current })
-  }, [bars, indicators, compact, lines, normalize])
+  }, [bars, indicators, indicatorParams, compact, lines, normalize])
 
   // Working charts declare themselves to the gesture wheel here — these
   // attrs are what wheelEvents.ts reads on right-click, so a chart on any
@@ -375,6 +424,13 @@ export function Chart({
       data-chart-symbols={ctxSymbols.join(',')}
       data-chart-indicators={indicators.join(',')}
       data-chart-hidden={ctxHidden.join(',')}
+      data-chart-timeframe={timeframe ?? ''}
+      data-chart-flags={flags.join(',')}
+      data-chart-isolated={isolated ?? ''}
+      data-draw-tool={drawTool}
+      data-draw-count={drawCount}
+      data-measure-count={measureCount}
+      data-draw-selected={selectedCount}
     />
   )
 }
