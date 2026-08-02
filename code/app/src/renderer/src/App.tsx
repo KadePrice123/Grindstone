@@ -13,8 +13,17 @@ type Phase =
   | { kind: 'app'; username: string; route: Route }
   | { kind: 'backend-down'; detail?: string }
 
+/**
+ * Minimum time the boot splash stays on screen. The sidecar answers in ~500ms,
+ * so without a floor the splash flashes past in tens of milliseconds and the
+ * mark never visibly spins. This is a floor, not an added delay: a slow boot
+ * waits zero extra.
+ */
+const MIN_SPLASH_MS = 900
+
 export default function App() {
   const [phase, setPhase] = useState<Phase>({ kind: 'booting' })
+  const mountedAt = useRef(performance.now())
 
   // The sidecar-status subscription is registered once; without a ref it would
   // close over the phase from first render and never see the current one.
@@ -47,6 +56,10 @@ export default function App() {
       for (let tries = 0; tries < 40 && !cancelled; tries += 1) {
         try {
           await api('GET', '/api/health')
+          const shown = performance.now() - mountedAt.current
+          if (shown < MIN_SPLASH_MS) {
+            await new Promise((r) => setTimeout(r, MIN_SPLASH_MS - shown))
+          }
           if (!cancelled) await toAuth()
           return
         } catch {

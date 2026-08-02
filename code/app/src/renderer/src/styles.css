@@ -71,8 +71,17 @@ input {
 .spin,
 .mark:hover {
   transform-origin: 50% 50%;
-  animation: gs-spin 7s linear infinite;
   will-change: transform;
+}
+/* Busy state: fast enough to read as spinning during a ~1-2s startup. At the
+   7s hover speed the mark only turns ~100 degrees in that window, which looks
+   like it never moved. */
+.spin {
+  animation: gs-spin 1.1s linear infinite;
+}
+/* Hover: unhurried, it is decoration rather than a progress signal. */
+.mark:hover {
+  animation: gs-spin 3s linear infinite;
 }
 .mark {
   transition: color 0.15s;
