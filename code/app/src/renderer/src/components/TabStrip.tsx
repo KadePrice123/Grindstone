@@ -13,6 +13,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { classify } from '../urls'
+import '../split.css'
 import { Logo } from './Logo'
 import {
   AccountsIcon,
@@ -42,6 +43,7 @@ interface StripState {
   activeUrl: string
   loading: boolean
   draggingId: number | null
+  split: { aId: number; bId: number; ratio: number } | null
 }
 
 declare global {
@@ -65,6 +67,9 @@ declare global {
       minimize: () => void
       maximizeToggle: () => void
       closeWindow: () => void
+      tabMenu: (tabId: number, x: number, y: number) => void
+      splitWith: (tabId: number, withTabId: number) => void
+      closeSplit: () => void
     }
   }
 }
@@ -104,6 +109,7 @@ export function TabStrip() {
     activeUrl: '',
     loading: false,
     draggingId: null,
+    split: null,
   })
   const [dragDx, setDragDx] = useState(0)
   const [addr, setAddr] = useState('')
@@ -236,16 +242,24 @@ export function TabStrip() {
       <div className="strip-tabs">
         {state.tabs.map((t) => {
           const dragging = state.draggingId === t.id
+          // Paired even while hidden: the split outlives activating a third
+          // tab, and the strip is where that lingering link stays legible.
+          const mate =
+            state.split !== null && (t.id === state.split.aId || t.id === state.split.bId)
           return (
             <div
               key={t.id}
-              className={`strip-tab${t.id === state.activeId ? ' active' : ''}${dragging ? ' dragging' : ''}`}
+              className={`strip-tab${t.id === state.activeId ? ' active' : ''}${dragging ? ' dragging' : ''}${mate ? ' split-mate' : ''}`}
               style={dragging ? { transform: `translateX(${dragDx}px)` } : undefined}
               title={t.url ?? t.title}
               onPointerDown={(e) => onPointerDown(e, t.id)}
               onPointerMove={onPointerMove}
               onPointerUp={endDrag}
               onPointerCancel={endDrag}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                window.grindstoneTabs.tabMenu(t.id, Math.round(e.clientX), Math.round(e.clientY))
+              }}
               onAuxClick={(e) => {
                 if (e.button === 1) window.grindstoneTabs.close(t.id)
               }}

@@ -13,6 +13,7 @@ import { UserChip } from '../components/UserChip'
 import { Accounts } from '../pages/Accounts'
 import { ArticlePage } from '../pages/ArticlePage'
 import { DataPage } from '../pages/DataPage'
+import { ChartsPage } from '../pages/ChartsPage'
 import { Idle } from '../pages/Idle'
 import { NewsPage } from '../pages/NewsPage'
 import { SearchPage } from '../pages/SearchPage'
@@ -33,6 +34,8 @@ function meta(route: Route): { title: string; icon: string } {
       return { title: 'Settings', icon: 'settings' }
     case 'news':
       return { title: 'News', icon: 'news' }
+    case 'charts':
+      return { title: 'Charts', icon: 'chart' }
     case 'article':
       return { title: 'Article', icon: 'news' }
     default:
@@ -105,6 +108,8 @@ export function ContentApp({ initial }: { initial: Route }) {
         return <SettingsPage />
       case 'news':
         return <NewsPage onNavigate={navigate} />
+      case 'charts':
+        return <ChartsPage />
       case 'article':
         return <ArticlePage id={route.id} url={route.url} onNavigate={navigate} />
       default:

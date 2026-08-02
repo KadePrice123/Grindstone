@@ -12,7 +12,7 @@ import {
 } from '../../../shared/wheelGeometry'
 
 export interface WheelSegment {
-  type: 'wheel' | 'nav' | 'tool' | 'ticker' | 'placeholder' | 'empty' | 'tab' | 'page'
+  type: 'wheel' | 'nav' | 'tool' | 'ticker' | 'chart' | 'placeholder' | 'empty' | 'tab' | 'page'
   label: string
   wheel?: string
   route?: string
@@ -50,13 +50,19 @@ function glyph(seg: WheelSegment): string {
     case 'wheel':
       return seg.symbol ?? '◎'
     case 'nav':
-      return { idle: '⌂', accounts: '⛁', data: '▤', settings: '⚙', news: '☰' }[
+      return { idle: '⌂', accounts: '⛁', data: '▤', settings: '⚙', news: '☰', charts: '📈' }[
         seg.route ?? ''
       ] ?? '▢'
     case 'tool':
       return seg.tool === 'search' ? '🔍' : '✦'
     case 'ticker':
       return '' // the ticker text IS the identity
+    case 'chart': {
+      const t = seg.tool ?? ''
+      if (t.startsWith('ind:')) return '∿'
+      return { pointer: '➤', trend: '╱', hline: '━', clear: '⌫',
+               normalize: '%', add: '+', hide: '◑' }[t] ?? '✦'
+    }
     case 'tab':
       return '▣'
     case 'page':
@@ -134,6 +140,10 @@ export function WheelFace({
         const sub =
           seg.type === 'ticker' ? tickerSub(seg, config, quotes) : { text: '', cls: '' }
         const g = glyph(seg)
+        // Chart add/hide segments carry a ticker: it renders bold like a
+        // ticker segment (the symbol IS the identity), glyph above, the
+        // state label ('Add SPY' / '◑ hidden') as the sub line.
+        const tickerChart = seg.type === 'chart' && !!seg.ticker
         const cls = [
           'wf-seg',
           hover === i ? 'hover' : '',
@@ -157,7 +167,11 @@ export function WheelFace({
           >
             <path className="wf-sector" d={sectorPath(i, n)} />
             {g ? (
-              <text className="wf-glyph" x={anchor.x} y={anchor.y - (seg.label ? 8 : -4)}>
+              <text
+                className="wf-glyph"
+                x={anchor.x}
+                y={anchor.y - (tickerChart ? 16 : seg.label ? 8 : -4)}
+              >
                 {g}
               </text>
             ) : null}
@@ -169,6 +183,17 @@ export function WheelFace({
                 <text className={`wf-sub ${sub.cls}`} x={anchor.x} y={anchor.y + 14}>
                   {sub.text}
                 </text>
+              </>
+            ) : tickerChart ? (
+              <>
+                <text className="wf-label wf-ticker" x={anchor.x} y={anchor.y - 2}>
+                  {seg.ticker}
+                </text>
+                {seg.label ? (
+                  <text className="wf-sub" x={anchor.x} y={anchor.y + 14}>
+                    {seg.label}
+                  </text>
+                ) : null}
               </>
             ) : (
               <text className="wf-label" x={anchor.x} y={anchor.y + (g ? 12 : 4)}>

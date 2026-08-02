@@ -191,6 +191,14 @@ Sign out, About).
 - **FR-SHELL-1 Tabs.** Opening any result opens a tab; the omnibox docks to the
   top; tab strip appears. Tabs show a page-type icon (§8), title, close button,
   and a per-page menu (bookmark/favorite, duplicate, pin, page settings).
+  - **Split view** *(delivered 2026-08-02)*: right-clicking a tab opens the
+    native tab menu (the gesture wheel deliberately does NOT spawn on tabs);
+    "Split with <tab>" pairs it side-by-side with any other tab in the window
+    — invoked tab left, partner right — with a draggable divider (20–80%).
+    Activating either pair member shows the pair; activating any other tab
+    shows it alone with the split kept; closing or tearing off a pair member
+    dissolves it. The menu also carries New tab / Close tab / Close others /
+    Move to new window.
 - **FR-SHELL-2 Tear-off & regroup.** Dragging a tab out of the strip creates a
   new OS window; dragging a tab into another window's strip moves it there —
   including its **live running state** (chart continues streaming; a playing
@@ -212,10 +220,21 @@ Sign out, About).
   - **The hub lock** pins the currently shown wheel as the spawn default;
     unlock reverts to Main. Persisted per user.
   - **Wheels are user-editable** (Settings → Gesture wheels): carousel with
-    one wheel shown and arrows to page; each wheel has a name + symbol; each
-    segment is any of go-to-wheel / page / tool / ticker, position-editable,
-    12 segments max; new wheels start with 6 slots. Stored via
-    `/api/wheels` (backend/wheels.py validates and says why it rejects).
+    one wheel shown and arrows to page; each wheel has a name + symbol.
+    *(Editor v2, 2026-08-02, replacing the row-per-segment form Kade
+    rejected)*: click a segment on the wheel preview, then pick its new
+    meaning from a searchable, category-filtered catalog (navigation, wheels,
+    chart drawing/indicators/view, tools, tickers); rotate/remove/add/label
+    ops beside it. 12 segments max; new wheels start with 6 slots. Stored via
+    `/api/wheels` (backend/wheels.py validates and says why it rejects;
+    doc version 2 — older docs regenerate to defaults).
+  - **Context wheels** *(2026-08-02)*: what you right-click picks the wheel.
+    Any chart → the **Chart wheel** (editable; default: pointer/trend/
+    h-line/clear + dynamic Add-symbol, Indicators, Show/Hide companion
+    wheels built from the clicked chart's live state + Main). Off-chart →
+    the default (locked ?? Main). Tabs → the native split menu, never the
+    wheel. Chart segments act on the exact chart that was right-clicked,
+    not whatever is focused when the action fires.
   - **Defaults**: *Main* (8: AI wheel N, Tabs wheel E, Tickers wheel W,
     Search S; home/news/SPY/settings between), *AI* (placeholder until the AI
     milestone, honestly dimmed), *Tabs* (dynamic — built from open tabs at
@@ -271,10 +290,21 @@ Sign out, About).
   crosshair, OHLCV readout, volume, log/linear, timeframes 1m→1M, session
   shading, symbol compare (multiple tickers on one chart — required for
   multi-underlying option strategies).
+  *(First slice delivered 2026-08-02: the dedicated multi-symbol chart tab,
+  `charts.gs` — line-series comparison of any symbol set, per-symbol
+  show/hide, normalize-to-% toggle, persisted per user. The Main wheel's SW
+  segment navigates to it. The chart gesture wheel — chart wheel over ANY
+  chart, default wheel elsewhere — carries add-open-symbol / hide /
+  indicator / drawing segments; every tool is equally reachable from the
+  on-page toolbar for mouseless use.)*
 - **FR-CHART-2 Drawing.** Trendlines, rays, horizontal/vertical lines,
   rectangles, fib retracements, text notes. Drawings persist per
   symbol+timeframe, survive restarts, and are visible to the AI as structured
   metadata.
+  *(First slice delivered 2026-08-02: trend line + horizontal line + clear,
+  drawn in data space over lightweight-charts and re-projected on pan/zoom;
+  session-persistent per chart. Rays/rects/fibs/text and restart persistence
+  remain open.)*
 - **FR-CHART-3 Indicators.** Built-in library (MA/EMA, RSI, MACD, Bollinger,
   VWAP, ATR, volume profile at minimum) plus **user-created indicators written
   inside the platform**: an editor page where the user (or the AI, on the

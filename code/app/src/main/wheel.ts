@@ -18,7 +18,7 @@
  * a hold the ORIGIN view has mouse capture and the overlay may never hear a
  * thing. Main is the single state machine; the overlay is the face.
  */
-import { WebContentsView, ipcMain } from 'electron'
+import { WebContentsView, ipcMain, webContents } from 'electron'
 import path from 'node:path'
 import { isSignedIn, mainRequest } from './api'
 import { log } from './log'
@@ -34,7 +34,7 @@ const CLICK_MOVE_THRESHOLD = 10 // px of travel that turns a click into a hold
 const EDGE_MARGIN = 12
 
 interface Segment {
-  type: 'wheel' | 'nav' | 'tool' | 'ticker' | 'placeholder' | 'empty' | 'tab' | 'page'
+  type: 'wheel' | 'nav' | 'tool' | 'ticker' | 'chart' | 'placeholder' | 'empty' | 'tab' | 'page'
   label: string
   // one of, depending on type:
   wheel?: string
@@ -61,6 +61,36 @@ interface WheelDoc {
   wheels: WheelDef[]
 }
 
+/** What sat under the spawning right-click. Charts declare themselves (and
+ *  their live state) via data attributes read by wheelEvents.ts; the browser
+ *  preload sends no ctx at all — absence is the normal case, never an error. */
+interface WheelCtx {
+  context: string
+  symbols: string[]
+  indicators: string[]
+  hidden: string[]
+}
+
+/** The 4th wheel:evt arg crosses from ANY renderer, including hardened
+ *  browser views — treat it as untrusted and keep only well-shaped strings. */
+function sanitizeCtx(raw: unknown): WheelCtx | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const context = r['context']
+  if (typeof context !== 'string' || !context) return null
+  const arr = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? v.filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 12)
+          .slice(0, 24)
+      : []
+  return {
+    context: context.slice(0, 24),
+    symbols: arr(r['symbols']).map((s) => s.toUpperCase()),
+    indicators: arr(r['indicators']),
+    hidden: arr(r['hidden']).map((s) => s.toUpperCase()),
+  }
+}
+
 interface Session {
   winId: number
   mode: 'pending' | 'hold' | 'click'
@@ -72,6 +102,15 @@ interface Session {
   /** Last hold-mode pointer position, window coords — the release acts on
    *  segmentAt(center, THIS), never on renderer-reported hover. */
   lastPointer: { x: number; y: number }
+  /** Chart context captured at the spawning 'down' (null off-chart). The
+   *  dynamic chart wheels are built from it for the LIFE of the session —
+   *  navigating wheels never re-reads the page. */
+  ctx: WheelCtx | null
+  /** The tab the 'down' came from, and that view's webContents id: chart
+   *  actions go back THERE, never to whatever is active by the time the
+   *  user releases. Null when the down came from chrome or the overlay. */
+  originTabId: number | null
+  originWcId: number | null
   doc: WheelDoc
   segments: Segment[]
   detachListeners: () => void
@@ -91,6 +130,13 @@ export class WheelManager {
     this.tabs = tabs
     tabs.onWindowGone = (winId) => {
       if (this.session?.winId === winId) this.despawn()
+    }
+    // REVIEW 2026-08-02: an auto-lock (renderer 401, sidecar crash) swapped
+    // the window to the sign-in form UNDER a still-live wheel overlay — in
+    // hold mode every input path to close it was gated off, leaving the
+    // form unclickable. Lock kills the wheel, unconditionally.
+    tabs.onLockChanged = (locked) => {
+      if (locked) this.despawn()
     }
     this.registerIpc()
   }
@@ -130,13 +176,13 @@ export class WheelManager {
   }
 
   /** Resolve a wheel id into renderable segments (dynamic wheels included). */
-  private materialize(doc: WheelDoc, wheelId: string, tabPage: number): {
+  private materialize(doc: WheelDoc, wheelId: string, tabPage: number, ctx: WheelCtx | null): {
     def: WheelDef
     segments: Segment[]
     pages: number
   } {
     const def = doc.wheels.find((w) => w.id === wheelId) ?? doc.wheels[0]
-    if (def.dynamic !== 'tabs') {
+    if (!def.dynamic) {
       const segments = def.segments.map((s) => ({
         ...s,
         disabled: s.type === 'placeholder' || s.type === 'empty',
@@ -146,6 +192,9 @@ export class WheelManager {
         label: s.label || (s.type === 'ticker' ? (s.ticker ?? '') : s.label),
       }))
       return { def, segments, pages: 1 }
+    }
+    if (def.dynamic !== 'tabs') {
+      return { def, segments: this.chartSegments(def.dynamic, doc, ctx), pages: 1 }
     }
     // The Tabs wheel is built from reality at spawn time. Eight tabs fit on
     // one wheel; more than eight paginate — 6 per page, next at E, prev at W,
@@ -170,6 +219,70 @@ export class WheelManager {
     return { def, segments, pages }
   }
 
+  /** The chart-* dynamic wheels, built from the session's spawn ctx plus the
+   *  open tabs. A null ctx (the user navigated here without a chart under
+   *  the spawning click) builds the honest empty state — placeholders and
+   *  all-off markers, never a guess about some chart somewhere. */
+  private chartSegments(kind: string, doc: WheelDoc, ctx: WheelCtx | null): Segment[] {
+    const symbols = ctx?.symbols ?? []
+    const indicators = ctx?.indicators ?? []
+    const hidden = ctx?.hidden ?? []
+    let body: Segment[]
+    if (kind === 'chart-add') {
+      if (ctx === null) {
+        // No chart under the spawn = nowhere for "Add SYM" to land.
+        body = [{ type: 'placeholder', label: 'Right-click a chart', disabled: true }]
+      } else {
+        const have = new Set(symbols)
+        const open = this.tabs.symbolTabs().filter((t) => !have.has(t.symbol))
+        // 11 + the back segment = the 12-segment wheel cap; tabs past that
+        // are simply not offered (no pagination here — open fewer tabs).
+        body = open.slice(0, 11).map((t) => ({
+          type: 'chart' as const, tool: 'add', ticker: t.symbol, label: `Add ${t.symbol}`,
+        }))
+        if (body.length === 0) {
+          body = [{ type: 'placeholder', label: 'No open ticker tabs', disabled: true }]
+        }
+      }
+    } else if (kind === 'chart-ind') {
+      // Same five keys the Chart component computes (IndicatorKey) and
+      // CHART_TOOLS validates — ctx.indicators carries the bare keys.
+      //
+      // REVIEW 2026-08-02: with NO ctx (spawned off-chart, e.g. via a locked
+      // dynamic wheel) the markers showed every indicator as '○ off' while
+      // the segments still fired TOGGLES — clicking '○ Volume' turned the
+      // page's on-by-default Volume OFF, the opposite of what it advertised.
+      // No context = no claims and no actions, like the other empty states.
+      if (ctx === null) {
+        body = [{ type: 'placeholder', label: 'Right-click a chart', disabled: true }]
+      } else {
+        const IND: [string, string][] = [
+          ['vol', 'Volume'], ['sma20', 'SMA 20'], ['sma50', 'SMA 50'],
+          ['ema20', 'EMA 20'], ['rsi14', 'RSI 14'],
+        ]
+        body = IND.map(([key, name]) => ({
+          type: 'chart' as const,
+          tool: `ind:${key}`,
+          label: `${indicators.includes(key) ? '●' : '○'} ${name}`,
+        }))
+      }
+    } else {
+      // chart-tickers: hide/show toggles. Hidden symbols stay listed —
+      // clicking one shows it again.
+      body = symbols.length < 2
+        ? [{ type: 'placeholder', label: 'Single-symbol chart', disabled: true }]
+        : symbols.slice(0, 11).map((sym) => ({
+            type: 'chart' as const, tool: 'hide', ticker: sym,
+            label: hidden.includes(sym) ? '◑ hidden' : '',
+          }))
+    }
+    body.push({
+      type: 'wheel', wheel: 'chart', label: 'Chart',
+      symbol: doc.wheels.find((w) => w.id === 'chart')?.symbol,
+    })
+    return body
+  }
+
   // ------------------------------------------------------------ session ops
   private clamp(winId: number, x: number, y: number): { x: number; y: number } {
     const size = this.tabs.windowContentSize(winId)
@@ -182,7 +295,10 @@ export class WheelManager {
     }
   }
 
-  private async spawn(winId: number, x: number, y: number): Promise<void> {
+  private async spawn(
+    winId: number, x: number, y: number,
+    ctx: WheelCtx | null, originTabId: number | null, originWcId: number | null
+  ): Promise<void> {
     const seq = ++this.spawnSeq
     this.releaseDuringSpawn = false
     const doc = await this.loadDoc()
@@ -197,8 +313,14 @@ export class WheelManager {
     const view = this.ensureOverlay(this.preloadPath)
     if (!this.tabs.attachOverlay(winId, view)) return
 
-    const wheelId = doc.config.locked ?? 'main'
-    const { def, segments } = this.materialize(doc, wheelId, 0)
+    // Context BEATS the locked default: right-clicking any chart spawns the
+    // chart wheel; right-clicking off any chart spawns locked ?? main. The
+    // 'chart' wheel is a required builtin, but a doc is user data — check.
+    const wheelId =
+      ctx?.context === 'chart' && doc.wheels.some((w) => w.id === 'chart')
+        ? 'chart'
+        : doc.config.locked ?? 'main'
+    const { def, segments } = this.materialize(doc, wheelId, 0, ctx)
     const center = this.clamp(winId, x, y)
 
     const win = this.tabs.baseWindow(winId)
@@ -215,6 +337,9 @@ export class WheelManager {
       wheelId: def.id,
       tabPage: 0,
       lastPointer: { x, y },
+      ctx,
+      originTabId,
+      originWcId,
       doc,
       segments,
       detachListeners: () => {
@@ -244,7 +369,7 @@ export class WheelManager {
   private switchWheel(wheelId: string, tabPage = 0): void {
     const s = this.session
     if (!s) return
-    const { def, segments } = this.materialize(s.doc, wheelId, tabPage)
+    const { def, segments } = this.materialize(s.doc, wheelId, tabPage, s.ctx)
     s.wheelId = def.id
     s.tabPage = tabPage
     s.segments = segments
@@ -313,9 +438,29 @@ export class WheelManager {
       case 'tab':
         if (seg.tabId !== undefined) this.tabs.activateTabGlobal(seg.tabId)
         return 'close'
+      case 'chart':
+        this.sendChartAction(seg)
+        return 'close'
       default:
         return 'close'
     }
+  }
+
+  /** Deliver a chart segment to the view the wheel was spawned over. The
+   *  PAGE decides what the tool means — add, hide, the ind: toggles,
+   *  normalize, pointer, trend, hline, clear all flow the same way; views
+   *  without a chart handler simply ignore the event. If the origin tab
+   *  closed while the wheel was up, DROP the action: it must never land on
+   *  whatever view exists now. */
+  private sendChartAction(seg: Segment): void {
+    const s = this.session
+    if (!s || !seg.tool || s.originTabId === null || s.originWcId === null) return
+    if (!this.tabs.allTabs().some((t) => t.id === s.originTabId)) return
+    const wc = webContents.fromId(s.originWcId)
+    if (!wc || wc.isDestroyed()) return
+    wc.send('chart:action', seg.ticker
+      ? { tool: seg.tool, symbol: seg.ticker }
+      : { tool: seg.tool })
   }
 
   private async toggleLock(): Promise<void> {
@@ -345,7 +490,7 @@ export class WheelManager {
     // bridge, browser pages via the minimal preload, and the overlay itself
     // (during a hold, Chromium routes events to whoever has capture — we
     // listen everywhere so it does not matter who that is).
-    ipcMain.on('wheel:evt', (e, kind: string, cx: number, cy: number) => {
+    ipcMain.on('wheel:evt', (e, kind: string, cx: number, cy: number, rawCtx?: unknown) => {
       if (this.tabs.isLocked || !isSignedIn()) return
       if (typeof cx !== 'number' || typeof cy !== 'number') return
 
@@ -353,6 +498,7 @@ export class WheelManager {
       let winId: number
       let x = cx
       let y = cy
+      let originTabId: number | null = null
       if (fromOverlay) {
         if (!this.session) return
         winId = this.session.winId
@@ -362,6 +508,7 @@ export class WheelManager {
         winId = src.winId
         x = cx + src.offsetX
         y = cy + src.offsetY
+        originTabId = src.tabId
       }
 
       const s = this.session
@@ -374,7 +521,10 @@ export class WheelManager {
           return
         }
         if (s) this.despawn()
-        void this.spawn(winId, x, y)
+        // ctx rides only on 'down' (wheelEvents.ts); the overlay never
+        // sends downs, so a non-overlay sender is the true origin view.
+        void this.spawn(winId, x, y, sanitizeCtx(rawCtx),
+                        originTabId, fromOverlay ? null : e.sender.id)
         return
       }
       if (!s) {

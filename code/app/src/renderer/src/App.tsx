@@ -9,6 +9,7 @@
 import { TabStrip } from './components/TabStrip'
 import { AuthShell } from './modes/AuthShell'
 import { ContentApp } from './modes/ContentApp'
+import { SplitDivider } from './modes/SplitDivider'
 import { WheelOverlay } from './modes/WheelOverlay'
 import { installWheelEvents } from './wheelEvents'
 
@@ -20,6 +21,7 @@ export type Route =
   | { name: 'search'; query: string }
   | { name: 'settings' }
   | { name: 'news' }
+  | { name: 'charts' }
   | { name: 'article'; id?: number; url?: string }
 
 export function parseRoute(raw: string | null): Route {
@@ -30,7 +32,8 @@ export function parseRoute(raw: string | null): Route {
     const rest = raw.slice(8)
     return /^\d+$/.test(rest) ? { name: 'article', id: Number(rest) } : { name: 'article', url: rest }
   }
-  if (raw === 'accounts' || raw === 'data' || raw === 'settings' || raw === 'news') {
+  if (raw === 'accounts' || raw === 'data' || raw === 'settings' || raw === 'news'
+      || raw === 'charts') {
     return { name: raw }
   }
   return { name: 'idle' }
@@ -56,5 +59,6 @@ export default function App() {
   if (mode === 'chrome') return <TabStrip />
   if (mode === 'content') return <ContentApp initial={parseRoute(params.get('route'))} />
   if (mode === 'wheel') return <WheelOverlay />
+  if (mode === 'divider') return <SplitDivider />
   return <AuthShell />
 }

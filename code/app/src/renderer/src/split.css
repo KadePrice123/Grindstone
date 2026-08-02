@@ -1,0 +1,41 @@
+/* Chrome-style split view: the divider bar (mode=divider is its own
+   WebContentsView) and the strip's paired-tab indicator. No animation —
+   the gate scans for infinite loops and the GPU has been burned before. */
+
+/* The whole divider view IS the bar: size to the viewport, not #root, so it
+   cannot depend on the app shell's layout rules. */
+.split-divider {
+  width: 100vw;
+  height: 100vh;
+  background: #101214;
+  cursor: ew-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  touch-action: none; /* pointer capture must not fight scroll gestures */
+}
+.split-divider-grip {
+  width: 2px;
+  height: 36px;
+  border-radius: 2px;
+  background: var(--border);
+}
+.split-divider:hover .split-divider-grip,
+.split-divider:active .split-divider-grip {
+  background: var(--accent);
+}
+
+/* Both members of a split pair share one accent underline — the linked look,
+   visible even while the pair is hidden behind another active tab. */
+.strip-tab.split-mate::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 2px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  opacity: 0.8;
+}

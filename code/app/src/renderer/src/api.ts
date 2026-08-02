@@ -16,7 +16,16 @@ declare global {
       openUrl: (url: string) => void
       onNav: (cb: (what: 'back' | 'home') => void) => () => void
       onRoute: (cb: (route: string) => void) => () => void
-      wheelEvt: (kind: 'down' | 'move' | 'up', x: number, y: number) => void
+      wheelEvt: (
+        kind: 'down' | 'move' | 'up',
+        x: number,
+        y: number,
+        ctx?: { context: string; symbols?: string[]; indicators?: string[]; hidden?: string[] }
+      ) => void
+      onChartAction: (cb: (a: { tool: string; symbol?: string }) => void) => () => void
+    }
+    grindstoneSplit: {
+      drag: (screenX: number) => void
     }
     grindstoneWheel: {
       onSpawn: (cb: (payload: unknown) => void) => () => void

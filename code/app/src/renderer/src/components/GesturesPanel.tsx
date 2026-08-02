@@ -1,34 +1,165 @@
 /**
- * The gesture-wheel editor on the Settings page (FR-SHELL-4).
+ * The gesture-wheel editor on the Settings page (FR-SHELL-4, redesigned).
  *
- * One wheel shown at a time with arrows to page through — the "wheel select
- * panel". The preview is the SAME WheelFace component the overlay renders,
- * so editing is literal WYSIWYG: change a segment, watch the wheel change.
- * The whole document saves through PUT /api/wheels, which validates and
- * says exactly what it rejected.
+ * Direct manipulation: click a segment ON the preview wheel, then pick what
+ * it becomes from a searchable, category-filtered catalog (wheelCatalog.ts).
+ * The old row-per-segment form made "change one slot" an eight-row hunt —
+ * Kade: click the wheel segment you want to change, then select from a list
+ * of tools with filters by category and search.
+ *
+ * The preview is the SAME WheelFace component the overlay renders, so
+ * editing is literal WYSIWYG. The whole document saves through
+ * PUT /api/wheels: optimistic local set for an instant preview, then the
+ * backend's validated echo — or the stored truth reloaded on rejection,
+ * with the actual reason shown.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
+import { CatalogEntry, CATEGORIES, searchCatalog, tickerEntry } from '../wheelCatalog'
 import { Quote, WheelConfig, WheelFace, WheelRender, WheelSegment } from './WheelFace'
+import '../gestures.css'
 
 interface WheelDoc {
   config: WheelConfig
   wheels: (WheelRender & { builtin?: boolean; dynamic?: string })[]
 }
 
-const SEG_TYPES: { key: WheelSegment['type']; label: string }[] = [
-  { key: 'wheel', label: 'Go to wheel' },
-  { key: 'nav', label: 'Page' },
-  { key: 'tool', label: 'Tool' },
-  { key: 'ticker', label: 'Ticker' },
-  { key: 'placeholder', label: 'Placeholder' },
-]
-const ROUTES = ['idle', 'accounts', 'data', 'settings', 'news']
-const TOOLS = ['search']
+/** Dynamic wheels build themselves at spawn time — there is nothing stored
+ *  to edit, and pretending otherwise would be a lie the overlay overwrites. */
+const DYNAMIC_NOTE: Record<string, string> = {
+  tabs:
+    'The Tabs wheel builds itself from your open tabs — more than eight and ' +
+    'its east/west segments page through them.',
+  'chart-add':
+    'Builds itself when spawned over a chart: every open ticker tab not ' +
+    'already on that chart, ready to add.',
+  'chart-ind':
+    'Builds itself when spawned over a chart: the indicator toggles, marked ' +
+    'with that chart’s current on/off state.',
+  'chart-tickers':
+    'Builds itself when spawned over a chart: that chart’s symbols, to hide ' +
+    'or show.',
+}
+
+function posName(i: number): string {
+  return i === 0 ? '12 o’clock' : `#${i + 1}`
+}
+
+/** The picker panel: search + category chips + the entry list. Remounted
+ *  (keyed) per selected segment so search resets and autofocus fires. */
+function SegmentPicker({
+  doc,
+  onPick,
+}: {
+  doc: WheelDoc
+  onPick: (seg: WheelSegment) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [cat, setCat] = useState<string | null>(null)
+  const [ticker, setTicker] = useState('')
+  const [tickerOpen, setTickerOpen] = useState(false)
+
+  // Go-to-wheel entries come from the LIVE document, not the static catalog —
+  // custom wheels are offered the moment they exist.
+  const q = query.trim().toLowerCase()
+  const wheelEntries: CatalogEntry[] = doc.wheels
+    .map((w) => ({
+      id: `wheel:${w.id}`,
+      category: 'Wheels',
+      label: `Go to ${w.name}`,
+      keywords: `wheel ${w.id}`,
+      segment: { type: 'wheel' as const, wheel: w.id, label: w.name.slice(0, 20) },
+    }))
+    .filter(
+      (e) =>
+        (cat === null || cat === 'Wheels') &&
+        (!q || e.label.toLowerCase().includes(q) || e.keywords.includes(q))
+    )
+  const entries = [...searchCatalog(query, cat), ...wheelEntries]
+  const showTickerRow = cat === null || cat === 'Tickers'
+
+  const submitTicker = () => {
+    const sym = ticker.trim().toUpperCase()
+    // Must contain at least one alphanumeric: '.' alone passed this gate,
+    // sailed through optimistically, and 422'd out of the backend instead
+    // of being refused at the door (REVIEW 2026-08-02).
+    if (/^(?=.*[A-Z0-9])[A-Z0-9.]{1,8}$/.test(sym)) onPick(tickerEntry(sym))
+  }
+
+  return (
+    <>
+      <input
+        className="field gp-search"
+        placeholder="Search tools…"
+        value={query}
+        autoFocus
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      <div className="gp-cats">
+        <button
+          className={`gp-cat${cat === null ? ' on' : ''}`}
+          onClick={() => setCat(null)}
+        >
+          All
+        </button>
+        {CATEGORIES.map((c) => (
+          <button
+            key={c}
+            className={`gp-cat${cat === c ? ' on' : ''}`}
+            onClick={() => setCat(cat === c ? null : c)}
+          >
+            {c}
+          </button>
+        ))}
+      </div>
+      <div className="gp-list">
+        {entries.map((e) => (
+          <button
+            key={e.id}
+            className="gp-entry"
+            onClick={() => onPick({ ...e.segment })}
+          >
+            <span>{e.label}</span>
+            <span className="gp-entry-cat">{e.category}</span>
+          </button>
+        ))}
+        {showTickerRow ? (
+          tickerOpen ? (
+            <div className="gp-ticker-row">
+              <input
+                className="field"
+                placeholder="SPY"
+                value={ticker}
+                maxLength={8}
+                autoFocus
+                onChange={(e) => setTicker(e.target.value.toUpperCase())}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitTicker()
+                }}
+              />
+              <button className="btn" onClick={submitTicker}>
+                Set
+              </button>
+            </div>
+          ) : (
+            <button className="gp-entry" onClick={() => setTickerOpen(true)}>
+              <span>Ticker…</span>
+              <span className="gp-entry-cat">Tickers</span>
+            </button>
+          )
+        ) : null}
+        {entries.length === 0 && !showTickerRow ? (
+          <div className="gp-empty">Nothing matches</div>
+        ) : null}
+      </div>
+    </>
+  )
+}
 
 export function GesturesPanel() {
   const [doc, setDoc] = useState<WheelDoc | null>(null)
   const [idx, setIdx] = useState(0)
+  const [selected, setSelected] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
@@ -45,18 +176,48 @@ export function GesturesPanel() {
     load()
   }, [load])
 
-  /** Persist the whole document; the backend echoes the validated truth. */
-  const save = async (next: WheelDoc) => {
+  /** Persist the whole document; the backend echoes the validated truth.
+   *
+   * Two REVIEW 2026-08-02 rules encoded here:
+   * 1. SEQUENCED. Every text keystroke fires a full-doc PUT; without a
+   *    guard, echo #1 landing after optimistic edit #2 snapped inputs
+   *    backwards and could persist the older doc. Only the newest save may
+   *    write the echo back into state.
+   * 2. LOCK-PRESERVING. This panel has NO lock control, but it PUTs the
+   *    whole doc from a mount-time snapshot — which silently reverted a
+   *    default the user had just locked via the wheel's hub. The live
+   *    locked value is re-read right before each PUT and carried through
+   *    (unless this save is itself deleting that wheel).
+   */
+  const saveSeq = useRef(0)
+  const save = async (next: WheelDoc, opts?: { droppedWheelId?: string }) => {
+    const mine = ++saveSeq.current
     setDoc(next) // optimistic — the preview must track the edit instantly
     setSaving(true)
     try {
-      setDoc(await api<WheelDoc>('PUT', '/api/wheels', next))
+      let carryLocked = next.config.locked
+      try {
+        const fresh = await api<WheelDoc>('GET', '/api/wheels')
+        carryLocked = fresh.config.locked
+      } catch {
+        /* offline blip: fall back to what we have rather than blocking */
+      }
+      if (opts?.droppedWheelId && carryLocked === opts.droppedWheelId) {
+        carryLocked = null // deleting the locked wheel unlocks it
+      }
+      const echoed = await api<WheelDoc>('PUT', '/api/wheels', {
+        ...next,
+        config: { ...next.config, locked: carryLocked },
+      })
+      if (mine !== saveSeq.current) return // a newer save owns the truth now
+      setDoc(echoed)
       setError(null)
     } catch (e) {
+      if (mine !== saveSeq.current) return
       setError(e instanceof ApiError ? e.message : String(e))
       load() // the stored truth back on screen
     } finally {
-      setSaving(false)
+      if (mine === saveSeq.current) setSaving(false)
     }
   }
 
@@ -70,7 +231,15 @@ export function GesturesPanel() {
   }
 
   const wheel = doc.wheels[Math.min(idx, doc.wheels.length - 1)]
-  const isDynamic = wheel.dynamic === 'tabs'
+  const isDynamic = !!wheel.dynamic
+  // Saves can shrink the segment list out from under the selection.
+  const sel =
+    selected !== null && selected < wheel.segments.length ? selected : null
+
+  const gotoWheel = (nextIdx: number) => {
+    setIdx(nextIdx)
+    setSelected(null)
+  }
 
   const patchWheel = (patch: Partial<WheelRender>) =>
     save({
@@ -81,11 +250,27 @@ export function GesturesPanel() {
   const patchSegment = (i: number, seg: WheelSegment) =>
     patchWheel({ segments: wheel.segments.map((s, j) => (j === i ? seg : s)) })
 
-  const moveSegment = (i: number, dir: -1 | 1) => {
-    const j = (i + dir + wheel.segments.length) % wheel.segments.length
+  const rotateSelected = (dir: -1 | 1) => {
+    if (sel === null) return
+    const j = (sel + dir + wheel.segments.length) % wheel.segments.length
     const next = [...wheel.segments]
-    ;[next[i], next[j]] = [next[j], next[i]]
+    ;[next[sel], next[j]] = [next[j], next[sel]]
+    setSelected(j) // the selection follows the segment it was on
     patchWheel({ segments: next })
+  }
+
+  const removeSelected = () => {
+    if (sel === null || wheel.segments.length <= 2) return
+    setSelected(null)
+    patchWheel({ segments: wheel.segments.filter((_, i) => i !== sel) })
+  }
+
+  const addSegment = () => {
+    if (wheel.segments.length >= 12) return
+    setSelected(wheel.segments.length) // select the new slot for immediate pick
+    patchWheel({
+      segments: [...wheel.segments, { type: 'placeholder', label: 'Edit me' }],
+    })
   }
 
   const addWheel = () => {
@@ -112,13 +297,34 @@ export function GesturesPanel() {
         },
       ],
     })
-    setIdx(doc.wheels.length)
+    gotoWheel(doc.wheels.length)
   }
 
   const removeWheel = () => {
     if (wheel.builtin) return
-    save({ ...doc, wheels: doc.wheels.filter((w) => w.id !== wheel.id) })
-    setIdx(0)
+    // REVIEW 2026-08-02: deleting a wheel that was the locked default, or
+    // that another wheel's go-to segment pointed at, ALWAYS 422'd ("locked
+    // wheel 'custom1' does not exist" — nonsense while it was on screen).
+    // Deleting must also retarget every reference: dangling go-to segments
+    // become placeholders, and the lock clears via droppedWheelId.
+    const gone = wheel.id
+    save(
+      {
+        ...doc,
+        wheels: doc.wheels
+          .filter((w) => w.id !== gone)
+          .map((w) => ({
+            ...w,
+            segments: w.segments.map((s) =>
+              s.type === 'wheel' && s.wheel === gone
+                ? { type: 'placeholder' as const, label: 'Edit me' }
+                : s
+            ),
+          })),
+      },
+      { droppedWheelId: gone }
+    )
+    gotoWheel(0)
   }
 
   const noQuotes: Record<string, Quote> = {}
@@ -132,27 +338,30 @@ export function GesturesPanel() {
       <div className="subtle" style={{ marginBottom: 12 }}>
         Right-click anywhere: click for a menu you can left-click, or hold and
         drag over a segment and release. The center lock pins the shown wheel
-        as your default.
+        as your default. Click a segment on the preview to change what it does.
       </div>
 
       {error ? <div className="test-result bad">{error}</div> : null}
 
-      <div className="wheel-carousel">
+      <div className="gp-editor">
         <button
-          className="btn"
+          className="btn gp-arrow"
           title="Previous wheel"
-          onClick={() => setIdx((idx - 1 + doc.wheels.length) % doc.wheels.length)}
+          onClick={() => gotoWheel((idx - 1 + doc.wheels.length) % doc.wheels.length)}
         >
           ‹
         </button>
-        <div className="wheel-preview">
+        <div className="gp-preview">
           <WheelFace
             wheel={wheel}
             config={doc.config}
             quotes={noQuotes}
-            hover={null}
+            hover={sel}
             mode="preview"
             scale={0.72}
+            onSegment={(i) => {
+              if (!isDynamic) setSelected(sel === i ? null : i)
+            }}
           />
           <div className="wheel-carousel-name">
             <span className="wheel-symbol">{wheel.symbol}</span>
@@ -164,12 +373,92 @@ export function GesturesPanel() {
           </div>
         </div>
         <button
-          className="btn"
+          className="btn gp-arrow"
           title="Next wheel"
-          onClick={() => setIdx((idx + 1) % doc.wheels.length)}
+          onClick={() => gotoWheel((idx + 1) % doc.wheels.length)}
         >
           ›
         </button>
+
+        <div className="gp-side">
+          {isDynamic ? (
+            <div className="gp-note">{DYNAMIC_NOTE[wheel.dynamic ?? ''] ?? ''}</div>
+          ) : sel === null ? (
+            <>
+              <div className="gp-hint">
+                Click a segment on the wheel to change it.
+              </div>
+              <div className="gp-ops">
+                <button
+                  className="btn"
+                  disabled={wheel.segments.length >= 12}
+                  onClick={addSegment}
+                >
+                  Add segment
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="gp-selected-pos">Segment {posName(sel)}</div>
+              <SegmentPicker
+                // Remount per slot: fresh search, autofocus back to it.
+                key={`${wheel.id}:${sel}`}
+                doc={doc}
+                onPick={(seg) => patchSegment(sel, seg)}
+              />
+              <div className="gp-ops">
+                <button
+                  className="btn"
+                  title="Swap with the counter-clockwise neighbor"
+                  onClick={() => rotateSelected(-1)}
+                >
+                  ↺
+                </button>
+                <button
+                  className="btn"
+                  title="Swap with the clockwise neighbor"
+                  onClick={() => rotateSelected(1)}
+                >
+                  ↻
+                </button>
+                <button
+                  className="btn"
+                  disabled={wheel.segments.length <= 2}
+                  title={
+                    wheel.segments.length <= 2
+                      ? 'A wheel needs at least 2 segments'
+                      : 'Remove this segment'
+                  }
+                  onClick={removeSelected}
+                >
+                  Remove
+                </button>
+                <button
+                  className="btn"
+                  disabled={wheel.segments.length >= 12}
+                  onClick={addSegment}
+                >
+                  Add
+                </button>
+                <label className="gp-label-field">
+                  Label
+                  <input
+                    className="field"
+                    value={wheel.segments[sel].label}
+                    maxLength={20}
+                    onChange={(e) =>
+                      patchSegment(sel, {
+                        ...wheel.segments[sel],
+                        label: e.target.value,
+                      })
+                    }
+                  />
+                </label>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="wheel-edit-row">
@@ -205,121 +494,6 @@ export function GesturesPanel() {
           </button>
         </div>
       </div>
-
-      {isDynamic ? (
-        <div className="subtle" style={{ marginTop: 10 }}>
-          The Tabs wheel builds itself from your open tabs — more than eight
-          and its east/west segments page through them.
-        </div>
-      ) : (
-        <div className="wheel-seg-list">
-          {wheel.segments.map((seg, i) => (
-            <div className="wheel-seg-row" key={i}>
-              <span className="wheel-seg-pos subtle">{i === 0 ? '12 o’clock' : `#${i + 1}`}</span>
-              <select
-                className="field"
-                value={seg.type}
-                onChange={(e) => {
-                  const t = e.target.value as WheelSegment['type']
-                  patchSegment(i,
-                    t === 'wheel' ? { type: t, wheel: 'main', label: 'Main' }
-                    : t === 'nav' ? { type: t, route: 'idle', label: 'Home' }
-                    : t === 'tool' ? { type: t, tool: 'search', label: 'Search' }
-                    : t === 'ticker' ? { type: t, ticker: 'SPY', label: '' }
-                    : { type: t, label: 'Soon' })
-                }}
-              >
-                {SEG_TYPES.map((t) => (
-                  <option key={t.key} value={t.key}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-              {seg.type === 'wheel' ? (
-                <select
-                  className="field"
-                  value={seg.wheel}
-                  onChange={(e) => patchSegment(i, { ...seg, wheel: e.target.value })}
-                >
-                  {doc.wheels.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name}
-                    </option>
-                  ))}
-                </select>
-              ) : seg.type === 'nav' ? (
-                <select
-                  className="field"
-                  value={seg.route}
-                  onChange={(e) => patchSegment(i, { ...seg, route: e.target.value })}
-                >
-                  {ROUTES.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
-              ) : seg.type === 'tool' ? (
-                <select
-                  className="field"
-                  value={seg.tool}
-                  onChange={(e) => patchSegment(i, { ...seg, tool: e.target.value })}
-                >
-                  {TOOLS.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </select>
-              ) : seg.type === 'ticker' ? (
-                <input
-                  className="field"
-                  value={seg.ticker ?? ''}
-                  maxLength={8}
-                  onChange={(e) =>
-                    patchSegment(i, { ...seg, ticker: e.target.value.toUpperCase() })
-                  }
-                />
-              ) : (
-                <span className="subtle wheel-seg-note">not built yet — shows dimmed</span>
-              )}
-              <input
-                className="field"
-                placeholder="Label"
-                value={seg.label}
-                maxLength={20}
-                onChange={(e) => patchSegment(i, { ...seg, label: e.target.value })}
-              />
-              <button className="btn" title="Rotate counter-clockwise" onClick={() => moveSegment(i, -1)}>
-                ↺
-              </button>
-              <button className="btn" title="Rotate clockwise" onClick={() => moveSegment(i, 1)}>
-                ↻
-              </button>
-            </div>
-          ))}
-          <div className="wheel-seg-add">
-            <button
-              className="btn"
-              disabled={wheel.segments.length >= 12}
-              onClick={() =>
-                patchWheel({
-                  segments: [...wheel.segments, { type: 'placeholder', label: 'Edit me' }],
-                })
-              }
-            >
-              Add segment
-            </button>
-            <button
-              className="btn"
-              disabled={wheel.segments.length <= 2}
-              onClick={() => patchWheel({ segments: wheel.segments.slice(0, -1) })}
-            >
-              Remove last
-            </button>
-          </div>
-        </div>
-      )}
 
       <div className="setting-row" style={{ marginTop: 14 }}>
         <div className="setting-text">

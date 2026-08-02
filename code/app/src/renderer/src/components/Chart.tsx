@@ -18,6 +18,7 @@ import {
   createChart,
   type IChartApi,
   type ISeriesApi,
+  type SeriesType,
   type UTCTimestamp,
 } from 'lightweight-charts'
 import { useEffect, useRef } from 'react'
@@ -32,6 +33,21 @@ export interface Bar {
 }
 
 export type IndicatorKey = 'sma20' | 'sma50' | 'ema20' | 'vol' | 'rsi14'
+
+/** Handed to onReady after every series (re)build so a drawing layer
+ *  (ChartDraw) can anchor projections to the live chart + series. */
+export interface ChartReadyApi {
+  chart: IChartApi
+  mainSeries: ISeriesApi<SeriesType>
+}
+
+/** Comparison mode (charts.gs): one line per symbol instead of candles. */
+export interface CompareLine {
+  symbol: string
+  bars: Bar[]
+  color: string
+  hidden?: boolean
+}
 
 const COLORS = {
   up: '#2EBD85',
@@ -105,25 +121,53 @@ function rsi(values: number[], period = 14): (number | null)[] {
   return out
 }
 
+// REVIEW 2026-08-02: destructuring defaults (`bars = []`) mint a NEW array
+// identity per render, and both sit in the rebuild effect's deps — on the
+// multi-chart page (which passes neither prop) every keystroke in the add
+// box rebuilt every series and fitContent() threw away the user's zoom.
+// Module constants keep the identity stable.
+const NO_BARS: Bar[] = []
+const NO_INDICATORS: IndicatorKey[] = []
+
 export function Chart({
-  bars,
-  indicators = [],
+  bars = NO_BARS,
+  indicators = NO_INDICATORS,
   height = 420,
   compact = false,
   onClick,
+  lines,
+  normalize = false,
+  symbols,
+  hiddenSymbols,
+  onReady,
 }: {
-  bars: Bar[]
+  bars?: Bar[]
   indicators?: IndicatorKey[]
   height?: number
   compact?: boolean
   onClick?: () => void
+  /** Comparison mode: when set, bars is ignored and each entry draws a line. */
+  lines?: CompareLine[]
+  /** Lines mode only: rebase every line to % change from its first close. */
+  normalize?: boolean
+  /** Wheel-context truth for data-chart-symbols; defaults to lines' symbols. */
+  symbols?: string[]
+  hiddenSymbols?: string[]
+  /** Fires after every series (re)build — series handles go stale each build,
+   *  so a drawing layer must re-anchor here, not once. */
+  onReady?: (api: ChartReadyApi) => void
 }) {
   const box = useRef<HTMLDivElement>(null)
   const chart = useRef<IChartApi | null>(null)
   const price = useRef<ISeriesApi<'Candlestick'> | ISeriesApi<'Area'> | null>(null)
   const extras = useRef<ISeriesApi<'Line'>[]>([])
+  const compare = useRef<ISeriesApi<'Line'>[]>([])
   const volume = useRef<ISeriesApi<'Histogram'> | null>(null)
   const rsiSeries = useRef<ISeriesApi<'Line'> | null>(null)
+  // Ref, not effect dep: a host re-creating its callback must not force a
+  // full series rebuild.
+  const onReadyRef = useRef(onReady)
+  onReadyRef.current = onReady
 
   useEffect(() => {
     if (!box.current) return
@@ -151,6 +195,7 @@ export function Chart({
       chart.current = null
       price.current = null
       extras.current = []
+      compare.current = []
       volume.current = null
       rsiSeries.current = null
     }
@@ -158,13 +203,18 @@ export function Chart({
 
   useEffect(() => {
     const c = chart.current
-    if (!c || bars.length === 0) return
+    if (!c) return
 
     // Rebuild series on every data/indicator change — simple and correct;
     // these datasets are hundreds of points, not millions.
-    if (price.current) c.removeSeries(price.current as ISeriesApi<'Candlestick'>)
+    if (price.current) {
+      c.removeSeries(price.current as ISeriesApi<'Candlestick'>)
+      price.current = null
+    }
     for (const s of extras.current) c.removeSeries(s)
     extras.current = []
+    for (const s of compare.current) c.removeSeries(s)
+    compare.current = []
     if (volume.current) {
       c.removeSeries(volume.current)
       volume.current = null
@@ -173,6 +223,46 @@ export function Chart({
       c.removeSeries(rsiSeries.current)
       rsiSeries.current = null
     }
+
+    // Comparison mode: a line per visible symbol. Normalize rebases each to
+    // % change from its FIRST LOADED close — the only way an $80 ETF and a
+    // $500 one share an axis honestly — and the axis labels must say so
+    // (custom % formatter) or the numbers read as prices.
+    if (lines) {
+      let main: ISeriesApi<'Line'> | null = null
+      for (const l of lines) {
+        if (l.hidden || l.bars.length === 0) continue
+        const base = l.bars[0].close
+        const s = c.addSeries(LineSeries, {
+          color: l.color,
+          lineWidth: 2,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          ...(normalize
+            ? {
+                priceFormat: {
+                  type: 'custom' as const,
+                  formatter: (p: number) => `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`,
+                  minMove: 0.01,
+                },
+              }
+            : {}),
+        })
+        s.setData(
+          l.bars.map((b) => ({
+            time: toTime(b.ts),
+            value: normalize && base !== 0 ? (b.close / base - 1) * 100 : b.close,
+          }))
+        )
+        compare.current.push(s)
+        if (!main) main = s // drawings anchor to the first visible symbol's scale
+      }
+      c.timeScale().fitContent()
+      if (main) onReadyRef.current?.({ chart: c, mainSeries: main })
+      return
+    }
+
+    if (bars.length === 0) return
 
     const closes = bars.map((b) => b.close)
     const times = bars.map((b) => toTime(b.ts))
@@ -260,14 +350,31 @@ export function Chart({
     }
 
     c.timeScale().fitContent()
-  }, [bars, indicators, compact])
+    if (price.current) onReadyRef.current?.({ chart: c, mainSeries: price.current })
+  }, [bars, indicators, compact, lines, normalize])
 
+  // Working charts declare themselves to the gesture wheel here — these
+  // attrs are what wheelEvents.ts reads on right-click, so a chart on any
+  // page (symbol, charts.gs) spawns the chart wheel with live state.
+  //
+  // COMPACT charts are previews, not workspaces (REVIEW 2026-08-02): the
+  // search featured card has no drawing layer, no indicators and no
+  // onChartAction listener, so a chart wheel spawned over it offered eight
+  // tools that all silently did nothing. A preview right-click gets the
+  // default wheel instead — worse-looking on paper, honest in the hand.
+  const ctxSymbols = symbols ?? (lines ? lines.map((l) => l.symbol) : [])
+  const ctxHidden =
+    hiddenSymbols ?? (lines ? lines.filter((l) => l.hidden).map((l) => l.symbol) : [])
   return (
     <div
       ref={box}
       className={compact ? 'chart-box compact' : 'chart-box'}
       style={{ height }}
       onClick={onClick}
+      data-wheel-context={compact ? undefined : 'chart'}
+      data-chart-symbols={ctxSymbols.join(',')}
+      data-chart-indicators={indicators.join(',')}
+      data-chart-hidden={ctxHidden.join(',')}
     />
   )
 }

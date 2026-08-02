@@ -36,24 +36,45 @@ from typing import Any
 
 DOC_KEY = "gesture_wheels"
 
-MAX_WHEELS = 12
+# Bumped when the DEFAULTS change shape or content in a way stored docs
+# should adopt (v2: the chart wheel family, charts page, SPY->Charts on
+# main). A stored doc with an older version is regenerated from defaults —
+# honest data loss, taken deliberately over silently mixing old and new.
+DOC_VERSION = 2
+
+MAX_WHEELS = 16
 MAX_SEGMENTS = 12
 MIN_SEGMENTS = 2
 NEW_WHEEL_SEGMENTS = 6  # a freshly created wheel starts with 6 empty slots
 
-ROUTES = ("idle", "accounts", "data", "settings", "news")
+ROUTES = ("idle", "accounts", "data", "settings", "news", "charts")
 TOOLS = ("search",)
-SEG_TYPES = ("wheel", "nav", "tool", "ticker", "placeholder", "empty")
-BUILTIN_IDS = ("main", "ai", "tabs", "tickers")
+# Chart actions a wheel segment can fire at the chart it was spawned over
+# (delivered to that view as a chart:action event; pages without a chart
+# handler simply ignore them).
+CHART_TOOLS = ("pointer", "trend", "hline", "clear",
+               "ind:vol", "ind:sma20", "ind:sma50", "ind:ema20", "ind:rsi14",
+               "normalize")
+SEG_TYPES = ("wheel", "nav", "tool", "ticker", "chart", "placeholder", "empty")
+# Dynamic wheels build their segments from live state at spawn time:
+#   tabs          the open tabs (paginated past 8)
+#   chart-add     open ticker tabs not yet on the spawned-over chart
+#   chart-ind     indicator toggles, marked with their current on/off state
+#   chart-tickers the chart's symbols, to hide/show
+DYNAMIC_KINDS = ("tabs", "chart-add", "chart-ind", "chart-tickers")
+BUILTIN_IDS = ("main", "ai", "tabs", "tickers",
+               "chart", "chart-add", "chart-ind", "chart-tickers")
 
 
 def default_doc() -> dict[str, Any]:
     return {
+        "version": DOC_VERSION,
         "config": {"ticker_display": "percent", "ticker_colors": True, "locked": None},
         "wheels": [
             {
                 # Kade's specified layout: wheel-navs at N/E/W, search at S,
-                # home/news/SPY/settings between them.
+                # home/news/Charts/settings between them (v2: the SPY ticker
+                # slot became the multi-chart page, per spec).
                 "id": "main", "name": "Main", "symbol": "◆", "builtin": True,
                 "segments": [
                     {"type": "wheel", "wheel": "ai", "label": "AI"},            # N
@@ -61,11 +82,33 @@ def default_doc() -> dict[str, Any]:
                     {"type": "wheel", "wheel": "tabs", "label": "Tabs"},        # E
                     {"type": "nav", "route": "news", "label": "News"},          # SE
                     {"type": "tool", "tool": "search", "label": "Search"},      # S
-                    {"type": "ticker", "ticker": "SPY"},                        # SW
+                    {"type": "nav", "route": "charts", "label": "Charts"},      # SW
                     {"type": "wheel", "wheel": "tickers", "label": "Tickers"},  # W
                     {"type": "nav", "route": "settings", "label": "Settings"},  # NW
                 ],
             },
+            {
+                # The chart wheel: spawned by right-clicking ANY chart
+                # (right-clicking off a chart spawns the default wheel).
+                # Editable like any other; its dynamic companions are not.
+                "id": "chart", "name": "Chart", "symbol": "📈", "builtin": True,
+                "segments": [
+                    {"type": "wheel", "wheel": "chart-add", "label": "Add symbol"},   # N
+                    {"type": "chart", "tool": "trend", "label": "Trend line"},        # NE
+                    {"type": "wheel", "wheel": "chart-ind", "label": "Indicators"},   # E
+                    {"type": "chart", "tool": "hline", "label": "H-line"},            # SE
+                    {"type": "wheel", "wheel": "main", "label": "Main"},              # S
+                    {"type": "chart", "tool": "clear", "label": "Clear drawings"},    # SW
+                    {"type": "wheel", "wheel": "chart-tickers", "label": "Hide"},     # W
+                    {"type": "chart", "tool": "pointer", "label": "Pointer"},         # NW
+                ],
+            },
+            {"id": "chart-add", "name": "Add symbol", "symbol": "+", "builtin": True,
+             "dynamic": "chart-add", "segments": []},
+            {"id": "chart-ind", "name": "Indicators", "symbol": "∿", "builtin": True,
+             "dynamic": "chart-ind", "segments": []},
+            {"id": "chart-tickers", "name": "Show/Hide", "symbol": "◑", "builtin": True,
+             "dynamic": "chart-tickers", "segments": []},
             {
                 # Placeholder until the AI milestone: visible, honestly dead.
                 "id": "ai", "name": "AI", "symbol": "AI", "builtin": True,
@@ -119,7 +162,8 @@ def validate(doc: Any) -> dict[str, Any]:
         if not isinstance(wh, dict):
             _fail("each wheel must be an object")
         wid = wh.get("id")
-        if not isinstance(wid, str) or not (1 <= len(wid) <= 32) or not wid.isidentifier():
+        if (not isinstance(wid, str) or not (1 <= len(wid) <= 32)
+                or not wid.replace("-", "_").isidentifier()):
             _fail(f"bad wheel id: {wid!r}")
         if wid in ids:
             _fail(f"duplicate wheel id {wid!r}")
@@ -138,7 +182,8 @@ def validate(doc: Any) -> dict[str, Any]:
     out_wheels: list[dict[str, Any]] = []
     for wh in wheels:
         wid = wh["id"]
-        dynamic = "tabs" if wh.get("dynamic") == "tabs" or wid == "tabs" else None
+        dynamic = wh.get("dynamic") if wh.get("dynamic") in DYNAMIC_KINDS else (
+            wid if wid in DYNAMIC_KINDS else None)
         segments = wh.get("segments") or []
         if dynamic:
             segments = []  # built by the shell at spawn time, never stored
@@ -150,34 +195,39 @@ def validate(doc: Any) -> dict[str, Any]:
         out_segments: list[dict[str, Any]] = []
         for i, seg in enumerate(segments):
             if not isinstance(seg, dict):
-                _fail(f"wheel {wid} segment {i}: must be an object")
+                _fail(f"wheel {wid} segment #{i + 1}: must be an object")
             stype = seg.get("type")
             if stype not in SEG_TYPES:
-                _fail(f"wheel {wid} segment {i}: unknown type {stype!r}")
+                _fail(f"wheel {wid} segment #{i + 1}: unknown type {stype!r}")
             label = seg.get("label", "")
             if not isinstance(label, str) or len(label) > 20:
-                _fail(f"wheel {wid} segment {i}: label must be ≤20 characters")
+                _fail(f"wheel {wid} segment #{i + 1}: label must be ≤20 characters")
             clean: dict[str, Any] = {"type": stype, "label": label}
             if stype == "wheel":
                 target = seg.get("wheel")
                 if target not in ids:
-                    _fail(f"wheel {wid} segment {i}: unknown target wheel {target!r}")
+                    _fail(f"wheel {wid} segment #{i + 1}: unknown target wheel {target!r}")
                 clean["wheel"] = target
             elif stype == "nav":
                 route = seg.get("route")
                 if route not in ROUTES:
-                    _fail(f"wheel {wid} segment {i}: unknown route {route!r}")
+                    _fail(f"wheel {wid} segment #{i + 1}: unknown route {route!r}")
                 clean["route"] = route
             elif stype == "tool":
                 tool = seg.get("tool")
                 if tool not in TOOLS:
-                    _fail(f"wheel {wid} segment {i}: unknown tool {tool!r}")
+                    _fail(f"wheel {wid} segment #{i + 1}: unknown tool {tool!r}")
+                clean["tool"] = tool
+            elif stype == "chart":
+                tool = seg.get("tool")
+                if tool not in CHART_TOOLS:
+                    _fail(f"wheel {wid} segment #{i + 1}: unknown chart tool {tool!r}")
                 clean["tool"] = tool
             elif stype == "ticker":
                 ticker = seg.get("ticker")
                 if (not isinstance(ticker, str) or not (1 <= len(ticker) <= 8)
                         or not ticker.replace(".", "").isalnum()):
-                    _fail(f"wheel {wid} segment {i}: bad ticker {ticker!r}")
+                    _fail(f"wheel {wid} segment #{i + 1}: bad ticker {ticker!r}")
                 clean["ticker"] = ticker.upper()
             out_segments.append(clean)
 
@@ -186,7 +236,7 @@ def validate(doc: Any) -> dict[str, Any]:
             "name": wh["name"],
             "symbol": wh["symbol"],
             "builtin": wid in BUILTIN_IDS,
-            **({"dynamic": "tabs"} if dynamic else {}),
+            **({"dynamic": dynamic} if dynamic else {}),
             "segments": out_segments,
         })
 
@@ -199,6 +249,7 @@ def validate(doc: Any) -> dict[str, Any]:
         _fail(f"locked wheel {locked!r} does not exist")
 
     return {
+        "version": DOC_VERSION,
         "config": {"ticker_display": display, "ticker_colors": colors, "locked": locked},
         "wheels": out_wheels,
     }
@@ -212,7 +263,12 @@ def get(db: sqlite3.Connection, user_id: int) -> dict[str, Any]:
     if row is None:
         return default_doc()
     try:
-        return validate(json.loads(row["value"]))
+        stored = json.loads(row["value"])
+        # An older-version doc predates wheels the defaults now require;
+        # regenerate rather than mixing generations half-validly.
+        if stored.get("version") != DOC_VERSION:
+            return default_doc()
+        return validate(stored)
     except (ValueError, TypeError):
         return default_doc()  # a corrupt doc falls back, never crashes
 

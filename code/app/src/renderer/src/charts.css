@@ -1,0 +1,79 @@
+/* charts.gs (multi-symbol compare) + chart-page extras. Base toolbar / seg /
+   card styles live in styles.css — only what these pages add is here. */
+
+.mc-add {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.mc-add .field.mc-add-field {
+  width: 118px;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  text-transform: uppercase;
+}
+.mc-add .btn {
+  padding: 5px 12px;
+  font-size: 12.5px;
+}
+/* A failed save is a visible state, not a silent shrug. */
+.mc-save-err {
+  color: var(--loss);
+}
+
+.mc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  margin-bottom: 10px;
+}
+.mc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  border-radius: 999px;
+  padding: 3px 6px 3px 9px;
+  font-size: 12px;
+}
+.mc-chip.off .mc-sym,
+.mc-chip.off .mc-dot {
+  opacity: 0.4;
+}
+/* A failed fetch dims the chip and flags it — never a silent drop. */
+.mc-chip.err {
+  border-color: color-mix(in srgb, var(--loss) 55%, transparent);
+}
+.mc-flag {
+  color: var(--loss);
+  font-weight: 700;
+}
+.mc-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.mc-sym {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.mc-chip-btn {
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 1px 3px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  line-height: 1;
+}
+.mc-chip-btn:hover {
+  color: var(--text);
+  background: var(--surface);
+}

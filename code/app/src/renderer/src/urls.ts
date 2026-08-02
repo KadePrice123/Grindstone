@@ -19,7 +19,8 @@ const TLD =
   /\.(com|net|org|io|co|ai|dev|app|gov|edu|news|finance|xyz|me|us|uk|ca|de|fr|jp|au|info|biz|tv|cloud|so|sh|to|ly|[a-z]{2})$/i
 
 /** Platform pages that are addressable by name. */
-const PAGES = ['home', 'accounts', 'data', 'settings', 'search', 'article', 'news'] as const
+const PAGES = ['home', 'accounts', 'data', 'settings', 'search', 'article', 'news',
+  'charts'] as const
 
 /**
  * Bare words that are addresses in their own right. A browser bar navigates
@@ -36,6 +37,7 @@ const PAGE_ROUTES: Record<string, string> = {
   data: 'data',
   settings: 'settings',
   news: 'news',
+  charts: 'charts',
 }
 
 const BARE: Record<string, string> = {

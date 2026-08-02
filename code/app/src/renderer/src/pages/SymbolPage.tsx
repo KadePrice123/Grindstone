@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, SymbolSummary } from '../api'
-import { Bar, Chart, IndicatorKey } from '../components/Chart'
+import { Bar, Chart, ChartReadyApi, IndicatorKey } from '../components/Chart'
+import { ChartDraw, DrawTool } from '../components/ChartDraw'
 import { Metrics, barRange } from '../components/Metrics'
 import { ChartMiniIcon } from '../components/icons'
+import '../charts.css'
 
 const TIMEFRAMES: { key: string; label: string }[] = [
   { key: '1Min', label: '1m' },
@@ -18,6 +20,12 @@ const INDICATORS: { key: IndicatorKey; label: string }[] = [
   { key: 'sma50', label: 'SMA 50' },
   { key: 'ema20', label: 'EMA 20' },
   { key: 'rsi14', label: 'RSI 14' },
+]
+
+const DRAW_TOOLS: { key: DrawTool; label: string }[] = [
+  { key: 'pointer', label: 'Pointer' },
+  { key: 'trend', label: 'Trend' },
+  { key: 'hline', label: 'H-line' },
 ]
 
 function age(iso: string): string {
@@ -42,6 +50,16 @@ export function SymbolPage({
   const [indicators, setIndicators] = useState<IndicatorKey[]>(['vol'])
   const [yearBars, setYearBars] = useState<Bar[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [drawTool, setDrawTool] = useState<DrawTool>('pointer')
+
+  // Drawing engine plumbing. The Chart unmounts when bars empty on a
+  // timeframe switch, so onReady fires against a NEW chart each time — the
+  // refs let one stable callback re-anchor or rebuild as needed.
+  const draw = useRef<ChartDraw | null>(null)
+  const drawKeyRef = useRef(`${symbol}|1Day`)
+  drawKeyRef.current = `${symbol}|${timeframe}`
+  const toolRef = useRef(drawTool)
+  toolRef.current = drawTool
 
   useEffect(() => {
     let stop = false
@@ -69,16 +87,25 @@ export function SymbolPage({
     }
   }, [symbol])
 
+  // REVIEW 2026-08-02: no guard here meant out-of-order responses painted
+  // the WRONG bars — click 5m (slow cold fetch) then 1D (fast/cached) and
+  // the stale 5Min answer landed last, under a highlighted 1D button; a
+  // trend line drawn then stored 5Min anchors in the 1Day drawing bucket,
+  // permanently invisible. Only the newest request may write.
+  const barsSeq = useRef(0)
   const loadBars = useCallback(async () => {
+    const mine = ++barsSeq.current
     try {
       const b = await api<{ bars: Bar[]; source: string; reason?: string }>(
         'GET',
         `/api/symbols/${encodeURIComponent(symbol)}/bars?timeframe=${timeframe}&limit=600`
       )
+      if (mine !== barsSeq.current) return
       setBars(b.bars)
       setBarSource(b.source)
       setBarNote(b.reason ?? '')
     } catch (e) {
+      if (mine !== barsSeq.current) return
       setBars([])
       setBarNote(e instanceof ApiError ? e.message : String(e))
     }
@@ -103,8 +130,49 @@ export function SymbolPage({
     }
   }, [symbol])
 
-  const toggle = (k: IndicatorKey) =>
-    setIndicators((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]))
+  const toggle = useCallback(
+    (k: IndicatorKey) =>
+      setIndicators((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k])),
+    []
+  )
+
+  const handleChartReady = useCallback(({ chart, mainSeries }: ChartReadyApi) => {
+    if (draw.current && draw.current.chart === chart) {
+      draw.current.setKey(drawKeyRef.current)
+      draw.current.setSeries(mainSeries)
+      return
+    }
+    draw.current?.destroy()
+    const d = new ChartDraw(drawKeyRef.current, chart, mainSeries)
+    d.setTool(toolRef.current)
+    draw.current = d
+  }, [])
+
+  useEffect(() => {
+    draw.current?.setTool(drawTool)
+  }, [drawTool])
+
+  useEffect(
+    () => () => {
+      draw.current?.destroy()
+      draw.current = null
+    },
+    []
+  )
+
+  // Chart-wheel segments land here when the wheel was spawned over this
+  // page's chart. 'add'/'hide'/'normalize' belong to charts.gs — ignored.
+  useEffect(() => {
+    const off = window.grindstone.onChartAction(({ tool }) => {
+      if (tool === 'pointer' || tool === 'trend' || tool === 'hline') setDrawTool(tool)
+      else if (tool === 'clear') draw.current?.clear()
+      else if (tool.startsWith('ind:')) {
+        const k = tool.slice(4)
+        if (INDICATORS.some((i) => i.key === k)) toggle(k as IndicatorKey)
+      }
+    })
+    return off
+  }, [toggle])
 
   const q = data?.quote
 
@@ -149,12 +217,34 @@ export function SymbolPage({
               </button>
             ))}
           </div>
+          {/* Toolbar mirrors the wheel's drawing tools on purpose — the
+              no-mouse path must reach everything the wheel reaches. */}
+          <div className="seg">
+            {DRAW_TOOLS.map((t) => (
+              <button
+                key={t.key}
+                className={`seg-btn${drawTool === t.key ? ' on' : ''}`}
+                onClick={() => setDrawTool(t.key)}
+              >
+                {t.label}
+              </button>
+            ))}
+            <button className="seg-btn" onClick={() => draw.current?.clear()}>
+              Clear
+            </button>
+          </div>
           <span className="subtle chart-source">
             {bars.length > 0 ? `${bars.length} bars · ${barSource}` : barNote || 'loading…'}
           </span>
         </div>
         {bars.length > 0 ? (
-          <Chart bars={bars} indicators={indicators} height={indicators.includes('rsi14') ? 480 : 400} />
+          <Chart
+            bars={bars}
+            indicators={indicators}
+            height={indicators.includes('rsi14') ? 480 : 400}
+            onReady={handleChartReady}
+            symbols={[symbol]}
+          />
         ) : (
           <div className="chart-empty dim">{barNote || 'No bars for this timeframe.'}</div>
         )}

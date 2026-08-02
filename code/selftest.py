@@ -1045,11 +1045,26 @@ def _gesture_wheels():
     assert segs[2]["type"] == "wheel" and segs[2]["wheel"] == "tabs", segs[2]
     assert segs[4]["type"] == "tool" and segs[4]["tool"] == "search", segs[4]
     assert segs[6]["type"] == "wheel" and segs[6]["wheel"] == "tickers", segs[6]
-    # between them: home, news, SPY, settings — all four present
+    # between them: home, news, Charts, settings (v2: the SPY slot became the
+    # multi-chart page, per Kade's 2026-08-02 spec change)
     others = {s.get("route") or s.get("ticker") for s in (segs[1], segs[3], segs[5], segs[7])}
-    assert others == {"idle", "news", "SPY", "settings"}, others
+    assert others == {"idle", "news", "charts", "settings"}, others
     tabs_wheel = next(w for w in doc["wheels"] if w["id"] == "tabs")
     assert tabs_wheel.get("dynamic") == "tabs", "the tabs wheel must be dynamic"
+
+    # v2: the chart wheel family. Right-clicking ANY chart spawns 'chart';
+    # its dynamic companions build from the spawned-over chart's state.
+    assert doc["version"] == wheels.DOC_VERSION
+    chart = next(w for w in doc["wheels"] if w["id"] == "chart")
+    tools = {s.get("tool") for s in chart["segments"] if s["type"] == "chart"}
+    assert {"trend", "hline", "clear", "pointer"} <= tools, \
+        f"the chart wheel is missing drawing tools: {tools}"
+    navs = {s.get("wheel") for s in chart["segments"] if s["type"] == "wheel"}
+    assert {"chart-add", "chart-ind", "chart-tickers", "main"} <= navs, \
+        f"the chart wheel is missing its dynamic companions: {navs}"
+    for wid in ("chart-add", "chart-ind", "chart-tickers"):
+        dyn = next(w for w in doc["wheels"] if w["id"] == wid)
+        assert dyn.get("dynamic") == wid, f"{wid} must be dynamic"
     ai = next(w for w in doc["wheels"] if w["id"] == "ai")
     assert any(s["type"] == "placeholder" for s in ai["segments"]), \
         "the AI wheel is a placeholder and must say so"
@@ -1091,6 +1106,16 @@ def _gesture_wheels():
                        (wheels.DOC_KEY,))
             assert wheels.get(db, 1)["config"]["locked"] is None, \
                 "a corrupt wheels doc must fall back to defaults, not crash"
+            # A pre-versioned (v1) doc regenerates whole — never a half-mix
+            # of generations that validation would then reject forever.
+            old = wheels.default_doc()
+            old.pop("version")
+            db.execute("UPDATE user_settings SET value=? WHERE key=?",
+                       (json.dumps(old), wheels.DOC_KEY))
+            regen = wheels.get(db, 1)
+            assert regen["version"] == wheels.DOC_VERSION and \
+                any(w["id"] == "chart" for w in regen["wheels"]), \
+                "a v1 wheels doc must regenerate to the current defaults"
 
     # ---- geometry: ONE module, both sides import it -----------------------
     app_src = CODE / "app" / "src"
@@ -1142,6 +1167,89 @@ def _gesture_wheels():
     for src_name, src in (("WheelOverlay", overlay), ("WheelFace", face)):
         assert "setInterval" not in src, \
             f"{src_name} re-polls — wheel colors must not flash while open"
+
+
+@check("split view + chart context + picker: the v2 shell contracts hold")
+def _wheels_v2_shell():
+    app_src = CODE / "app" / "src"
+
+    # ---- split view: state, menu, divider, and the offset seam ------------
+    tabs_src = (app_src / "main" / "tabs.ts").read_text(encoding="utf-8")
+    for piece in ("'tabs:split'", "'tabs:unsplit'", "'split:drag'", "'tabmenu:open'"):
+        assert piece in tabs_src, f"split IPC missing {piece}"
+    assert "0.2" in tabs_src and "0.8" in tabs_src, \
+        "the divider ratio must clamp (a 0-width pane is unrecoverable by mouse)"
+    assert "buildFromTemplate" in tabs_src, "the tab context menu is gone"
+    # The RIGHT pane's x offset feeds wheel coordinate conversion — a wheel
+    # spawned over the right pane lands mid-window without it.
+    assert "splitOffsetX" in tabs_src and "return 0 // replaced" not in tabs_src, \
+        "splitOffsetX is still the stub — wheel coords over a right pane are wrong"
+    divider = (app_src / "renderer" / "src" / "modes" / "SplitDivider.tsx").read_text(
+        encoding="utf-8")
+    assert "setPointerCapture" in divider and "screenX" in divider, \
+        "the divider cannot track a drag beyond its own 8px width"
+    strip = (app_src / "renderer" / "src" / "components" / "TabStrip.tsx").read_text(
+        encoding="utf-8")
+    assert "tabMenu(" in strip and "split-mate" in strip, \
+        "the strip neither opens the tab menu nor marks split pairs"
+    # Right-clicking a TAB must never spawn the wheel (Kade's spec).
+    events = (app_src / "renderer" / "src" / "wheelEvents.ts").read_text(encoding="utf-8")
+    assert ".strip-tab" in events, "tab right-clicks leak into the gesture wheel"
+
+    # ---- chart context: every chart declares itself -----------------------
+    chart = (app_src / "renderer" / "src" / "components" / "Chart.tsx").read_text(
+        encoding="utf-8")
+    # Working charts declare the wheel context; COMPACT previews must not —
+    # a chart wheel over the search featured card offered eight tools that
+    # all silently did nothing (review 2026-08-02).
+    assert "data-wheel-context={compact ? undefined : 'chart'}" in chart, \
+        "chart context must be declared for working charts and NOT for previews"
+    wheel_src = (app_src / "main" / "wheel.ts").read_text(encoding="utf-8")
+    assert "'chart'" in wheel_src and "context" in wheel_src, \
+        "wheel.ts lost the chart-context spawn rule"
+    assert "chart:action" in wheel_src, "chart segments have no delivery channel"
+    draw = (app_src / "renderer" / "src" / "components" / "ChartDraw.ts").read_text(
+        encoding="utf-8")
+    assert "subscribeVisibleLogicalRangeChange" in draw, \
+        "drawings will not re-project on pan/zoom"
+    forbidden = [ln for ln in draw.splitlines()
+                 if "setInterval" in ln and not ln.strip().startswith(("//", "*"))]
+    assert not forbidden, f"the drawing engine polls: {forbidden[:1]}"
+    sym = (app_src / "renderer" / "src" / "pages" / "SymbolPage.tsx").read_text(
+        encoding="utf-8")
+    assert "onChartAction" in sym, "the symbol page ignores chart-wheel actions"
+    multi = (app_src / "renderer" / "src" / "pages" / "ChartsPage.tsx").read_text(
+        encoding="utf-8")
+    assert "multi_chart" in multi and "onChartAction" in multi, \
+        "the multi-chart page neither persists nor hears the wheel"
+    assert "normalize" in multi, "the % comparison mode is gone"
+
+    # ---- the picker redesign ----------------------------------------------
+    panel = (app_src / "renderer" / "src" / "components" / "GesturesPanel.tsx").read_text(
+        encoding="utf-8")
+    assert "searchCatalog" in panel, "the picker does not search the catalog"
+    assert "wheel-seg-row" not in panel, \
+        "the rejected row-per-segment editor is back"
+
+    # ---- adversarial-review regressions (2026-08-02, all confirmed live) --
+    # Lock kills the wheel: an auto-lock left a live overlay over the
+    # sign-in form, unclickable in hold mode.
+    assert "onLockChanged" in tabs_src and "onLockChanged" in wheel_src, \
+        "locking no longer despawns a live wheel"
+    # New views must not land above the overlay (invisible wedged wheel).
+    assert "attachedOverlay" in tabs_src, \
+        "reconcile no longer re-raises the wheel overlay above new views"
+    # Saves are sequenced and lock-preserving; deletes retarget references.
+    assert "saveSeq" in panel and "droppedWheelId" in panel, \
+        "picker saves race again / deleting a locked wheel wedges again"
+    # No-context dynamic chart wheels must not fire actions that lie.
+    assert "Right-click a chart" in wheel_src, \
+        "null-ctx chart wheels advertise state they do not know"
+    # Stale bars must never paint (wrong-timeframe candles under a 1D button).
+    assert "barsSeq" in sym, "SymbolPage bars race is back"
+    # The multi-chart drawing key must carry scale semantics.
+    assert "normalize ? '%' : '$'" in multi.replace('"', "'"), \
+        "drawings mix dollar and percent anchors in one bucket again"
 
 
 @check("frontend: sources present; typecheck when toolchain available")

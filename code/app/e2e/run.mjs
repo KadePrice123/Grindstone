@@ -487,24 +487,24 @@ try {
     JSON.stringify(clickState)
   )
 
-  // Left-clicking the SPY segment (SW, index 5) opens/focuses the SPY tab
-  // and the wheel closes.
+  // Left-clicking the Charts segment (SW, index 5 — v2 replaced the SPY
+  // ticker with the multi-chart page) navigates there and the wheel closes.
   await wheelUi.eval(
     `(document.querySelector('[data-seg="5"]')
         .dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`
   )
-  const afterTicker = await waitFor(
+  const afterCharts = await waitFor(
     async () => {
       const gone = await wheelUi.eval(`document.querySelector('.wheel-stage') === null`)
       if (!gone) return null
       const st = await chromeA.eval('window.grindstoneTabs.getState()')
       const active = st.tabs.find((t) => t.id === st.activeId)
-      return active && active.title === 'SPY' ? active : null
+      return active && active.title === 'Charts' ? active : null
     },
-    'the SPY segment to open the ticker and close the wheel',
+    'the Charts segment to open charts.gs and close the wheel',
     8000
   ).catch(() => null)
-  check(!!afterTicker, 'wheel: the SPY segment opens the ticker page and closes the wheel')
+  check(!!afterCharts, 'wheel: the Charts segment opens the multi-chart page and closes the wheel')
 
   // HOLD mode: press, drag due WEST (segment 6 = Tickers wheel nav),
   // release → switches wheel and STAYS OPEN in click mode (the spec's
@@ -594,6 +594,106 @@ try {
     `(document.querySelector('.wheel-stage')
         .dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`
   )
+  await sleep(250)
+
+  // ------------------------------------------------- chart-context wheel
+  // Right-clicking ANY chart spawns the CHART wheel; off-chart spawns the
+  // default. The ctx rides the same channel real input uses.
+  await spy.eval(
+    `(window.grindstone.wheelEvt('down', 420, 320,
+        {context: 'chart', symbols: ['SPY'], indicators: ['vol']}), 'ok')`
+  )
+  await sleep(350)
+  await spy.eval(`(window.grindstone.wheelEvt('up', 420, 320), 'ok')`)
+  const chartWheel = await waitFor(
+    async () => {
+      const id = await wheelUi.eval(
+        `document.querySelector('.wheel-face')?.dataset.wheel ?? null`
+      )
+      return id === 'chart' ? id : null
+    },
+    'the chart wheel to spawn over a chart',
+    8000
+  ).catch(() => null)
+  check(chartWheel === 'chart', 'wheel: right-clicking a chart spawns the chart wheel')
+
+  // Hold-drag EAST onto Indicators -> the dynamic chart-ind wheel, marked
+  // with the clicked chart's live state (vol was on).
+  await wheelUi.eval(
+    `(document.querySelector('.wheel-stage')
+        .dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`
+  )
+  await sleep(250)
+  await spy.eval(
+    `(window.grindstone.wheelEvt('down', 420, 320,
+        {context: 'chart', symbols: ['SPY'], indicators: ['vol']}), 'ok')`
+  )
+  await sleep(350)
+  for (const dx of [40, 90, 150]) {
+    await spy.eval(`(window.grindstone.wheelEvt('move', ${420 + dx}, 320), 'ok')`)
+  }
+  await spy.eval(`(window.grindstone.wheelEvt('up', ${420 + 170}, 320), 'ok')`)
+  const indWheel = await waitFor(
+    async () => {
+      const s = await wheelUi.eval(
+        `JSON.stringify({
+           id: document.querySelector('.wheel-face')?.dataset.wheel ?? null,
+           on: [...document.querySelectorAll('.wf-label')]
+                 .some(t => (t.textContent ?? '').includes('●'))
+         })`
+      )
+      const st = JSON.parse(s)
+      return st.id === 'chart-ind' && st.on ? st : null
+    },
+    'the dynamic indicator wheel with live on/off marks',
+    8000
+  ).catch(() => null)
+  check(!!indWheel, 'wheel: chart-ind builds from the clicked chart state', JSON.stringify(indWheel))
+  await wheelUi.eval(
+    `(document.querySelector('.wheel-stage')
+        .dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`
+  )
+
+  // ------------------------------------------------------------ split view
+  // Driven through the same IPC the native menu handlers call.
+  const stBefore = await chromeA.eval('window.grindstoneTabs.getState()')
+  const [tabA, tabB] = stBefore.tabs
+  await chromeA.eval(`(window.grindstoneTabs.splitWith(${tabA.id}, ${tabB.id}), 'ok')`)
+  const splitState = await waitFor(
+    async () => {
+      const s = await chromeA.eval('window.grindstoneTabs.getState()')
+      return s.split && s.split.aId === tabA.id && s.split.bId === tabB.id ? s : null
+    },
+    'the split to activate',
+    8000
+  ).catch(() => null)
+  check(!!splitState, 'split: two tabs pair side-by-side',
+    splitState ? `ratio=${splitState.split.ratio}` : '')
+  const mates = await chromeA.eval(`document.querySelectorAll('.strip-tab.split-mate').length`)
+  check(mates === 2, 'split: the strip marks both pair members', `marked=${mates}`)
+  await chromeA.eval(`(window.grindstoneTabs.closeSplit(), 'ok')`)
+  const unsplit = await waitFor(
+    async () => {
+      const s = await chromeA.eval('window.grindstoneTabs.getState()')
+      return s.split === null ? 'ok' : null
+    },
+    'the split to dissolve',
+    8000
+  ).catch(() => null)
+  check(unsplit === 'ok', 'split: close split restores a single pane')
+
+  // ------------------------------------------------------------- charts.gs
+  await chromeA.eval(typeAddress('charts.gs'))
+  const chartsPage = await waitFor(
+    async () => {
+      const s = await chromeA.eval('window.grindstoneTabs.getState()')
+      const t = s.tabs.find((x) => x.id === s.activeId)
+      return t && t.title === 'Charts' ? s.activeUrl : null
+    },
+    'charts.gs to open the multi-chart page',
+    8000
+  ).catch(() => null)
+  check(chartsPage === 'charts.gs', 'charts: charts.gs is a real addressable page', String(chartsPage))
 } catch (err) {
   console.log('FAIL  harness error —', err.message)
   failures += 1

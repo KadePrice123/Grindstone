@@ -47,6 +47,13 @@ SPEC: dict[str, dict[str, Any]] = {
         "label": "Theme",
         "help": "Applies to the whole app.",
     },
+    # Hidden state blobs: not rendered by the generic settings page (their
+    # owning UI edits them), but stored/validated through the same door.
+    "multi_chart": {
+        "kind": "json", "default": {"symbols": ["SPY"], "normalize": True,
+                                    "timeframe": "1Day", "hidden": []},
+        "label": "Multi-chart state", "help": "", "hidden": True,
+    },
 }
 
 
@@ -59,6 +66,11 @@ def _coerce(key: str, value: Any) -> Any:
         return max(spec["min"], min(spec["max"], v))
     if spec["kind"] == "choice":
         return value if value in spec["choices"] else spec["default"]
+    if spec["kind"] == "json":
+        # An object, bounded — this is UI state, not a data store.
+        if not isinstance(value, dict) or len(json.dumps(value)) > 8192:
+            return spec["default"]
+        return value
     return value
 
 

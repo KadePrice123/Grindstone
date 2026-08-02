@@ -61,9 +61,23 @@ const grindstone = {
     return () => ipcRenderer.removeListener('nav:route', listener)
   },
   /** Raw right-button events for the gesture wheel (chrome + content modes).
-   *  Browser tabs forward the same events from their own minimal preload. */
-  wheelEvt: (kind: 'down' | 'move' | 'up', x: number, y: number): void => {
-    ipcRenderer.send('wheel:evt', kind, x, y)
+   *  Browser tabs forward the same events from their own minimal preload.
+   *  ctx carries what was under the cursor (a chart and its state) so main
+   *  can pick the context wheel — chart charts, default everywhere else. */
+  wheelEvt: (
+    kind: 'down' | 'move' | 'up',
+    x: number,
+    y: number,
+    ctx?: { context: string; symbols?: string[]; indicators?: string[]; hidden?: string[] }
+  ): void => {
+    ipcRenderer.send('wheel:evt', kind, x, y, ctx ?? null)
+  },
+  /** Chart-wheel segments land here: the page that owns the chart the wheel
+   *  was spawned over receives {tool, symbol?}. */
+  onChartAction: (cb: (a: { tool: string; symbol?: string }) => void): (() => void) => {
+    const listener = (_e: unknown, a: { tool: string; symbol?: string }) => cb(a)
+    ipcRenderer.on('chart:action', listener)
+    return () => ipcRenderer.removeListener('chart:action', listener)
   },
 }
 
@@ -131,6 +145,8 @@ export interface StripState {
   activeUrl: string
   loading: boolean
   draggingId: number | null
+  /** Chrome-style split view: the paired tabs and the divider position. */
+  split: { aId: number; bId: number; ratio: number } | null
 }
 
 const grindstoneTabs = {
@@ -162,12 +178,27 @@ const grindstoneTabs = {
   minimize: (): void => ipcRenderer.send('win:minimize'),
   maximizeToggle: (): void => ipcRenderer.send('win:maximize'),
   closeWindow: (): void => ipcRenderer.send('win:close'),
+  /** Right-clicking a TAB opens the native tab menu (split etc.), never the
+   *  gesture wheel. Coordinates are window-relative for menu placement. */
+  tabMenu: (tabId: number, x: number, y: number): void =>
+    ipcRenderer.send('tabmenu:open', tabId, x, y),
+  /** Chrome-style split view (also the e2e's way to drive it directly). */
+  splitWith: (tabId: number, withTabId: number): void =>
+    ipcRenderer.send('tabs:split', tabId, withTabId),
+  closeSplit: (): void => ipcRenderer.send('tabs:unsplit'),
+}
+
+/** The split divider's own surface (mode=divider): live drag reports. */
+const grindstoneSplit = {
+  drag: (screenX: number): void => ipcRenderer.send('split:drag', screenX),
 }
 
 contextBridge.exposeInMainWorld('grindstone', grindstone)
 contextBridge.exposeInMainWorld('grindstoneTabs', grindstoneTabs)
 contextBridge.exposeInMainWorld('grindstoneWheel', grindstoneWheel)
+contextBridge.exposeInMainWorld('grindstoneSplit', grindstoneSplit)
 
 export type GrindstoneBridge = typeof grindstone
 export type GrindstoneTabsBridge = typeof grindstoneTabs
 export type GrindstoneWheelBridge = typeof grindstoneWheel
+export type GrindstoneSplitBridge = typeof grindstoneSplit

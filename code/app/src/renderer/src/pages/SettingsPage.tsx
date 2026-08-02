@@ -9,7 +9,7 @@ import { SettingsIcon } from '../components/icons'
 
 interface SettingSpec {
   key: string
-  kind: 'bool' | 'float' | 'choice'
+  kind: 'bool' | 'float' | 'choice' | 'json'
   label: string
   help: string
   default: unknown
@@ -17,6 +17,8 @@ interface SettingSpec {
   max?: number
   step?: number
   choices?: string[]
+  /** State blobs owned by other UIs (multi-chart layout) — not rendered here. */
+  hidden?: boolean
 }
 
 interface SettingsPayload {
@@ -74,7 +76,7 @@ export function SettingsPage() {
       ) : (
         <div className="card">
           <h2>Search</h2>
-          {data.schema.map((s) => {
+          {data.schema.filter((s) => !s.hidden).map((s) => {
             const value = data.values[s.key]
             return (
               <div className="setting-row" key={s.key}>

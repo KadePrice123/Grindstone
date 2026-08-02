@@ -12,7 +12,7 @@
  * (other window). On release: over a strip -> adopt into that window at the
  * hovered index; outside every strip -> tear off into a new window there.
  */
-import { BaseWindow, WebContentsView, ipcMain, session, shell } from 'electron'
+import { BaseWindow, Menu, WebContentsView, ipcMain, session, shell } from 'electron'
 import path from 'node:path'
 import { log } from './log'
 
@@ -51,6 +51,8 @@ function browsingSession(): Electron.Session {
 export const TABBAR_H = 40
 /** Extra chrome height when the active tab is a web page: its address bar. */
 export const NAVBAR_H = 34
+/** Split-view divider width. Also baked into splitOffsetX — keep them one. */
+const DIVIDER_W = 8
 const MIN_W = 900
 const MIN_H = 600
 const DARK_BG = '#101214'
@@ -63,6 +65,12 @@ export interface TabInfo {
   kind: 'app' | 'browser'
   url?: string
 }
+
+/** Platform page names that are NOT tickers, mirrored from the renderer's
+ *  urls.ts PAGES — a data.gs tab must not offer "add DATA to chart". */
+const PAGE_NAMES = new Set([
+  'home', 'accounts', 'data', 'settings', 'search', 'article', 'news', 'charts',
+])
 
 /** What the gesture wheel sees of a tab. */
 export interface WheelTabInfo {
@@ -91,6 +99,13 @@ interface Win {
   chrome: WebContentsView
   tabs: Tab[]
   activeId: number | null
+  /** Chrome-style split view: aId LEFT, bId RIGHT. Persists while a tab
+   *  outside the pair is active (the pair hides); dies with either member. */
+  split: { aId: number; bId: number; ratio: number } | null
+  /** The one divider view per window, created lazily on first split and
+   *  attached only while the split is visible. Closed in onWindowClosed —
+   *  Electron does not destroy a closed window's views. */
+  divider: WebContentsView | null
 }
 
 type StripState = {
@@ -104,6 +119,7 @@ type StripState = {
   activeUrl: string
   loading: boolean
   draggingId: number | null
+  split: { aId: number; bId: number; ratio: number } | null
 }
 
 export class TabManager {
@@ -181,7 +197,10 @@ export class TabManager {
     const chrome = this.makeView({ mode: this.locked ? 'auth' : 'chrome' })
     win.contentView.addChildView(chrome)
 
-    const w: Win = { id: this.nextWinId++, win, chrome, tabs: [], activeId: null }
+    const w: Win = {
+      id: this.nextWinId++, win, chrome, tabs: [], activeId: null,
+      split: null, divider: null,
+    }
     this.wins.push(w)
 
     const relayout = () => this.layout(w)
@@ -208,10 +227,23 @@ export class TabManager {
     for (const t of w.tabs) t.view.webContents.close()
     w.tabs = []
     w.chrome.webContents.close()
+    if (w.divider) w.divider.webContents.close()
     this.wins = this.wins.filter((x) => x !== w)
     log('window closed', w.id, 'remaining', this.wins.length)
     this.onWindowGone?.(w.id)
     if (this.wins.length === 0 && !this.quitting) this.onAllClosed?.()
+  }
+
+  /** The split pair resolved to live tabs, IF it is currently shown — i.e.
+   *  the active tab is a member. A split whose pair is hidden behind another
+   *  active tab still exists but does not lay out. */
+  private visibleSplit(w: Win): { a: Tab; b: Tab; ratio: number } | null {
+    if (!w.split) return null
+    const a = w.tabs.find((t) => t.id === w.split!.aId)
+    const b = w.tabs.find((t) => t.id === w.split!.bId)
+    if (!a || !b) return null
+    if (w.activeId !== a.id && w.activeId !== b.id) return null
+    return { a, b, ratio: w.split.ratio }
   }
 
   private layout(w: Win) {
@@ -223,9 +255,71 @@ export class TabManager {
     // The address/search bar is ALWAYS present, like a browser's — it is how
     // you reach both the web and platform pages from anywhere.
     const chromeH = TABBAR_H + NAVBAR_H
-    const active = w.tabs.find((t) => t.id === w.activeId)
     w.chrome.setBounds({ x: 0, y: 0, width, height: chromeH })
-    if (active) active.view.setBounds({ x: 0, y: chromeH, width, height: height - chromeH })
+    const contentH = height - chromeH
+    const split = this.visibleSplit(w)
+    if (split) {
+      const leftW = Math.round(split.ratio * width - DIVIDER_W / 2)
+      split.a.view.setBounds({ x: 0, y: chromeH, width: leftW, height: contentH })
+      w.divider?.setBounds({ x: leftW, y: chromeH, width: DIVIDER_W, height: contentH })
+      split.b.view.setBounds({
+        x: leftW + DIVIDER_W, y: chromeH,
+        width: width - leftW - DIVIDER_W, height: contentH,
+      })
+      return
+    }
+    const active = w.tabs.find((t) => t.id === w.activeId)
+    if (active) active.view.setBounds({ x: 0, y: chromeH, width, height: contentH })
+  }
+
+  /**
+   * Make EXACTLY the views this window should show its children: the active
+   * tab alone, or the split pair + divider when the split is visible. Only
+   * tab views and the divider are touched — never the chrome, never the
+   * wheel overlay that may sit attached above everything. addChildView on an
+   * existing child RE-RAISES it (it would cover that overlay), so views
+   * already in place are left alone.
+   */
+  private reconcile(w: Win) {
+    if (w.win.isDestroyed()) return
+    const wanted = new Set<WebContentsView>()
+    const split = this.visibleSplit(w)
+    if (split) {
+      wanted.add(split.a.view)
+      wanted.add(split.b.view)
+      wanted.add(this.ensureDivider(w))
+    } else {
+      const active = w.tabs.find((t) => t.id === w.activeId)
+      if (active) wanted.add(active.view)
+    }
+    const owned: WebContentsView[] = w.tabs.map((t) => t.view)
+    if (w.divider) owned.push(w.divider)
+    for (const v of owned) {
+      if (!wanted.has(v) && w.win.contentView.children.includes(v)) {
+        w.win.contentView.removeChildView(v)
+      }
+    }
+    for (const v of wanted) {
+      if (!w.win.contentView.children.includes(v)) w.win.contentView.addChildView(v)
+    }
+    // REVIEW 2026-08-02: a NEWLY attached view lands after the wheel overlay
+    // and occludes it — the not-already-a-child guard above only protects
+    // existing children. A popunder while a wheel was up left an invisible
+    // live wheel eating right-clicks. If the overlay is attached here, it
+    // must end up last again (re-adding an existing child re-raises it).
+    if (this.attachedOverlay?.winId === w.id
+        && w.win.contentView.children.includes(this.attachedOverlay.view)) {
+      w.win.contentView.addChildView(this.attachedOverlay.view)
+    }
+    this.layout(w)
+  }
+
+  /** One divider view per window: same bundle, ?mode=divider, same preload
+   *  and navigation hardening as every view we own (makeView). */
+  private ensureDivider(w: Win): WebContentsView {
+    if (w.divider && !w.divider.webContents.isDestroyed()) return w.divider
+    w.divider = this.makeView({ mode: 'divider' })
+    return w.divider
   }
 
   // ----------------------------------------------------------------- tabs
@@ -332,15 +426,8 @@ export class TabManager {
   activate(w: Win, tabId: number) {
     const tab = w.tabs.find((t) => t.id === tabId)
     if (!tab) return
-    const prev = w.tabs.find((t) => t.id === w.activeId)
-    if (prev && prev !== tab) w.win.contentView.removeChildView(prev.view)
-    if (w.activeId !== tab.id) {
-      w.win.contentView.addChildView(tab.view)
-      w.activeId = tab.id
-    } else if (!w.win.contentView.children.includes(tab.view)) {
-      w.win.contentView.addChildView(tab.view)
-    }
-    this.layout(w)
+    w.activeId = tab.id
+    this.reconcile(w)
     this.pushStrip(w)
   }
 
@@ -348,11 +435,19 @@ export class TabManager {
     const idx = w.tabs.findIndex((t) => t.id === tabId)
     if (idx < 0) return
     const [tab] = w.tabs.splice(idx, 1)
-    if (w.activeId === tab.id) {
+    // A split dies with either member. The tab may be attached even when NOT
+    // active (the hidden member of a visible split), so detach by membership,
+    // not by activeId.
+    if (w.split && (w.split.aId === tab.id || w.split.bId === tab.id)) w.split = null
+    if (w.win.contentView.children.includes(tab.view)) {
       w.win.contentView.removeChildView(tab.view)
+    }
+    if (w.activeId === tab.id) {
       const next = w.tabs[Math.min(idx, w.tabs.length - 1)]
       w.activeId = null
       if (next) this.activate(w, next.id)
+    } else {
+      this.reconcile(w) // the split may have dissolved: survivor goes full-width
     }
     this.forgetTab(tab.id)
     tab.view.webContents.close()
@@ -366,17 +461,42 @@ export class TabManager {
     const idx = from.tabs.findIndex((t) => t.id === tabId)
     if (idx < 0) return
     const [tab] = from.tabs.splice(idx, 1)
-    if (from.activeId === tab.id) {
+    // Adoption breaks a split the same way closing does; same membership rule.
+    if (from.split && (from.split.aId === tab.id || from.split.bId === tab.id)) {
+      from.split = null
+    }
+    if (from.win.contentView.children.includes(tab.view)) {
       from.win.contentView.removeChildView(tab.view)
+    }
+    if (from.activeId === tab.id) {
       from.activeId = null
       const next = from.tabs[Math.min(idx, from.tabs.length - 1)]
       if (next) this.activate(from, next.id)
+    } else {
+      this.reconcile(from)
     }
     to.tabs.splice(Math.max(0, Math.min(index, to.tabs.length)), 0, tab)
     this.activate(to, tab.id)
     if (from.tabs.length === 0) from.win.close()
     else this.pushStrip(from)
     this.pushStrip(to)
+  }
+
+  /** Chrome-style split: tabId goes LEFT, withTabId RIGHT, divider at 50%. */
+  setSplit(w: Win, tabId: number, withTabId: number) {
+    if (this.locked || tabId === withTabId) return
+    const a = w.tabs.find((t) => t.id === tabId)
+    const b = w.tabs.find((t) => t.id === withTabId)
+    if (!a || !b) return
+    w.split = { aId: a.id, bId: b.id, ratio: 0.5 }
+    this.activate(w, a.id) // reconciles both panes in and pushes the strip
+  }
+
+  unsplit(w: Win) {
+    if (!w.split) return
+    w.split = null
+    this.reconcile(w) // detaches the divider and the non-active pane
+    this.pushStrip(w)
   }
 
   detachToNewWindow(from: Win, tabId: number, sx: number, sy: number) {
@@ -397,10 +517,17 @@ export class TabManager {
     this.pushStrip(w)
   }
 
+  /** Fired on every lock-state flip. REVIEW 2026-08-02: an auto-lock (401,
+   *  sidecar crash) used to leave a live wheel overlay ON TOP of the sign-in
+   *  form — in hold mode the form was unclickable until the user stumbled on
+   *  click-then-Escape. The WheelManager subscribes and despawns. */
+  onLockChanged: ((locked: boolean) => void) | null = null
+
   // ------------------------------------------------------------- auth mode
   setLocked(locked: boolean) {
     if (this.locked === locked) return
     this.locked = locked
+    this.onLockChanged?.(locked)
     if (locked) {
       // Collapse to one lock window; tabs die (their sessions are gone).
       for (const w of [...this.wins.slice(1)]) w.win.close()
@@ -412,6 +539,15 @@ export class TabManager {
       }
       w.tabs = []
       w.activeId = null
+      w.split = null
+      // The divider dies with the tabs it sat between; recreated on demand.
+      if (w.divider) {
+        if (w.win.contentView.children.includes(w.divider)) {
+          w.win.contentView.removeChildView(w.divider)
+        }
+        w.divider.webContents.close()
+        w.divider = null
+      }
       this.rendererUrl({ mode: 'auth' }).load(w.chrome.webContents)
       this.layout(w)
     } else {
@@ -450,6 +586,14 @@ export class TabManager {
         : '',
       loading: active?.kind === 'browser' ? active.view.webContents.isLoading() : false,
       draggingId: this.drag?.tabId ?? null,
+      // A split survives while hidden, but never report a pair with a dead
+      // member (dissolve paths clear it; this is the belt to their braces).
+      split:
+        w.split &&
+        w.tabs.some((t) => t.id === w.split!.aId) &&
+        w.tabs.some((t) => t.id === w.split!.bId)
+          ? { ...w.split }
+          : null,
     }
   }
 
@@ -644,6 +788,89 @@ export class TabManager {
       // same-window drop: reorder already happened live
       for (const w of this.wins) this.pushStrip(w) // clear the lifted state
     })
+
+    // ------------------------------------------------- split view + tab menu
+    ipcMain.on('tabs:split', (e, tabId: number, withTabId: number) => {
+      const w = this.winFromSender(e.sender)
+      if (w && typeof tabId === 'number' && typeof withTabId === 'number') {
+        this.setSplit(w, tabId, withTabId)
+      }
+    })
+    ipcMain.on('tabs:unsplit', (e) => {
+      const w = this.winFromSender(e.sender)
+      if (w) this.unsplit(w)
+    })
+    // The divider reports raw screenX — its own client space is DIVIDER_W px
+    // wide, useless for a ratio — and main owns the conversion against the
+    // window's content bounds. Event-driven only: one message per real
+    // pointermove, nothing polls.
+    ipcMain.on('split:drag', (e, screenX: number) => {
+      const w = this.wins.find((x) => x.divider?.webContents.id === e.sender.id)
+      if (!w || !w.split || typeof screenX !== 'number') return
+      const b = w.win.getContentBounds()
+      if (b.width <= 0) return
+      const ratio = Math.max(0.2, Math.min(0.8, (screenX - b.x) / b.width))
+      if (ratio === w.split.ratio) return
+      w.split.ratio = ratio
+      this.layout(w) // bounds only — the children are already correct
+      this.pushStrip(w)
+    })
+    // Right-clicking a TAB gets the native menu, never the gesture wheel
+    // (wheelEvents.ts skips .strip-tab targets). x/y arrive as chrome-view
+    // client coords, which ARE window coords — the chrome sits at (0,0).
+    ipcMain.on('tabmenu:open', (e, tabId: number, x: number, y: number) => {
+      const w = this.winFromSender(e.sender)
+      if (!w || this.locked) return
+      const tab = w.tabs.find((t) => t.id === tabId)
+      if (!tab) return
+      // Menu clicks fire after popup returns; the window can die in between.
+      const alive = () => this.wins.includes(w) && !w.win.isDestroyed()
+      const others = w.tabs.filter((t) => t.id !== tabId)
+      const template: Electron.MenuItemConstructorOptions[] = []
+      if (others.length === 0) {
+        template.push({ label: 'Split with…', enabled: false })
+      } else {
+        for (const o of others) {
+          template.push({
+            label: `Split with ${o.title.slice(0, 40)}`,
+            click: () => { if (alive()) this.setSplit(w, tabId, o.id) },
+          })
+        }
+      }
+      if (w.split) {
+        template.push({ label: 'Close split', click: () => { if (alive()) this.unsplit(w) } })
+      }
+      template.push({ type: 'separator' })
+      template.push({ label: 'New tab', click: () => { if (alive()) this.newTab(w, 'idle') } })
+      template.push({ type: 'separator' })
+      template.push({ label: 'Close tab', click: () => { if (alive()) this.closeTab(w, tabId) } })
+      template.push({
+        label: 'Close other tabs',
+        enabled: others.length > 0,
+        click: () => {
+          if (!alive()) return
+          for (const o of others) this.closeTab(w, o.id)
+        },
+      })
+      template.push({
+        label: 'Move to new window',
+        // REVIEW 2026-08-02: on a single-tab window, detachToNewWindow's
+        // one-tab branch (drag-parity) just MOVES the window — from a menu
+        // that reads as a teleport bug. Chrome disables the item; so do we.
+        enabled: w.tabs.length > 1,
+        click: () => {
+          if (!alive() || w.tabs.length <= 1) return
+          const [px, py] = w.win.getPosition()
+          this.detachToNewWindow(w, tabId, px + 80, py + 80)
+        },
+      })
+      // BaseWindow is accepted by popup in Electron 43.
+      Menu.buildFromTemplate(template).popup({
+        window: w.win,
+        x: Math.round(x),
+        y: Math.round(y),
+      })
+    })
   }
 
   // ------------------------------------------------- gesture-wheel surface
@@ -653,17 +880,55 @@ export class TabManager {
   }
 
   /** Resolve any view's webContents to its window and view offset, so client
-   *  coordinates can become window coordinates. Null for unknown senders. */
+   *  coordinates can become window coordinates. Null for unknown senders.
+   *  For tab views, also WHICH tab — the wheel targets chart actions at the
+   *  view it was spawned over, not whatever is active by the time they fire.
+   *  NOTE: offsets assume the sender spans the window's content area; in a
+   *  split, the RIGHT pane's x offset is added by the caller from split
+   *  state (splitOffsetX). */
   resolveSender(wc: Electron.WebContents):
-    | { winId: number; offsetX: number; offsetY: number }
+    | { winId: number; offsetX: number; offsetY: number; tabId: number | null }
     | null {
     const asChrome = this.wins.find((w) => w.chrome.webContents.id === wc.id)
-    if (asChrome) return { winId: asChrome.id, offsetX: 0, offsetY: 0 }
+    if (asChrome) return { winId: asChrome.id, offsetX: 0, offsetY: 0, tabId: null }
     const asTab = this.winFromContent(wc)
     if (asTab) {
-      return { winId: asTab.id, offsetX: 0, offsetY: this.locked ? 0 : TABBAR_H + NAVBAR_H }
+      const tab = asTab.tabs.find((t) => t.view.webContents.id === wc.id)
+      return {
+        winId: asTab.id,
+        offsetX: this.splitOffsetX(asTab.id, tab?.id ?? null),
+        offsetY: this.locked ? 0 : TABBAR_H + NAVBAR_H,
+        tabId: tab?.id ?? null,
+      }
     }
     return null
+  }
+
+  /** The x offset of this tab's view within its window: 0 unless the tab is
+   *  the RIGHT pane of a visible split. Mirrors layout()'s math exactly —
+   *  right pane x = round(ratio*W - DIV/2) + DIV — so the wheel's converted
+   *  coordinates land on the same pixel the pane actually starts at. */
+  splitOffsetX(winId: number, tabId: number | null): number {
+    if (tabId === null) return 0
+    const w = this.wins.find((x) => x.id === winId)
+    if (!w || w.win.isDestroyed()) return 0
+    const split = this.visibleSplit(w)
+    if (!split || split.b.id !== tabId) return 0
+    const b = w.win.getContentBounds()
+    return Math.round(split.ratio * b.width - DIVIDER_W / 2) + DIVIDER_W
+  }
+
+  /** Open app tabs showing a plain ticker page, as {symbol, tabId} — the
+   *  chart wheel's "add an open symbol to this chart" raw material. */
+  symbolTabs(): { symbol: string; tabId: number }[] {
+    const out: { symbol: string; tabId: number }[] = []
+    for (const t of this.allTabs()) {
+      const m = t.kind === 'app' && t.address ? /^([a-z0-9.]{1,8})\.gs$/.exec(t.address) : null
+      if (m && !PAGE_NAMES.has(m[1])) {
+        out.push({ symbol: m[1].toUpperCase(), tabId: t.id })
+      }
+    }
+    return out
   }
 
   windowContentSize(winId: number): { width: number; height: number } | null {
@@ -678,6 +943,10 @@ export class TabManager {
     return w && !w.win.isDestroyed() ? w.win : null
   }
 
+  /** The wheel overlay currently attached, if any — reconcile() re-raises it
+   *  above newly attached views (a new child otherwise lands on top of it). */
+  private attachedOverlay: { winId: number; view: WebContentsView } | null = null
+
   /** Attach a view above everything in this window (the wheel overlay). */
   attachOverlay(winId: number, view: WebContentsView): boolean {
     const w = this.wins.find((x) => x.id === winId)
@@ -685,12 +954,14 @@ export class TabManager {
     const b = w.win.getContentBounds()
     view.setBounds({ x: 0, y: 0, width: b.width, height: b.height })
     w.win.contentView.addChildView(view) // last child renders topmost
+    this.attachedOverlay = { winId, view }
     return true
   }
 
   detachOverlay(winId: number, view: WebContentsView): void {
     const w = this.wins.find((x) => x.id === winId)
     if (w && !w.win.isDestroyed()) w.win.contentView.removeChildView(view)
+    if (this.attachedOverlay?.view === view) this.attachedOverlay = null
   }
 
   /** Every open tab across every window — the Tabs wheel's raw material. */
