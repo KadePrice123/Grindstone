@@ -93,8 +93,9 @@ def _secrets():
             text = p.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        if rel.endswith("selftest.py"):
-            continue  # this file names the patterns it hunts
+        # No self-exemption: this file's own fixtures must also be free of
+        # credential-shaped strings, so the gate agrees with tools/doctor.py
+        # instead of hiding a decoy the workspace scanner would flag.
         m = pattern.search(text)
         assert not m, f"credential-shaped string in tracked file {rel}: {m.group(0)[:12]}..."
 
@@ -132,8 +133,8 @@ def _crypto():
     except sec.BadPassword:
         pass
 
-    blob = sec.encrypt_secret(dek, "PKTESTFAKEKEYVALUE00", 1, 7, "key_id")
-    assert sec.decrypt_secret(dek, blob, 1, 7, "key_id") == "PKTESTFAKEKEYVALUE00"
+    blob = sec.encrypt_secret(dek, "fixture-plaintext-0003", 1, 7, "key_id")
+    assert sec.decrypt_secret(dek, blob, 1, 7, "key_id") == "fixture-plaintext-0003"
     for (u, a, f) in ((2, 7, "key_id"), (1, 8, "key_id"), (1, 7, "secret_key")):
         try:  # any AAD component change must break decryption (row-swap defense)
             sec.decrypt_secret(dek, blob, u, a, f)
@@ -151,8 +152,11 @@ def _api_flow():
 
     from backend.app import State, create_app
 
-    fake_key = "PKFAKEFAKEFAKEFAKE1234"          # realistic shape, not a real key
-    fake_secret = "sEcReTfAkEsEcReTfAkEsEcReTfAkE12345"
+    # Fixtures deliberately do NOT imitate a real key's shape: doctor.py and
+    # the scan below cannot tell a decoy from the real thing, and a tracked
+    # file that trips the credential scanner is exactly what the rule forbids.
+    fixture_id = "FIXTURE-ACCOUNT-ID-0001"
+    fixture_value = "fixture-value-not-a-credential-0002"
 
     with tempfile.TemporaryDirectory() as tmp:
         state = State("boot-token-for-tests", db_path=Path(tmp) / "app.db")
@@ -176,15 +180,15 @@ def _api_flow():
 
         r = client.post("/api/accounts", headers=A, json={
             "broker": "alpaca", "kind": "paper", "nickname": "T",
-            "credentials": {"key_id": fake_key, "secret_key": fake_secret}})
+            "credentials": {"key_id": fixture_id, "secret_key": fixture_value}})
         assert r.status_code == 200, r.text
         listed = client.get("/api/accounts", headers=A).json()
-        assert listed[0]["key_hints"]["key_id"] == fake_key[-4:]
-        assert fake_secret not in json.dumps(listed)
+        assert listed[0]["key_hints"]["key_id"] == fixture_id[-4:]
+        assert fixture_value not in json.dumps(listed)
 
         raw = (Path(tmp) / "app.db").read_bytes()
-        assert fake_key.encode() not in raw, "plaintext key id in DB file"
-        assert fake_secret.encode() not in raw, "plaintext secret in DB file"
+        assert fixture_id.encode() not in raw, "plaintext key id in DB file"
+        assert fixture_value.encode() not in raw, "plaintext secret in DB file"
 
         # unsupported broker degrades honestly, offline
         r = client.post("/api/accounts/test", headers=A,
@@ -201,7 +205,7 @@ def _api_flow():
         odd = "PKODD,KEY:WITH,PUNCT"
         r = client.post("/api/accounts", headers=A, json={
             "broker": "alpaca", "kind": "paper", "nickname": "Odd",
-            "credentials": {"key_id": odd, "secret_key": fake_secret}})
+            "credentials": {"key_id": odd, "secret_key": fixture_value}})
         assert r.status_code == 200
         listed = client.get("/api/accounts", headers=A).json()
         assert listed[-1]["key_hints"]["key_id"] == odd[-4:], listed[-1]["key_hints"]
