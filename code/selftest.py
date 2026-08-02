@@ -669,6 +669,50 @@ def _no_idle_animation():
                 )
 
 
+@check("news reader: content requested, stubs filtered, html rendered, cached")
+def _news_reader():
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from backend import newsstore
+    from backend.marketdb import connect_market
+    from backend.providers import reader
+
+    # REGRESSION (2026-08-02): news opened as empty publisher pages because
+    # the fetch asked for include_content=false. Measured: 44/50 articles
+    # carry a real body when you ask, and exclude_contentless removes the
+    # headline-only stubs.
+    src = (CODE / "backend" / "brokers" / "alpaca_data.py").read_text(encoding="utf-8")
+    assert '"include_content": "true"' in src, \
+        "news is fetched without content — articles will open empty"
+    assert "exclude_contentless" in src
+
+    # HTML -> readable text, without trusting the markup.
+    text = reader.html_to_text(
+        "<p>First para with <b>bold</b> &amp; entity.</p>"
+        "<script>alert(1)</script><p>Second para.</p>")
+    assert "alert(1)" not in text, "script contents must not survive into the reader"
+    assert "First para with bold & entity." in text
+    assert "\n\n" in text and "Second para." in text
+    assert reader.html_to_text("") == ""
+
+    # Content must round-trip, and a later empty body must never erase it.
+    with tempfile.TemporaryDirectory() as tmp:
+        con = connect_market(Path(tmp) / "m.db")
+        item = {"id": 1, "headline": "H", "summary": "s", "source": "bz",
+                "url": "https://x/1", "symbols": ["SPY"],
+                "created_at": "2026-08-01T00:00:00Z",
+                "updated_at": "2026-08-01T00:00:00Z", "content": "<p>body text</p>"}
+        newsstore.upsert(con, [item])
+        assert newsstore.get(con, 1)["content"] == "<p>body text</p>"
+        newsstore.upsert(con, [{**item, "content": ""}])
+        assert newsstore.get(con, 1)["content"] == "<p>body text</p>", \
+            "an empty refresh erased a stored article body"
+        newsstore.set_content(con, 1, "extracted text")
+        assert newsstore.get(con, 1)["content"] == "extracted text"
+        con.close()
+
+
 @check("web search: pinned backend, empty-vs-failure, boost reorders, settings")
 def _websearch_and_settings():
     import tempfile

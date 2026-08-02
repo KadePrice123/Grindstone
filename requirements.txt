@@ -7,3 +7,4 @@ RapidFuzz==3.14.5
 yfinance>=1.5.2,<2.0
 curl_cffi==0.16.0
 ddgs==9.14.4
+trafilatura>=2.2,<3.0

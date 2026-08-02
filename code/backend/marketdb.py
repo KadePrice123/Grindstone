@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS news (
     url        TEXT NOT NULL DEFAULT '',
     symbols    TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    content    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_news_created ON news(created_at DESC);
 CREATE VIRTUAL TABLE IF NOT EXISTS news_fts USING fts5(
@@ -80,7 +81,14 @@ def market_path() -> Path:
     return data_dir() / "market.db"
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Additive migrations, applied in order for databases created before the
+# current SCHEMA_VERSION. Keep them idempotent-safe: the guard is
+# user_version, not try/except.
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    2: ("ALTER TABLE news ADD COLUMN content TEXT NOT NULL DEFAULT ''",),
+}
 
 
 def connect_market(path: Path | None = None) -> sqlite3.Connection:
@@ -101,7 +109,16 @@ def connect_market(path: Path | None = None) -> sqlite3.Connection:
     con.execute("PRAGMA synchronous=NORMAL")
     # DDL on every connect also takes write locks; run it once per schema
     # version instead of on every request.
-    if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-        con.executescript(_SCHEMA)
+    have = con.execute("PRAGMA user_version").fetchone()[0]
+    if have != SCHEMA_VERSION:
+        con.executescript(_SCHEMA)  # creates anything missing
+        for version in sorted(_MIGRATIONS):
+            if have < version:
+                for stmt in _MIGRATIONS[version]:
+                    try:
+                        con.execute(stmt)
+                    except sqlite3.OperationalError:
+                        pass  # column already present on a fresh _SCHEMA build
         con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        con.commit()
     return con

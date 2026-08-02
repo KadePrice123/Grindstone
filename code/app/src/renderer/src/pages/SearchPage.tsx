@@ -81,8 +81,11 @@ export function SearchPage({
 
   const open = (r: SearchResult) => {
     if (r.type === 'symbol' && r.symbol) onNavigate({ name: 'symbol', symbol: r.symbol })
-    else if (r.url) window.grindstone.openUrl(r.url) // news + web -> in-app browser tab
-    else if (r.type === 'page') {
+    else if (r.type === 'news' && typeof r.id === 'number') {
+      onNavigate({ name: 'article', id: r.id }) // reader view first
+    } else if (r.url) {
+      onNavigate({ name: 'article', url: r.url })
+    } else if (r.type === 'page') {
       if (r.page === 'accounts' || r.page === 'data' || r.page === 'settings') {
         onNavigate({ name: r.page })
       }

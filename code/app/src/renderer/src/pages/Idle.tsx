@@ -26,8 +26,10 @@ export function Idle({
   const openResult = (r: SearchResult) => {
     if ((r.type === 'symbol' || r.type === 'action') && r.symbol) {
       onNavigate({ name: 'symbol', symbol: r.symbol })
-    } else if (r.type === 'news' && r.url) {
-      window.grindstone.openUrl(r.url) // reads in-app, not in the OS browser
+    } else if (r.type === 'news' && typeof r.id === 'number') {
+      onNavigate({ name: 'article', id: r.id }) // reader view, not the ad-laden page
+    } else if ((r.type === 'web' || r.type === 'web-news') && r.url) {
+      onNavigate({ name: 'article', url: r.url })
     } else if (r.type === 'page') {
       if (r.page === 'accounts') onNavigate({ name: 'accounts' })
       else if (r.page === 'data') onNavigate({ name: 'data' })

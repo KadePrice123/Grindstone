@@ -31,7 +31,7 @@ from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
 from . import settings as settings_mod
 from . import universe as universe_mod
-from .providers import websearch
+from .providers import reader, websearch
 from .logs import LOG
 from .brokers import base as brokers_base
 from .brokers.alpaca import PAPER_URL, AlpacaAdapter
@@ -523,6 +523,44 @@ def create_app(state: State) -> FastAPI:
         con = state.market()
         try:
             return newsstore.latest(con, symbols=syms, limit=min(limit, 100))
+        finally:
+            con.close()
+
+    @app.get("/api/article")
+    def article(id: int | None = None, url: str = "",
+                s=Depends(current_session)) -> dict[str, Any]:
+        """Readable article text. Feed body first (it is already local and
+        exact), page extraction second, and an honest 'read it on the site'
+        when neither works — never a blank page."""
+        con = state.market()
+        try:
+            item = newsstore.get(con, id) if id is not None else None
+            if item is None and not url:
+                raise HTTPException(404, "no such article")
+
+            target = url or (item or {}).get("url", "")
+            body = reader.html_to_text((item or {}).get("content", ""))
+
+            if len(body) < 400 and target:
+                got = reader.extract(target)
+                if got and len(got["text"]) > len(body):
+                    body = got["text"]
+                    if item is not None:
+                        # Cache it: the next read is instant and offline.
+                        newsstore.set_content(con, item["id"], body)
+
+            return {
+                "id": (item or {}).get("id"),
+                "headline": (item or {}).get("headline") or "",
+                "source": (item or {}).get("source") or "",
+                "symbols": (item or {}).get("symbols") or [],
+                "created_at": (item or {}).get("created_at") or "",
+                "url": target,
+                "text": body,
+                "readable": len(body) >= 400,
+                "reason": "" if len(body) >= 400 else
+                          "This item has no article body — open the original to read it.",
+            }
         finally:
             con.close()
 

@@ -48,6 +48,10 @@ def parse_news_item(n: dict[str, Any]) -> dict[str, Any]:
         "symbols": [s for s in (n.get("symbols") or []) if isinstance(s, str)],
         "created_at": n.get("created_at") or "",
         "updated_at": n.get("updated_at") or n.get("created_at") or "",
+        # HTML body when the feed carries one. Measured: ~44/50 articles do;
+        # the rest are stubs (trading halts, rating one-liners) and get
+        # extracted from their page on demand instead.
+        "content": n.get("content") or "",
     }
 
 
@@ -189,10 +193,15 @@ class AlpacaData:
         yield parse_assets(j)
 
     def news(self, symbols: list[str] | None = None, limit: int = 50,
-             start: str | None = None, page_token: str | None = None) -> tuple[list[dict], str | None]:
+             start: str | None = None, page_token: str | None = None,
+             contentless: bool = False) -> tuple[list[dict], str | None]:
+        # include_content=true is the whole point of a news reader; asking for
+        # false is why articles opened empty. exclude_contentless drops the
+        # headline-only stubs (verified: 50/50 keepers when enabled).
         params: dict[str, Any] = {
-            "limit": min(limit, 50), "include_content": "false",
-            "exclude_contentless": "false", "sort": "desc",
+            "limit": min(limit, 50), "include_content": "true",
+            "exclude_contentless": "false" if contentless else "true",
+            "sort": "desc",
         }
         if symbols:
             params["symbols"] = ",".join(symbols)

@@ -30,7 +30,13 @@ function age(iso: string): string {
   return h < 48 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
 }
 
-export function SymbolPage({ symbol }: { symbol: string }) {
+export function SymbolPage({
+  symbol,
+  onNavigate,
+}: {
+  symbol: string
+  onNavigate: (r: { name: 'article'; id?: number; url?: string }) => void
+}) {
   const [data, setData] = useState<SymbolSummary | null>(null)
   const [bars, setBars] = useState<Bar[]>([])
   const [barSource, setBarSource] = useState<string>('')
@@ -158,8 +164,8 @@ export function SymbolPage({ symbol }: { symbol: string }) {
             <div
               className="news-row"
               key={n.id}
-              onClick={() => n.url && window.grindstone.openUrl(n.url)}
-              title="Open in a new tab"
+              onClick={() => onNavigate({ name: 'article', id: n.id })}
+              title="Read the article"
             >
               <div className="news-head">{n.headline}</div>
               <div className="subtle">

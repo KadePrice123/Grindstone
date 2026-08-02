@@ -18,12 +18,18 @@ def upsert(con: sqlite3.Connection, items: list[dict[str, Any]]) -> int:
     with con:
         for it in items:
             cur = con.execute(
-                "INSERT INTO news (id, headline, summary, source, url, symbols, created_at, updated_at)"
-                " VALUES (:id, :headline, :summary, :source, :url, :symbols_json, :created_at, :updated_at)"
+                "INSERT INTO news (id, headline, summary, source, url, symbols,"
+                " created_at, updated_at, content)"
+                " VALUES (:id, :headline, :summary, :source, :url, :symbols_json,"
+                " :created_at, :updated_at, :content)"
                 " ON CONFLICT(id) DO UPDATE SET headline=excluded.headline,"
                 "  summary=excluded.summary, url=excluded.url,"
-                "  symbols=excluded.symbols, updated_at=excluded.updated_at",
-                {**it, "symbols_json": json.dumps(it["symbols"])},
+                "  symbols=excluded.symbols, updated_at=excluded.updated_at,"
+                # never overwrite a body we already have with an empty one
+                "  content=CASE WHEN length(excluded.content) > length(news.content)"
+                "               THEN excluded.content ELSE news.content END",
+                {**it, "symbols_json": json.dumps(it["symbols"]),
+                 "content": it.get("content", "")},
             )
             # Keep the FTS row in lockstep (rowid == news.id).
             con.execute("DELETE FROM news_fts WHERE rowid=?", (it["id"],))
@@ -115,6 +121,20 @@ def backfill(con: sqlite3.Connection, client, page_limit: int = 5) -> int:
             more, token = client.news(limit=50, page_token=token)
             items.extend(more)
     return upsert(con, items)
+
+
+def get(con: sqlite3.Connection, news_id: int) -> dict[str, Any] | None:
+    r = con.execute("SELECT * FROM news WHERE id=?", (news_id,)).fetchone()
+    if r is None:
+        return None
+    item = _row_to_item(r)
+    item["content"] = r["content"] or ""
+    return item
+
+
+def set_content(con: sqlite3.Connection, news_id: int, content: str) -> None:
+    with con:
+        con.execute("UPDATE news SET content=? WHERE id=?", (content, news_id))
 
 
 def stats(con: sqlite3.Connection) -> dict[str, Any]:

@@ -10,6 +10,7 @@ import { setAuthExpiredHandler } from '../api'
 import { Logo } from '../components/Logo'
 import { UserChip } from '../components/UserChip'
 import { Accounts } from '../pages/Accounts'
+import { ArticlePage } from '../pages/ArticlePage'
 import { DataPage } from '../pages/DataPage'
 import { Idle } from '../pages/Idle'
 import { SearchPage } from '../pages/SearchPage'
@@ -28,6 +29,8 @@ function meta(route: Route): { title: string; icon: string } {
       return { title: route.query, icon: 'search' }
     case 'settings':
       return { title: 'Settings', icon: 'settings' }
+    case 'article':
+      return { title: 'Article', icon: 'news' }
     default:
       return { title: 'New tab', icon: 'home' }
   }
@@ -76,11 +79,13 @@ export function ContentApp({ initial }: { initial: Route }) {
       case 'data':
         return <DataPage onBack={() => setStack((s) => s.slice(0, -1))} />
       case 'symbol':
-        return <SymbolPage symbol={route.symbol} />
+        return <SymbolPage symbol={route.symbol} onNavigate={navigate} />
       case 'search':
         return <SearchPage query={route.query} onNavigate={navigate} />
       case 'settings':
         return <SettingsPage onBack={() => setStack((s) => s.slice(0, -1))} />
+      case 'article':
+        return <ArticlePage id={route.id} url={route.url} onNavigate={navigate} />
       default:
         return <Idle onNavigate={navigate} onLocked={() => setLocked(true)} />
     }

@@ -16,11 +16,16 @@ export type Route =
   | { name: 'symbol'; symbol: string }
   | { name: 'search'; query: string }
   | { name: 'settings' }
+  | { name: 'article'; id?: number; url?: string }
 
 export function parseRoute(raw: string | null): Route {
   if (!raw) return { name: 'idle' }
   if (raw.startsWith('symbol:')) return { name: 'symbol', symbol: raw.slice(7).toUpperCase() }
   if (raw.startsWith('search:')) return { name: 'search', query: raw.slice(7) }
+  if (raw.startsWith('article:')) {
+    const rest = raw.slice(8)
+    return /^\d+$/.test(rest) ? { name: 'article', id: Number(rest) } : { name: 'article', url: rest }
+  }
   if (raw === 'accounts' || raw === 'data' || raw === 'settings') return { name: raw }
   return { name: 'idle' }
 }
@@ -28,6 +33,7 @@ export function parseRoute(raw: string | null): Route {
 export function routeKey(r: Route): string {
   if (r.name === 'symbol') return `symbol:${r.symbol}`
   if (r.name === 'search') return `search:${r.query}`
+  if (r.name === 'article') return `article:${r.id ?? r.url ?? ''}`
   return r.name
 }
 
