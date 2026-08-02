@@ -6,6 +6,7 @@
  * grab reads immediately; main does the cross-window hit-testing.
  */
 import { useEffect, useRef, useState } from 'react'
+import { asGs, asUrl, isKnownPage } from '../urls'
 import { Logo } from './Logo'
 import {
   AccountsIcon,
@@ -52,7 +53,7 @@ declare global {
       back: () => void
       forward: () => void
       reload: () => void
-      goto: (url: string) => void
+      goto: (kind: 'url' | 'route', value: string) => void
       home: () => void
       minimize: () => void
       maximizeToggle: () => void
@@ -138,8 +139,33 @@ export function TabStrip() {
     if (d?.live) window.grindstoneTabs.dragEnd(e.screenX, e.screenY)
   }
 
+  /** Omnibox submit: web address, .gs platform address, or a search. */
+  const submitAddress = () => {
+    const text = addr.trim()
+    if (!text) return
+    setEditing(false)
+    const url = asUrl(text)
+    if (url) {
+      window.grindstoneTabs.goto('url', url)
+      return
+    }
+    const gs = asGs(text)
+    if (gs) {
+      const route = isKnownPage(gs.page)
+        ? gs.page === 'home'
+          ? 'idle'
+          : gs.page === 'search'
+            ? `search:${gs.query}`
+            : gs.page
+        : `symbol:${gs.page.toUpperCase()}` // anything else .gs is a ticker
+      window.grindstoneTabs.goto('route', route)
+      return
+    }
+    window.grindstoneTabs.goto('route', `search:${text}`)
+  }
+
   const navBar =
-    state.activeKind === 'browser' ? (
+    state.activeKind !== null ? (
       <div className="navbar">
         <button
           className="strip-btn"
@@ -165,10 +191,10 @@ export function TabStrip() {
           {state.loading ? '×' : '⟳'}
         </button>
         <input
-          className="addr"
+          className={state.activeKind === 'browser' ? 'addr' : 'addr gs'}
           value={addr}
           spellCheck={false}
-          placeholder="Search or enter address"
+          placeholder="Search, or type an address — google.com, accounts.gs, SPY"
           onChange={(e) => {
             setEditing(true)
             setAddr(e.target.value)
@@ -180,8 +206,7 @@ export function TabStrip() {
           onBlur={() => setEditing(false)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
-              window.grindstoneTabs.goto(addr)
-              setEditing(false)
+              submitAddress()
               ;(e.target as HTMLInputElement).blur()
             } else if (e.key === 'Escape') {
               setAddr(state.activeUrl)

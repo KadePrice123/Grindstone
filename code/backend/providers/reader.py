@@ -80,8 +80,13 @@ def extract(url: str) -> dict[str, Any] | None:
         downloaded = trafilatura.fetch_url(url)
         if not downloaded:
             return None
+        # include_tables=False on purpose: tables come out as pipe-delimited
+        # markdown ("| Yahoo | | |---|---| | Type of business |…"), which is
+        # unreadable prose and made the reader look broken on encyclopaedic
+        # pages. The reader is for articles; anything table-shaped belongs on
+        # the original site.
         text = trafilatura.extract(downloaded, include_comments=False,
-                                   include_tables=True, favor_precision=True)
+                                   include_tables=False, favor_precision=True)
         if not text or len(text) < 200:
             return None
         meta = trafilatura.extract_metadata(downloaded)

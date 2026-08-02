@@ -683,19 +683,43 @@ def _no_idle_animation():
                 )
 
 
-@check("omnibox address detection: domains navigate, tickers and words search")
-def _url_detection():
+@check("omnibox: always present, .gs addresses platform pages, web opens sites")
+def _omnibox_addressing():
+    renderer = CODE / "app" / "src" / "renderer" / "src"
+    src = (renderer / "urls.ts").read_text(encoding="utf-8")
     # Browser-bar rule: "google.com" is a place, "google" is a query, "AAPL"
     # is a ticker. A wrong navigation is not recoverable; a wrong search is.
-    src = (CODE / "app" / "src" / "renderer" / "src" / "urls.ts").read_text(encoding="utf-8")
-    for piece in ("export function asUrl", "https?:", "localhost"):
-        assert piece in src, f"url detection missing {piece}"
-    # Dangerous schemes must never be navigated to from the search bar.
+    for piece in ("export function asUrl", "export function asGs",
+                  "export function gsAddress", "localhost"):
+        assert piece in src, f"address handling missing {piece}"
     assert "javascript" in src and "file" in src, \
         "url detection does not reject dangerous schemes"
-    idle = (CODE / "app" / "src" / "renderer" / "src" / "pages" / "Idle.tsx").read_text(encoding="utf-8")
+    # .gs must never be mistaken for a real web address, or platform pages
+    # would open as (nonexistent) websites.
+    assert r"\.gs(\/|\?|$)" in src, ".gs addresses are not excluded from web URLs"
+
+    idle = (renderer / "pages" / "Idle.tsx").read_text(encoding="utf-8")
     assert "asUrl(q)" in idle and "openUrl(url)" in idle, \
         "typing an address does not open the site"
+
+    # The bar is always present — it is the app's search box, not a browser
+    # accessory (it used to appear only on web tabs, leaving the home page
+    # with no way to search from the chrome).
+    strip = (renderer / "components" / "TabStrip.tsx").read_text(encoding="utf-8")
+    assert "state.activeKind !== null" in strip, \
+        "the address bar is conditional on tab kind — it must always show"
+    tabs = (CODE / "app" / "src" / "main" / "tabs.ts").read_text(encoding="utf-8")
+    assert "const chromeH = TABBAR_H + NAVBAR_H" in tabs, \
+        "chrome height no longer reserves the omnibox on every tab"
+
+    # A web result is a website: opening it as extracted plain text stripped
+    # the layout that made it readable (Wikipedia infoboxes became pipes).
+    search_page = (renderer / "pages" / "SearchPage.tsx").read_text(encoding="utf-8")
+    assert "window.grindstone.openUrl(r.url)" in search_page, \
+        "web results must open the real site, not the text reader"
+    reader = (CODE / "backend" / "providers" / "reader.py").read_text(encoding="utf-8")
+    assert "include_tables=False" in reader, \
+        "table extraction produces pipe-delimited noise in the reader"
 
 
 @check("news reader: content requested, stubs filtered, html rendered, cached")
@@ -833,7 +857,7 @@ def _tab_system():
     for piece in ("nav:forward", "nav:reload", "nav:goto", "browsingUserAgent"):
         assert piece in tabs, f"browser chrome missing {piece}"
     strip = (app_dir / "src/renderer/src/components/TabStrip.tsx").read_text(encoding="utf-8")
-    assert "className=\"addr\"" in strip, "browser tabs have no address bar"
+    assert "'addr'" in strip or '"addr"' in strip, "there is no address bar"
     main_ts = (app_dir / "src/main/index.ts").read_text(encoding="utf-8")
     assert "nativeTheme.themeSource = 'dark'" in main_ts, \
         "opened pages will render light in a dark app"

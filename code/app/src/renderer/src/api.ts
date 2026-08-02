@@ -11,10 +11,11 @@ declare global {
       request: <T = unknown>(method: string, path: string, body?: unknown) => Promise<ApiResponse<T>>
       onSidecarStatus: (cb: (s: { status: string; detail?: string }) => void) => () => void
       signalUnlocked: () => void
-      setTabMeta: (title: string, icon: string, depth: number) => void
+      setTabMeta: (title: string, icon: string, depth: number, address: string) => void
       openTab: (route: string) => void
       openUrl: (url: string) => void
       onNav: (cb: (what: 'back' | 'home') => void) => () => void
+      onRoute: (cb: (route: string) => void) => () => void
     }
   }
 }

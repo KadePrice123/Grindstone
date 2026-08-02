@@ -25,9 +25,9 @@ const grindstone = {
     return () => ipcRenderer.removeListener('sidecar:status', listener)
   },
 
-  /** Content pages report tab identity + how deep their in-tab history is. */
-  setTabMeta: (title: string, icon: string, depth: number): void => {
-    ipcRenderer.send('tab:meta', { title, icon, depth })
+  /** Content pages report tab identity, history depth, and their .gs address. */
+  setTabMeta: (title: string, icon: string, depth: number, address: string): void => {
+    ipcRenderer.send('tab:meta', { title, icon, depth, address })
   },
   /** The lock screen calls this once sign-in has RESOLVED in its hands.
    *  Main then swaps this window into tab mode — doing it any earlier
@@ -53,6 +53,12 @@ const grindstone = {
       ipcRenderer.removeListener('nav:back', back)
       ipcRenderer.removeListener('nav:home', home)
     }
+  },
+  /** The omnibox asking this tab to go to a platform route (.gs address). */
+  onRoute: (cb: (route: string) => void): (() => void) => {
+    const listener = (_e: unknown, route: string) => cb(route)
+    ipcRenderer.on('nav:route', listener)
+    return () => ipcRenderer.removeListener('nav:route', listener)
   },
 }
 
@@ -93,7 +99,8 @@ const grindstoneTabs = {
   back: (): void => ipcRenderer.send('nav:back'),
   forward: (): void => ipcRenderer.send('nav:forward'),
   reload: (): void => ipcRenderer.send('nav:reload'),
-  goto: (url: string): void => ipcRenderer.send('nav:goto', url),
+  goto: (kind: 'url' | 'route', value: string): void =>
+    ipcRenderer.send('nav:goto', kind, value),
   home: (): void => ipcRenderer.send('nav:home'),
   minimize: (): void => ipcRenderer.send('win:minimize'),
   maximizeToggle: (): void => ipcRenderer.send('win:maximize'),

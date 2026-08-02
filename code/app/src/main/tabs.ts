@@ -71,6 +71,8 @@ interface Tab {
   icon: string
   kind: 'app' | 'browser'
   url?: string
+  /** For app tabs: the .gs address of the page currently shown. */
+  address?: string
 }
 
 interface Win {
@@ -203,9 +205,10 @@ export class TabManager {
       w.chrome.setBounds({ x: 0, y: 0, width, height })
       return
     }
+    // The address/search bar is ALWAYS present, like a browser's — it is how
+    // you reach both the web and platform pages from anywhere.
+    const chromeH = TABBAR_H + NAVBAR_H
     const active = w.tabs.find((t) => t.id === w.activeId)
-    // Web pages get an address bar; app pages do not need one.
-    const chromeH = active?.kind === 'browser' ? TABBAR_H + NAVBAR_H : TABBAR_H
     w.chrome.setBounds({ x: 0, y: 0, width, height: chromeH })
     if (active) active.view.setBounds({ x: 0, y: chromeH, width, height: height - chromeH })
   }
@@ -419,7 +422,13 @@ export class TabManager {
         ? active.view.webContents.navigationHistory.canGoForward()
         : false,
       activeKind: active?.kind ?? null,
-      activeUrl: active?.kind === 'browser' ? (active.url ?? '') : '',
+      // The bar always shows an address: a URL for web tabs, a .gs address
+      // for platform pages.
+      activeUrl: active
+        ? active.kind === 'browser'
+          ? (active.url ?? '')
+          : (active.address ?? 'home.gs')
+        : '',
       loading: active?.kind === 'browser' ? active.view.webContents.isLoading() : false,
       draggingId: this.drag?.tabId ?? null,
     }
@@ -492,13 +501,16 @@ export class TabManager {
     ipcMain.on('win:close', (e) => this.winFromSender(e.sender)?.win.close())
 
     // content tabs report their identity (title/icon/history depth)
-    ipcMain.on('tab:meta', (e, meta: { title?: string; icon?: string; depth?: number }) => {
+    ipcMain.on('tab:meta', (e, meta: {
+      title?: string; icon?: string; depth?: number; address?: string
+    }) => {
       const w = this.winFromContent(e.sender)
       const tab = w?.tabs.find((t) => t.view.webContents.id === e.sender.id)
       if (!w || !tab) return
       if (typeof meta.title === 'string') tab.title = meta.title.slice(0, 80)
       if (typeof meta.icon === 'string') tab.icon = meta.icon.slice(0, 24)
       if (typeof meta.depth === 'number') this.appHistoryDepth.set(tab.id, meta.depth)
+      if (typeof meta.address === 'string') tab.address = meta.address.slice(0, 300)
       this.pushStrip(w)
     })
     // content asks to open a route in a NEW tab (ctrl+click behavior)
@@ -541,24 +553,24 @@ export class TabManager {
       if (tab.kind === 'browser') tab.view.webContents.reload()
       else tab.view.webContents.reload()
     })
-    ipcMain.on('nav:goto', (e, raw: string) => {
+    /**
+     * The omnibox, for every tab kind. The renderer has already classified
+     * the input (it owns the .gs/URL rules); main only routes it:
+     *   url    -> navigate a web tab in place, or open one from an app tab
+     *   route  -> navigate an app tab in place, or open one from a web tab
+     */
+    ipcMain.on('nav:goto', (e, kind: 'url' | 'route', value: string) => {
       const w = this.winFromSender(e.sender)
-      const tab = w?.tabs.find((t) => t.id === w.activeId)
-      if (!w || tab?.kind !== 'browser' || typeof raw !== 'string') return
-      const text = raw.trim()
-      if (!text) return
-      // Address bar behaviour: a URL navigates, anything else searches.
-      let target: string
-      try {
-        const u = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`)
-        target = /\./.test(u.hostname) ? u.toString() : ''
-      } catch {
-        target = ''
+      if (!w || typeof value !== 'string' || !value) return
+      const tab = w.tabs.find((t) => t.id === w.activeId)
+
+      if (kind === 'url') {
+        if (tab?.kind === 'browser') tab.view.webContents.loadURL(value)
+        else this.newBrowserTab(w, value)
+        return
       }
-      if (!target) {
-        target = `https://duckduckgo.com/?q=${encodeURIComponent(text)}`
-      }
-      tab.view.webContents.loadURL(target)
+      if (tab?.kind === 'app') tab.view.webContents.send('nav:route', value)
+      else this.newTab(w, value)
     })
 
     ipcMain.on('nav:home', (e) => {

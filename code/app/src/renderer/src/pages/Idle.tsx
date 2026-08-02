@@ -28,9 +28,9 @@ export function Idle({
     if ((r.type === 'symbol' || r.type === 'action') && r.symbol) {
       onNavigate({ name: 'symbol', symbol: r.symbol })
     } else if (r.type === 'news' && typeof r.id === 'number') {
-      onNavigate({ name: 'article', id: r.id }) // reader view, not the ad-laden page
+      onNavigate({ name: 'article', id: r.id }) // our news: reader view
     } else if ((r.type === 'web' || r.type === 'web-news') && r.url) {
-      onNavigate({ name: 'article', url: r.url })
+      window.grindstone.openUrl(r.url) // the web: the actual site
     } else if (r.type === 'page') {
       if (r.page === 'accounts') onNavigate({ name: 'accounts' })
       else if (r.page === 'data') onNavigate({ name: 'data' })

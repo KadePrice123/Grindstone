@@ -309,6 +309,13 @@ input {
 .addr:focus {
   border-color: var(--accent);
 }
+/* Platform addresses read as ours, not as the web's. */
+.addr.gs {
+  color: var(--accent);
+}
+.addr.gs:not(:focus) {
+  font-weight: 600;
+}
 
 /* ---------- tab strip (chrome mode) ---------- */
 .strip-btn {

@@ -5,8 +5,9 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Route } from '../App'
-import { routeKey } from '../App'
+import { parseRoute, routeKey } from '../App'
 import { setAuthExpiredHandler } from '../api'
+import { gsAddress } from '../urls'
 import { Logo } from '../components/Logo'
 import { UserChip } from '../components/UserChip'
 import { Accounts } from '../pages/Accounts'
@@ -47,7 +48,16 @@ export function ContentApp({ initial }: { initial: Route }) {
 
   useEffect(() => {
     const m = meta(route)
-    window.grindstone.setTabMeta(m.title, m.icon, stack.length - 1)
+    const arg =
+      route.name === 'symbol'
+        ? route.symbol
+        : route.name === 'search'
+          ? route.query
+          : route.name === 'article'
+            ? String(route.id ?? '')
+            : undefined
+    window.grindstone.setTabMeta(m.title, m.icon, stack.length - 1,
+                                 gsAddress(route.name, arg))
   }, [route, stack.length])
 
   useEffect(() => {
@@ -57,6 +67,12 @@ export function ContentApp({ initial }: { initial: Route }) {
     })
     return off
   }, [])
+
+  // The omnibox can send this tab to any platform route.
+  useEffect(() => {
+    const off = window.grindstone.onRoute((key) => navigate(parseRoute(key)))
+    return off
+  }, [navigate])
 
   useEffect(() => {
     setAuthExpiredHandler(() => setLocked(true))

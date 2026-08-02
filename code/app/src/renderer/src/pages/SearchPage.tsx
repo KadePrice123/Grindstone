@@ -83,9 +83,13 @@ export function SearchPage({
   const open = (r: SearchResult) => {
     if (r.type === 'symbol' && r.symbol) onNavigate({ name: 'symbol', symbol: r.symbol })
     else if (r.type === 'news' && typeof r.id === 'number') {
-      onNavigate({ name: 'article', id: r.id }) // reader view first
+      // Our own news has clean article text — read it in-app.
+      onNavigate({ name: 'article', id: r.id })
     } else if (r.url) {
-      onNavigate({ name: 'article', url: r.url })
+      // A web result is a WEBSITE. Extracting it to plain text stripped the
+      // layout that makes it make sense (a Wikipedia infobox became a wall
+      // of pipes), so open the real page in a browser tab.
+      window.grindstone.openUrl(r.url)
     } else if (r.type === 'page') {
       if (r.page === 'accounts' || r.page === 'data' || r.page === 'settings') {
         onNavigate({ name: r.page })
