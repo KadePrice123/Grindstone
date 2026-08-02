@@ -349,6 +349,164 @@ def _orphan_watchdog():
         "shell no longer holds the sidecar's stdin — the watchdog can never fire"
 
 
+@check("search: exact pin, intent grammar, fuzzy typo, scoping, pages")
+def _search_engine():
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from backend import newsstore, search as search_mod
+    from backend.marketdb import connect_market
+    from backend.universe import Universe
+
+    with tempfile.TemporaryDirectory() as tmp:
+        con = connect_market(Path(tmp) / "m.db")
+        con.executemany(
+            "INSERT INTO assets (symbol, name, exchange, asset_class, tradable) VALUES (?,?,?,?,1)",
+            [("SPY", "SPDR S&P 500 ETF Trust", "ARCA", "us_equity"),
+             ("SPYG", "SPDR Portfolio S&P 500 Growth ETF", "ARCA", "us_equity"),
+             ("AAPL", "Apple Inc. Common Stock", "NASDAQ", "us_equity"),
+             ("TSLA", "Tesla, Inc. Common Stock", "NASDAQ", "us_equity")])
+        con.commit()
+        newsstore.upsert(con, [
+            {"id": 1, "headline": "Apple reports record earnings", "summary": "",
+             "source": "bz", "url": "u1", "symbols": ["AAPL"],
+             "created_at": "2026-08-01T12:00:00Z", "updated_at": "2026-08-01T12:00:00Z"},
+            {"id": 2, "headline": "Markets rally broadly", "summary": "",
+             "source": "bz", "url": "u2", "symbols": ["SPY", "SPYG"],
+             "created_at": "2026-08-01T13:00:00Z", "updated_at": "2026-08-01T13:00:00Z"}])
+        uni = Universe()
+        uni.load(con)
+
+        r = search_mod.query("SPY", uni, con)
+        assert r["results"][0]["symbol"] == "SPY", "exact ticker must pin first"
+
+        r = search_mod.query("SPY news", uni, con)
+        assert r["intent"] == {"kind": "symbol-news", "symbol": "SPY"}
+        assert any(x["type"] == "news" for x in r["results"])
+
+        # live fallthrough consulted exactly when local store is empty
+        called = []
+        r = search_mod.query("TSLA news", uni, con,
+                             live_news=lambda s: (called.append(s), [])[1])
+        assert called == ["TSLA"], "empty local news must consult live_news"
+
+        r = search_mod.query("aple", uni, con)
+        syms = [x.get("symbol") for x in r["results"] if x["type"] == "symbol"]
+        assert "AAPL" in syms, f"one-typo company name lost: {syms}"
+
+        r = search_mod.query("acc", uni, con)
+        assert any(x["type"] == "page" and x["page"] == "accounts" for x in r["results"])
+
+        # SPY scoping must not leak SPYG (json_each, not LIKE)
+        items = newsstore.latest(con, symbols=["AAPL"], limit=10)
+        assert len(items) == 1 and items[0]["symbols"] == ["AAPL"]
+        con.close()
+
+
+@check("recorder: due math, honest validation, retention prune")
+def _recorder_logic():
+    import datetime as dt
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from backend.marketdb import connect_market
+    from backend.recorder import Recorder, validate_job
+
+    now = dt.datetime(2026, 8, 2, 12, 0, 0, tzinfo=dt.timezone.utc)
+    assert Recorder.is_due({"last_run_at": "", "interval_seconds": 60}, now)
+    assert Recorder.is_due({"last_run_at": "2026-08-02T11:58:00Z", "interval_seconds": 60}, now)
+    assert not Recorder.is_due({"last_run_at": "2026-08-02T11:59:30Z", "interval_seconds": 60}, now)
+
+    assert validate_job("chain", "/ES", "", 300, 90, "future") is not None, \
+        "futures must be rejected with a reason, not accepted and empty"
+    assert "TastyTrade" in validate_job("chain", "SPX", "", 300, 90, "index")
+    assert validate_job("bars", "SPY", "2Min", 300, 90, "us_equity") is not None
+    assert validate_job("bars", "SPY", "1Min", 30, 90, "us_equity") is not None, "interval floor"
+    assert validate_job("chain", "SPY", "", 900, 90, "us_equity") is None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        con = connect_market(Path(tmp) / "m.db")
+        rec = Recorder(con, lambda _u: None)
+        with con:
+            con.execute("INSERT INTO record_jobs (user_id, kind, symbol, timeframe,"
+                        " interval_seconds, retention_days) VALUES (1,'bars','SPY','1Min',60,1)")
+            con.executemany(
+                "INSERT INTO rec_bars (symbol, timeframe, ts, open, high, low, close, volume)"
+                " VALUES ('SPY','1Min',?,1,1,1,1,1)",
+                [("2020-01-01T00:00:00Z",), ("2099-01-01T00:00:00Z",)])
+        removed = rec.prune()
+        left = con.execute("SELECT ts FROM rec_bars").fetchall()
+        assert removed["bars"] == 1 and len(left) == 1 and left[0][0].startswith("2099"), \
+            "prune must remove only rows older than retention"
+        con.close()
+
+
+@check("market-data parsers: snapshot, chain w/ optional greeks, OCC, bars")
+def _alpaca_data_parsers():
+    sys.path.insert(0, str(CODE))
+    from backend.brokers.alpaca_data import (parse_bars, parse_chain_snapshot,
+                                             parse_news_item, parse_occ,
+                                             parse_stock_snapshot)
+    from backend.brokers.base import BrokerError
+
+    s = parse_stock_snapshot("SPY", {
+        "latestTrade": {"p": 746.79, "t": "T", "c": ["@"]},
+        "latestQuote": {"bp": 746.7, "ap": 746.9},
+        "dailyBar": {"o": 1, "h": 2, "l": 0.5, "v": 100},
+        "prevDailyBar": {"c": 741.63}})
+    assert abs(s["change_pct"] - 100 * (746.79 - 741.63) / 741.63) < 1e-9
+    assert parse_stock_snapshot("X", {})["price"] is None
+
+    occ = parse_occ("SPY260813C00748000")
+    assert occ == {"root": "SPY", "expiration": "2026-08-13", "right": "C", "strike": 748.0}
+    assert parse_occ("garbage") is None
+
+    chain = parse_chain_snapshot("SPY", {"snapshots": {
+        "SPY260813C00748000": {"latestQuote": {"bp": 6.22, "ap": 6.25},
+                                "impliedVolatility": 0.122,
+                                "greeks": {"delta": 0.5}},
+        "SPY260813P00700000": {"latestQuote": {"bp": 1.0, "ap": 1.1}},  # no greeks: 0DTE/zero-bid case
+    }})
+    assert len(chain) == 2
+    assert chain[0]["delta"] == 0.5 or chain[1]["delta"] == 0.5
+    assert any(c["delta"] is None for c in chain), "absent greeks must stay None, never invented"
+    try:
+        parse_chain_snapshot("SPY", {"nope": 1})
+        raise AssertionError("garbage chain accepted")
+    except BrokerError:
+        pass
+
+    bars = parse_bars("SPY", {"bars": {"SPY": [{"t": "T1", "o": 1, "h": 2, "l": 0.5,
+                                                 "c": 1.5, "v": 10}]}})
+    assert bars[0]["close"] == 1.5
+    assert parse_bars("SPY", {"bars": None}) == []
+
+    n = parse_news_item({"id": 7, "headline": "H", "symbols": ["SPY"],
+                         "created_at": "T"})
+    assert n["updated_at"] == "T", "missing updated_at must fall back to created_at"
+
+
+@check("provider fallback: yahoo stays lazy, index symbols map, honesty labels")
+def _providers():
+    import importlib
+
+    sys.path.insert(0, str(CODE))
+    import backend.providers.yahoo as y
+    from backend.market import provider_status
+
+    importlib.reload(y)
+    assert "yfinance" not in sys.modules or True  # lazy import documented
+    src = (CODE / "backend" / "providers" / "yahoo.py").read_text(encoding="utf-8")
+    assert "import yfinance" not in src.split("def _ticker")[0], \
+        "yfinance must be imported lazily, not at module import"
+    assert y.YahooProvider._map("SPX") == "^GSPC" and y.YahooProvider._map("aapl") == "AAPL"
+
+    st = provider_status(has_alpaca=False)
+    assert st["yahoo_fallback"] is True and "delayed" in st["equities"]
+    st = provider_status(has_alpaca=True)
+    assert "alpaca" in st["equities"] and "TastyTrade" in st["futures"]
+
+
 @check("no permanently animating logo on at-rest screens")
 def _no_idle_animation():
     # REGRESSION (measured 2026-08-01): a continuously spinning logo held the

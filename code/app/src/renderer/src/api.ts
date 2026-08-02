@@ -56,6 +56,74 @@ export interface AccountRow {
   key_hints: Record<string, string>
 }
 
+export interface SearchResult {
+  type: 'symbol' | 'news' | 'page' | 'action'
+  title: string
+  subtitle?: string
+  symbol?: string
+  asset_class?: string
+  id?: number
+  url?: string
+  page?: string
+  action?: string
+  created_at?: string
+}
+
+export interface Quote {
+  symbol: string
+  available: boolean
+  source?: string
+  reason?: string
+  price?: number | null
+  change?: number | null
+  change_pct?: number | null
+  bid?: number | null
+  ask?: number | null
+  day_open?: number | null
+  day_high?: number | null
+  day_low?: number | null
+  day_volume?: number | null
+  prev_close?: number | null
+}
+
+export interface NewsItem {
+  id: number
+  headline: string
+  summary: string
+  source: string
+  url: string
+  symbols: string[]
+  created_at: string
+}
+
+export interface SymbolSummary {
+  symbol: string
+  name: string
+  asset_class: string
+  quote: Quote
+  news: NewsItem[]
+}
+
+export interface RecordJob {
+  id: number
+  kind: 'bars' | 'chain' | 'news'
+  symbol: string
+  timeframe: string
+  interval_seconds: number
+  retention_days: number
+  enabled: number
+  last_run_at: string
+  last_status: string
+  last_rows: number
+}
+
+export interface DataUsage {
+  bars: { symbol: string; timeframe: string; n: number; oldest: string; newest: string }[]
+  chain: { underlying: string; n: number; snapshots: number; oldest: string; newest: string }[]
+  news: { count: number; newest: string | null; oldest: string | null }
+  db_bytes: number
+}
+
 export interface TestResult {
   ok: boolean
   error?: string

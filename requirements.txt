@@ -3,3 +3,6 @@ uvicorn[standard]==0.52.1
 argon2-cffi==25.1.0
 cryptography==50.0.0
 httpx==0.28.1
+RapidFuzz==3.14.5
+yfinance>=1.5.2,<2.0
+curl_cffi==0.16.0

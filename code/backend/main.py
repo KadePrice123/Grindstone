@@ -69,10 +69,26 @@ def main() -> int:
     print(json.dumps({"event": "listening", "port": port, "version": API_VERSION}),
           flush=True)
 
-    app = create_app(State(boot_token))
+    state = State(boot_token)
+    app = create_app(state)
+
+    # Load whatever universe exists from a previous run, then start the
+    # recorder — it borrows vault access via unlocked sessions only.
+    from backend.marketdb import connect_market
+    from backend.recorder import Recorder
+
+    boot_con = connect_market()
+    state.universe.load(boot_con)
+    boot_con.close()
+    state.recorder = Recorder(connect_market(), state.creds_for)
+    state.recorder.start()
+
     config = uvicorn.Config(app, log_level="warning", access_log=False)
     server = uvicorn.Server(config)
-    server.run(sockets=[sock])
+    try:
+        server.run(sockets=[sock])
+    finally:
+        state.recorder.stop()
     return 0
 
 

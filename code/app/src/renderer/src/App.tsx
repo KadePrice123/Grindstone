@@ -4,8 +4,14 @@ import { Logo } from './components/Logo'
 import { AuthGate } from './pages/AuthGate'
 import { Idle } from './pages/Idle'
 import { Accounts } from './pages/Accounts'
+import { DataPage } from './pages/DataPage'
+import { SymbolPage } from './pages/SymbolPage'
 
-export type Route = 'idle' | 'accounts'
+export type Route =
+  | { name: 'idle' }
+  | { name: 'accounts' }
+  | { name: 'data' }
+  | { name: 'symbol'; symbol: string }
 
 type Phase =
   | { kind: 'booting' }
@@ -96,14 +102,25 @@ export default function App() {
       return (
         <AuthGate
           initialized={phase.initialized}
-          onSignedIn={(username) => setPhase({ kind: 'app', username, route: 'idle' })}
+          onSignedIn={(username) =>
+            setPhase({ kind: 'app', username, route: { name: 'idle' } })
+          }
           onRecheck={toAuth}
         />
       )
     case 'app': {
       const nav = (route: Route) => setPhase({ ...phase, route })
-      if (phase.route === 'accounts') return <Accounts onBack={() => nav('idle')} />
-      return <Idle username={phase.username} onNavigate={nav} onLocked={toAuth} />
+      const back = () => nav({ name: 'idle' })
+      switch (phase.route.name) {
+        case 'accounts':
+          return <Accounts onBack={back} />
+        case 'data':
+          return <DataPage onBack={back} />
+        case 'symbol':
+          return <SymbolPage symbol={phase.route.symbol} onBack={back} />
+        default:
+          return <Idle username={phase.username} onNavigate={nav} onLocked={toAuth} />
+      }
     }
   }
 }

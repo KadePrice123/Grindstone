@@ -90,6 +90,22 @@ class SessionStore:
             for t in list(self._by_token):
                 self._drop(t)
 
+    def any_for_user(self, user_id: int) -> SessionSnapshot | None:
+        """Newest unlocked session for a user — how background work (the data
+        recorder) borrows vault access. Returns a snapshot copy like get();
+        None means the user is locked and the caller must skip, not stall."""
+        with self._lock:
+            best: _Entry | None = None
+            for e in self._by_token.values():
+                if e.user_id == user_id and (best is None or e.last_seen > best.last_seen):
+                    best = e
+            if best is None:
+                return None
+            now = time.monotonic()
+            if now - best.last_seen > self.idle_seconds:
+                return None
+            return SessionSnapshot(best.user_id, best.username, bytes(best.dek))
+
     def _peek_buffer(self, token: str) -> bytearray | None:
         """Test-only accessor so the gate can assert the wipe actually happens."""
         e = self._by_token.get(token)

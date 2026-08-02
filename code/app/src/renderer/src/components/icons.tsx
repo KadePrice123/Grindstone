@@ -51,3 +51,41 @@ export const PositionsIcon = () => (
     <path d="M4 17 L12 21.5 L20 17" />
   </Icon>
 )
+
+export const ChartMiniIcon = () => (
+  <Icon label="Symbol">
+    <path d="M8 3.5 V6" />
+    <rect x="6" y="6" width="4" height="8" rx="1" />
+    <path d="M8 14 V17" />
+    <path d="M16 7 V9.5" />
+    <rect x="14" y="9.5" width="4" height="8" rx="1" />
+    <path d="M16 17.5 V20.5" />
+  </Icon>
+)
+
+export const NewsMiniIcon = () => (
+  <Icon label="News">
+    <rect x="3.5" y="5" width="17" height="14" rx="2" />
+    <rect x="7" y="8.5" width="4.5" height="4.5" rx="0.75" />
+    <path d="M14.5 9.5 H17" />
+    <path d="M14.5 12.5 H17" />
+    <path d="M7 16 H17" />
+  </Icon>
+)
+
+export const PageMiniIcon = () => (
+  <Icon label="Page">
+    <rect x="5" y="3.5" width="14" height="17" rx="2" />
+    <path d="M8.5 8 H15.5" />
+    <path d="M8.5 12 H15.5" />
+    <path d="M8.5 16 H13" />
+  </Icon>
+)
+
+export const DataIcon = () => (
+  <Icon label="Data">
+    <ellipse cx="12" cy="5.5" rx="7" ry="2.8" />
+    <path d="M5 5.5 V18.5 C5 20 8.1 21.3 12 21.3 C15.9 21.3 19 20 19 18.5 V5.5" />
+    <path d="M5 12 C5 13.5 8.1 14.8 12 14.8 C15.9 14.8 19 13.5 19 12" />
+  </Icon>
+)
