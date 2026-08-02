@@ -65,7 +65,12 @@ export function AuthShell() {
         return (
           <AuthGate
             initialized={phase.initialized}
-            onSignedIn={() => setPhase({ kind: 'opening' })}
+            onSignedIn={() => {
+              // We have the answer; now it is safe for main to reload this
+              // view into the tab strip.
+              setPhase({ kind: 'opening' })
+              window.grindstone.signalUnlocked()
+            }}
             onRecheck={toAuth}
           />
         )

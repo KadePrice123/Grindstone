@@ -10,6 +10,7 @@ declare global {
     grindstone: {
       request: <T = unknown>(method: string, path: string, body?: unknown) => Promise<ApiResponse<T>>
       onSidecarStatus: (cb: (s: { status: string; detail?: string }) => void) => () => void
+      signalUnlocked: () => void
       setTabMeta: (title: string, icon: string, depth: number) => void
       openTab: (route: string) => void
       openUrl: (url: string) => void

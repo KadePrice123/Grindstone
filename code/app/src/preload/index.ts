@@ -29,6 +29,12 @@ const grindstone = {
   setTabMeta: (title: string, icon: string, depth: number): void => {
     ipcRenderer.send('tab:meta', { title, icon, depth })
   },
+  /** The lock screen calls this once sign-in has RESOLVED in its hands.
+   *  Main then swaps this window into tab mode — doing it any earlier
+   *  destroys the frame before it receives the reply. */
+  signalUnlocked: (): void => {
+    ipcRenderer.send('auth:unlocked')
+  },
   /** Open an app route in a NEW tab of this window. */
   openTab: (route: string): void => {
     ipcRenderer.send('tab:open', route)

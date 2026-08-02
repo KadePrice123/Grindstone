@@ -127,18 +127,49 @@ try {
   check(login.includes('401'), 'proxy: query-string path still routes to the backend', login.slice(0, 60))
 
   // ----------------------------------------------------------------- tabs
-  // The login REPLY must reach the renderer. Unlocking reloads the very view
-  // that is awaiting it, and doing that inline killed the promise — the
-  // button span "Working…" forever with no error anywhere (reported live).
-  const setup = await Promise.race([
-    auth.eval(
-      `window.grindstone.request('POST','/api/auth/setup',{username:'e2e',password:'e2e-password-1'}).then(r=>JSON.stringify(r))`
-    ),
-    sleep(15000).then(() => null),
-  ])
-  check(setup !== null, 'auth: the sign-in reply reaches the renderer (never hangs)')
-  check(!!setup && setup.includes('"status":200'), 'auth: first-run setup succeeds')
-  await sleep(2500)
+  // Sign in THROUGH THE FORM, as a user does. Calling the API directly is
+  // what let two sign-in bugs ship: the failure was never in the request, it
+  // was in the handshake between the reply and the shell swapping this view.
+  const fillAndSubmit = (password) => `(() => {
+    const set = (el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value').set
+      setter.call(el, v)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    const inputs = document.querySelectorAll('input.field')
+    if (inputs.length < 2) return 'no form'
+    set(inputs[0], 'e2e')
+    for (let i = 1; i < inputs.length; i++) set(inputs[i], ${JSON.stringify(password)})
+    const btn = [...document.querySelectorAll('button')]
+      .find(b => /create profile|unlock/i.test(b.textContent || ''))
+    if (!btn) return 'no button'
+    btn.click()
+    return 'submitted'
+  })()`
+
+  const submitted = await auth.eval(fillAndSubmit('e2e-password-1'))
+  check(submitted === 'submitted', 'auth: the sign-in form submits', String(submitted))
+
+  // The button must not be left spinning: either we advance, or an error is
+  // shown. "Working…" forever is the exact failure users hit.
+  const settled = await waitFor(
+    async () => {
+      const s = await auth.eval(
+        `JSON.stringify({
+           busy: !!document.querySelector('button.primary')?.textContent?.match(/Working/),
+           err: document.querySelector('.error-text')?.textContent ?? null,
+           gone: !document.querySelector('input.field')
+         })`
+      )
+      const st = JSON.parse(s)
+      return st.gone || st.err || !st.busy ? st : null
+    },
+    'the sign-in button to stop spinning',
+    25000
+  ).catch(() => null)
+  check(!!settled, 'auth: the sign-in button never spins forever')
+  check(settled && !settled.err, 'auth: sign-in reports no error', settled?.err ?? '')
 
   const chromeTarget = await waitFor(
     async () => (await targets()).find((t) => t.url.includes('mode=chrome')),
@@ -156,18 +187,25 @@ try {
   )
   const auth2 = await connect(relock)
   await sleep(800)
-  const relogin = await Promise.race([
-    auth2.eval(
-      `window.grindstone.request('POST','/api/auth/login',{username:'e2e',password:'e2e-password-1'}).then(r=>JSON.stringify(r))`
-    ),
-    sleep(15000).then(() => null),
-  ])
-  check(relogin !== null, 'auth: a returning user’s login reply also reaches the renderer')
-  check(
-    !!relogin && relogin.includes('"status":200'),
-    'auth: login succeeds',
-    String(relogin).slice(0, 60)
-  )
+  const resubmitted = await auth2.eval(fillAndSubmit('e2e-password-1'))
+  check(resubmitted === 'submitted', 'auth: the returning-user form submits', String(resubmitted))
+  const settled2 = await waitFor(
+    async () => {
+      const s = await auth2.eval(
+        `JSON.stringify({
+           busy: !!document.querySelector('button.primary')?.textContent?.match(/Working/),
+           err: document.querySelector('.error-text')?.textContent ?? null,
+           gone: !document.querySelector('input.field')
+         })`
+      )
+      const st = JSON.parse(s)
+      return st.gone || st.err || !st.busy ? st : null
+    },
+    'the login button to stop spinning',
+    25000
+  ).catch(() => null)
+  check(!!settled2, 'auth: a returning user’s login never spins forever')
+  check(settled2 && !settled2.err, 'auth: login reports no error', settled2?.err ?? '')
   const backToTabs = await waitFor(
     async () => (await targets()).find((t) => t.url.includes('mode=chrome')),
     'the tab strip after login'

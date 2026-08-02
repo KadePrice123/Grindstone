@@ -1,6 +1,6 @@
-import { app } from 'electron'
+import { app, ipcMain } from 'electron'
 import path from 'node:path'
-import { registerApiBridge, clearSession } from './api'
+import { announceUnlockedIfSignedIn, registerApiBridge, clearSession } from './api'
 import { log } from './log'
 import { Sidecar } from './sidecar'
 import { TabManager } from './tabs'
@@ -17,6 +17,13 @@ app.whenReady().then(async () => {
   // the single source of truth for signed-in state. Sign-in unlocks the tab
   // UI; lock/logout/expiry collapses back to the lock screen.
   registerApiBridge(sidecar, (signedIn) => tabs?.setLocked(!signedIn))
+
+  // The lock screen tells us when it has the sign-in answer in hand; only
+  // then is it safe to reload that view into tab mode.
+  ipcMain.on('auth:unlocked', () => {
+    log('renderer signalled unlocked — swapping to tab mode')
+    announceUnlockedIfSignedIn()
+  })
 
   sidecar.onStatus((status, detail) => {
     if (status === 'crashed') {

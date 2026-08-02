@@ -26,13 +26,24 @@ function setToken(t: string | null): void {
   sessionToken = t
   const is = sessionToken !== null
   if (was === is) return
-  // DEFERRED ON PURPOSE. The auth screen lives in the window's chrome view,
-  // and unlocking reloads that very view into tab mode. Doing it inline
-  // destroyed the frame that was still awaiting this request's reply, so the
-  // login promise never settled and the button span "Working…" forever.
-  // Let the response reach the renderer first, then change the world.
-  const next = is
-  setImmediate(() => notifyAuth?.(next))
+  if (is) {
+    // UNLOCK IS NOT ANNOUNCED HERE. The lock screen lives in the window's
+    // chrome view, and unlocking reloads that very view — tearing down the
+    // frame still waiting for this request's reply, so the login promise
+    // never settled ("Working…" forever). Deferring by a tick was NOT
+    // enough: the reply crosses a process boundary and may still be in
+    // flight. The renderer now signals 'auth:unlocked' once it has the
+    // answer in hand, which removes the race instead of narrowing it.
+    return
+  }
+  // Locking is safe to announce immediately: nothing is awaiting a reply
+  // that the lock screen needs.
+  setImmediate(() => notifyAuth?.(false))
+}
+
+/** Called from the renderer via 'auth:unlocked' once sign-in has resolved. */
+export function announceUnlockedIfSignedIn(): void {
+  if (sessionToken !== null) notifyAuth?.(true)
 }
 
 function frameIsOurs(frame: WebFrameMain | null): boolean {

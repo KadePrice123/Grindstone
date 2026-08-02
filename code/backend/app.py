@@ -175,7 +175,16 @@ def create_app(state: State) -> FastAPI:
         supplied = request.headers.get("x-app-token", "")
         if not hmac.compare_digest(supplied, state.boot_token):
             return JSONResponse({"detail": "missing or bad app token"}, status_code=401)
-        return await call_next(request)
+        # Request-level logging: "did the request arrive, and how long did it
+        # take" is the first question of every incident so far, and inferring
+        # it cost several rounds.
+        t0 = time.monotonic()
+        response = await call_next(request)
+        ms = (time.monotonic() - t0) * 1000
+        if ms > 400 or request.url.path.startswith("/api/auth/"):
+            LOG.info("%s %s -> %s in %.0fms", request.method, request.url.path,
+                     response.status_code, ms)
+        return response
 
     def current_session(request: Request):
         auth = request.headers.get("authorization", "")
