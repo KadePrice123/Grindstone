@@ -83,7 +83,10 @@ class AlpacaAdapter(BrokerAdapter):
             raise BrokerError("alpaca: rate limited (429) — 200 req/min cap")
         if r.status_code >= 400:
             raise BrokerError(f"alpaca: HTTP {r.status_code}")
-        return r.json()
+        try:
+            return r.json()
+        except ValueError as e:  # a 200 carrying HTML (captive portal, proxy)
+            raise BrokerError("alpaca: response was not JSON") from e
 
     def test_connection(self) -> dict[str, Any]:
         # A data-only account has no /v2/account; probe the data host instead.

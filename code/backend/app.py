@@ -15,8 +15,8 @@ at spawn. Both checks apply to /api/auth/* too — token issuance is not exempt
 from __future__ import annotations
 
 import hmac
-import json
 import sqlite3
+from contextlib import AbstractContextManager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -41,7 +41,8 @@ class State:
         self.sessions = SessionStore()
         self.db_path = db_path
 
-    def db(self) -> sqlite3.Connection:
+    def db(self) -> AbstractContextManager[sqlite3.Connection]:
+        """`with state.db() as db:` — one transaction, always closed."""
         return connect(self.db_path)
 
 
@@ -144,6 +145,8 @@ def create_app(state: State) -> FastAPI:
 
     # ------------------------------------------------------------ accounts
     def _adapter(broker: str, kind: str, creds: dict[str, str]):
+        if kind not in ("live", "paper", "data"):
+            raise HTTPException(422, f"unknown kind {kind!r}")
         if broker == "alpaca":
             missing = [f for f in ("key_id", "secret_key") if not creds.get(f)]
             if missing:
@@ -155,20 +158,30 @@ def create_app(state: State) -> FastAPI:
     def accounts_list(s=Depends(current_session)) -> list[dict[str, Any]]:
         with state.db() as db:
             rows = db.execute(
-                "SELECT a.id, a.broker, a.kind, a.nickname, a.enabled, a.created_at,"
-                " (SELECT group_concat(field || ':' || hint) FROM secrets WHERE account_id=a.id) AS hints"
-                " FROM accounts a WHERE a.user_id=? ORDER BY a.id",
+                "SELECT id, broker, kind, nickname, enabled, created_at"
+                " FROM accounts WHERE user_id=? ORDER BY id",
                 (s.user_id,),
             ).fetchall()
-        out = []
-        for r in rows:
-            hints = dict(h.split(":", 1) for h in (r["hints"] or "").split(",") if ":" in h)
-            out.append({
+            # Separate query, not group_concat: a hint is the tail of a
+            # user-supplied credential and may contain ':' or ',', which
+            # string-packing would silently corrupt.
+            hint_rows = db.execute(
+                "SELECT s.account_id, s.field, s.hint FROM secrets s"
+                " JOIN accounts a ON a.id = s.account_id WHERE a.user_id=?",
+                (s.user_id,),
+            ).fetchall()
+        hints: dict[int, dict[str, str]] = {}
+        for h in hint_rows:
+            if h["hint"]:
+                hints.setdefault(h["account_id"], {})[h["field"]] = h["hint"]
+        return [
+            {
                 "id": r["id"], "broker": r["broker"], "kind": r["kind"],
                 "nickname": r["nickname"], "enabled": bool(r["enabled"]),
-                "created_at": r["created_at"], "key_hints": hints,
-            })
-        return out
+                "created_at": r["created_at"], "key_hints": hints.get(r["id"], {}),
+            }
+            for r in rows
+        ]
 
     @app.post("/api/accounts")
     def accounts_create(body: AccountIn, s=Depends(current_session)) -> dict[str, Any]:
@@ -192,7 +205,7 @@ def create_app(state: State) -> FastAPI:
                 db.execute(
                     "INSERT INTO secrets (account_id, field, blob, hint) VALUES (?,?,?,?)",
                     (account_id, f,
-                     security.encrypt_secret(bytes(s.dek), value, s.user_id, account_id, f),
+                     security.encrypt_secret(s.dek, value, s.user_id, account_id, f),
                      hint),
                 )
         return {"id": account_id, "ok": True}
@@ -229,7 +242,7 @@ def create_app(state: State) -> FastAPI:
             ).fetchall()
         creds = {
             r["field"]: security.decrypt_secret(
-                bytes(s.dek), r["blob"], s.user_id, account_id, r["field"]
+                s.dek, r["blob"], s.user_id, account_id, r["field"]
             )
             for r in rows
         }

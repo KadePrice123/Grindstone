@@ -16,20 +16,52 @@ import os
 import secrets
 import socket
 import sys
+import threading
 
 import uvicorn
 
 from backend.app import API_VERSION, State, create_app
 
 
+def _die_with_parent() -> None:
+    """Exit when the shell does.
+
+    The shell holds our stdin; if it is killed (Task Manager, a crash, a
+    forced quit) its 'before-quit' handler never runs and we would survive as
+    an orphan still holding the database — observed in testing, with two stale
+    sidecars left behind. A blocking read on stdin returns EOF the moment the
+    parent's pipe closes, which works on Windows and Linux alike without a
+    native dependency or PID polling (os.kill(pid, 0) is NOT a liveness probe
+    on Windows — it terminates the target).
+    """
+
+    def wait() -> None:
+        try:
+            sys.stdin.buffer.read()  # blocks until the parent closes the pipe
+        except Exception:
+            pass
+        os._exit(0)
+
+    threading.Thread(target=wait, daemon=True, name="parent-watchdog").start()
+
+
 def main() -> int:
+    if os.environ.get("GRINDSTONE_BOOT_TOKEN") and not sys.stdin.closed:
+        _die_with_parent()
+
     boot_token = os.environ.get("GRINDSTONE_BOOT_TOKEN")
     if not boot_token:
         boot_token = secrets.token_urlsafe(32)
         print(json.dumps({"event": "dev-token", "token": boot_token}), flush=True)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # NOT SO_REUSEADDR: on Windows that flag lets another same-user process
+    # bind our exact port and steal connections carrying the boot token,
+    # session token, and (during enrollment) plaintext broker keys.
+    # SO_EXCLUSIVEADDRUSE is the one that blocks it; the two are mutually
+    # exclusive and must be set before bind().
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows only
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
     sock.bind(("127.0.0.1", int(os.environ.get("GRINDSTONE_PORT", "0"))))
     port = sock.getsockname()[1]
     sock.listen(128)

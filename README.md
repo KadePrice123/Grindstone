@@ -27,18 +27,42 @@ python -m venv ../../venvs/dashboard
 ../../venvs/dashboard/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
+Frontend toolchain (Node lives portably in `Claude/runtimes/node`, and
+`code/app/node_modules` is a junction into `Claude/venvs/dashboard-node_modules`
+so Drive never mirrors it):
+
+```bash
+cd code/app
+npm install
+```
+
+## Run the app
+
+```bash
+cd code/app
+npm run dev      # dev mode with hot reload
+npm run start    # run the production build (electron-vite preview)
+```
+
+Electron main spawns the Python sidecar from the venv, waits for its
+`{"event":"listening","port":N}` stdout line, health-checks it, and only then
+shows the window. First run: create a profile (that password *is* the vault
+key — no recovery by design), then Accounts → add your Alpaca paper key →
+Test → Save.
+
 ## Verification gate
 
 Offline, declared in `checkpoint.json`, run by `checkpoint.py`:
 
 ```bash
-cd code; python selftest.py        # expect: SELFTEST OK 6/6
+cd code; python selftest.py        # expect: SELFTEST OK 12/12
 ```
 
-M0 scope: branding assets valid + themable, requirements doc complete, no
-credential-shaped strings in tracked files, env hygiene. The count grows with
-each milestone (see REQUIREMENTS.md §9-§10); live connectivity will be a
-separate diagnostic, never part of the gate.
+M0: branding + docs + secret hygiene. M1 adds: envelope-encryption round-trip
+with AAD tamper detection, the full offline auth+accounts API flow with a
+stolen-DB plaintext scan, Alpaca parser fixtures, the read-only Alpaca
+invariant, session expiry/wipe, and the frontend typecheck. Live connectivity
+stays a separate diagnostic, never part of the gate.
 
 ## Distribution
 
@@ -52,5 +76,7 @@ separate diagnostic, never part of the gate.
 
 ## Status
 
-M0 (scaffold + requirements + branding) — see roadmap in REQUIREMENTS.md §10.
+M1 (spine) — the app boots: Electron shell + supervised Python sidecar,
+login/first-run, idle page, Accounts page storing envelope-encrypted Alpaca
+keys with live connection test. Roadmap: REQUIREMENTS.md §10.
 Alpaca paper key verified working 2026-08-01 (stored in `env/alpaca.env`).

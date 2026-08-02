@@ -5,9 +5,11 @@ import { Logo } from '../components/Logo'
 export function AuthGate({
   initialized,
   onSignedIn,
+  onRecheck,
 }: {
   initialized: boolean
   onSignedIn: (username: string) => void
+  onRecheck: () => void
 }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -30,12 +32,15 @@ export function AuthGate({
     setBusy(true)
     try {
       const path = creating ? '/api/auth/setup' : '/api/auth/login'
-      const res = await api<{ username: string; signedIn: boolean }>('POST', path, {
-        username,
-        password,
-      })
+      const res = await api<{ username: string }>('POST', path, { username, password })
       onSignedIn(res.username)
     } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        // A profile already exists (another window created it) — the create
+        // form is a dead end; re-check so we render the login form instead.
+        onRecheck()
+        return
+      }
       setError(err instanceof ApiError ? err.message : String(err))
     } finally {
       setBusy(false)

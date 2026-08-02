@@ -23,8 +23,21 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A 401 on anything but login means the backend locked or restarted. The main
+ * process has already dropped its token; the UI must follow or it sits in a
+ * signed-in shell where every call fails.
+ */
+let onAuthExpired: (() => void) | null = null
+export function setAuthExpiredHandler(fn: (() => void) | null): void {
+  onAuthExpired = fn
+}
+
 export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await window.grindstone.request<T>(method, path, body)
+  if (res.status === 401 && path !== '/api/auth/login' && path !== '/api/auth/setup') {
+    onAuthExpired?.()
+  }
   if (res.status >= 400) {
     const detail =
       (res.body as { detail?: string } | null)?.detail ?? `request failed (${res.status})`

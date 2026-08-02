@@ -48,6 +48,19 @@ export function createMainWindow(preloadPath: string): AppWindow {
     return { action: 'deny' }
   })
 
+  // The shell frame must never navigate away from our own renderer: a
+  // navigated main frame would still pass the IPC sender check and keep
+  // authenticated API access. (Real web browsing arrives in M2 as separate,
+  // unprivileged WebContentsViews with no preload bridge.)
+  const devUrl = process.env['ELECTRON_RENDERER_URL']
+  view.webContents.on('will-navigate', (event, url) => {
+    const allowed = devUrl ? url.startsWith(devUrl) : url.startsWith('file://')
+    if (!allowed) {
+      event.preventDefault()
+      if (url.startsWith('https://')) shell.openExternal(url)
+    }
+  })
+
   if (process.env['ELECTRON_RENDERER_URL']) {
     view.webContents.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {

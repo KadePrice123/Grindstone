@@ -20,8 +20,11 @@ CREDENTIAL_FIELDS: dict[str, dict[str, Any]] = {
         "hint_last4": "key_id",
     },
     "tastytrade": {
+        # No hint: both fields ARE secrets, and the hint column is plaintext in
+        # a cloud-synced DB. Alpaca's key_id is a public identifier, so it may
+        # carry one; a refresh token may not.
         "fields": ["client_secret", "refresh_token"],
-        "hint_last4": "refresh_token",
+        "hint_last4": None,
     },
     "webull": {"fields": ["app_key", "app_secret"], "hint_last4": "app_key"},
     "fidelity": {"fields": [], "hint_last4": None},  # read-only tier, no direct keys

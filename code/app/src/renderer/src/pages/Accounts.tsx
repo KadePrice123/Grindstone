@@ -68,8 +68,12 @@ export function Accounts({ onBack }: { onBack: () => void }) {
 
   const remove = async (id: number) => {
     if (!confirm('Delete this account and its stored keys?')) return
-    await api('DELETE', `/api/accounts/${id}`)
-    await refresh()
+    try {
+      await api('DELETE', `/api/accounts/${id}`)
+      await refresh()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    }
   }
 
   const testSaved = async (id: number) => {

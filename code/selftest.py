@@ -191,6 +191,21 @@ def _api_flow():
                         json={"broker": "fidelity", "kind": "live", "credentials": {}})
         assert r.json()["ok"] is False and "Fidelity" in r.json()["error"]
 
+        # a bad kind is a 422, never an uncaught 500 (review 2026-08-01)
+        r = client.post("/api/accounts/test", headers=A,
+                        json={"broker": "alpaca", "kind": "nonsense", "credentials":
+                              {"key_id": "x", "secret_key": "y"}})
+        assert r.status_code == 422, f"bad kind returned {r.status_code}"
+
+        # hints survive punctuation in the credential tail (no string packing)
+        odd = "PKODD,KEY:WITH,PUNCT"
+        r = client.post("/api/accounts", headers=A, json={
+            "broker": "alpaca", "kind": "paper", "nickname": "Odd",
+            "credentials": {"key_id": odd, "secret_key": fake_secret}})
+        assert r.status_code == 200
+        listed = client.get("/api/accounts", headers=A).json()
+        assert listed[-1]["key_hints"]["key_id"] == odd[-4:], listed[-1]["key_hints"]
+
         # lock revokes every session for the user
         assert client.post("/api/auth/lock", headers=A).json()["ok"] is True
         assert client.get("/api/accounts", headers=A).status_code == 401
@@ -236,22 +251,98 @@ def _alpaca_readonly():
             "trading milestone deliberately, with its own gate checks")
 
 
-@check("sessions: idle expiry and revocation wipe")
+@check("sessions: idle expiry, revocation wipe, and no shared-buffer race")
 def _sessions():
     sys.path.insert(0, str(CODE))
     from backend.sessions import SessionStore
 
-    s = SessionStore(idle_seconds=0)          # everything is instantly stale
+    # Negative idle window: every session is already stale, so this asserts
+    # the expiry path deterministically instead of racing Windows' ~15ms
+    # monotonic clock resolution.
+    s = SessionStore(idle_seconds=-1)
     tok = s.create(1, "t", b"\x01" * 32)
-    import time as _t
-    _t.sleep(0.01)
     assert s.get(tok) is None, "stale session survived"
 
     s2 = SessionStore()
     t2 = s2.create(1, "t", b"\x02" * 32)
-    entry = s2._by_token[t2]
+    buf = s2._peek_buffer(t2)
     s2.revoke(t2)
-    assert bytes(entry.dek) == b"\x00" * 32, "DEK not wiped on revoke"
+    assert bytes(buf) == b"\x00" * 32, "DEK not wiped on revoke"
+
+    # REGRESSION (review 2026-08-01, high): a snapshot handed to an in-flight
+    # request must be immune to a concurrent revoke. Before the fix, revoke
+    # zeroed the very buffer the request was about to encrypt with, sealing
+    # broker keys under an all-zero (publicly known) key.
+    s3 = SessionStore()
+    t3 = s3.create(1, "t", b"\x03" * 32)
+    snap = s3.get(t3)
+    s3.revoke(t3)
+    assert snap is not None and snap.dek == b"\x03" * 32, \
+        "revoke corrupted an in-flight session's key"
+    assert isinstance(snap.dek, bytes), "snapshot must expose immutable bytes"
+
+
+@check("db: no WAL sidecar and connections are closed (synced-folder safety)")
+def _db_hygiene():
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from backend.db import connect
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "t.db"
+        with connect(p) as con:
+            con.execute(
+                "INSERT INTO users (username, pw_hash, kdf_salt, wrapped_dek)"
+                " VALUES ('a','h',x'00',x'00')"
+            )
+        leftovers = [f.name for f in Path(tmp).iterdir() if f.name != "t.db"]
+        assert not leftovers, f"journal/WAL files left beside a synced DB: {leftovers}"
+        with connect(p) as con:
+            assert con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+
+
+@check("secret hints never expose secret material")
+def _hints():
+    sys.path.insert(0, str(CODE))
+    from backend.brokers.base import CREDENTIAL_FIELDS
+
+    secret_named = ("secret", "token", "password", "private")
+    for broker, spec in CREDENTIAL_FIELDS.items():
+        h = spec["hint_last4"]
+        if h is None:
+            continue
+        assert h in spec["fields"], f"{broker}: hint field {h!r} is not a credential field"
+        assert not any(w in h.lower() for w in secret_named), (
+            f"{broker}: hint_last4={h!r} would store the tail of a secret in "
+            "plaintext in a cloud-synced DB"
+        )
+
+
+@check("ipc proxy: canonical paths only, and tokens scrubbed by default")
+def _ipc_invariants():
+    src = (CODE / "app" / "src" / "main" / "api.ts").read_text(encoding="utf-8")
+    # A path that is not already canonical must be rejected, not rewritten —
+    # otherwise '/api/auth/login?x=1' reaches the same route while dodging
+    # our token handling (review 2026-08-01, high).
+    assert "url.pathname !== path" in src, "IPC proxy does not enforce canonical paths"
+    assert "redirect: 'error'" in src, "a 307 could silently change the routed path"
+    # Scrubbing must be unconditional, not an allowlist of known routes.
+    assert "function scrub(" in src and "scrub(payload)" in src, \
+        "response bodies are not token-scrubbed by default"
+
+
+@check("sidecar cannot outlive the shell (orphan watchdog wired both ends)")
+def _orphan_watchdog():
+    # REGRESSION: force-killing the shell left two stale python.exe processes
+    # holding the database (observed 2026-08-01). Both halves must stay wired:
+    # the shell keeps stdin as a pipe, the sidecar exits on EOF.
+    main_py = (CODE / "backend" / "main.py").read_text(encoding="utf-8")
+    assert "_die_with_parent" in main_py and "sys.stdin.buffer.read()" in main_py, \
+        "sidecar lost its parent-death watchdog"
+    sidecar_ts = (CODE / "app" / "src" / "main" / "sidecar.ts").read_text(encoding="utf-8")
+    assert "'pipe', 'pipe', 'pipe'" in sidecar_ts, \
+        "shell no longer holds the sidecar's stdin — the watchdog can never fire"
 
 
 @check("frontend: sources present; typecheck when toolchain available")

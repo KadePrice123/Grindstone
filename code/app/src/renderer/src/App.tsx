@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react'
-import { api, ApiError } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { api, ApiError, setAuthExpiredHandler } from './api'
+import { Logo } from './components/Logo'
 import { AuthGate } from './pages/AuthGate'
 import { Idle } from './pages/Idle'
 import { Accounts } from './pages/Accounts'
@@ -7,13 +8,18 @@ import { Accounts } from './pages/Accounts'
 export type Route = 'idle' | 'accounts'
 
 type Phase =
-  | { kind: 'booting'; detail?: string }
+  | { kind: 'booting' }
   | { kind: 'auth'; initialized: boolean }
   | { kind: 'app'; username: string; route: Route }
   | { kind: 'backend-down'; detail?: string }
 
 export default function App() {
   const [phase, setPhase] = useState<Phase>({ kind: 'booting' })
+
+  // The sidecar-status subscription is registered once; without a ref it would
+  // close over the phase from first render and never see the current one.
+  const phaseRef = useRef(phase)
+  phaseRef.current = phase
 
   const toAuth = useCallback(async () => {
     try {
@@ -27,15 +33,21 @@ export default function App() {
     }
   }, [])
 
+  // Any 401 from a user route drops us back to the lock screen.
   useEffect(() => {
-    let tries = 0
+    setAuthExpiredHandler(() => {
+      if (phaseRef.current.kind === 'app') toAuth()
+    })
+    return () => setAuthExpiredHandler(null)
+  }, [toAuth])
+
+  useEffect(() => {
     let cancelled = false
     const probe = async () => {
-      while (!cancelled && tries < 40) {
-        tries += 1
+      for (let tries = 0; tries < 40 && !cancelled; tries += 1) {
         try {
           await api('GET', '/api/health')
-          await toAuth()
+          if (!cancelled) await toAuth()
           return
         } catch {
           await new Promise((r) => setTimeout(r, 500))
@@ -44,19 +56,21 @@ export default function App() {
       if (!cancelled) setPhase({ kind: 'backend-down', detail: 'backend never became healthy' })
     }
     probe()
+
     const off = window.grindstone.onSidecarStatus((s) => {
-      if (s.status === 'crashed') setPhase({ kind: 'backend-down', detail: s.detail })
-      if (s.status === 'ready' && phase.kind === 'backend-down') toAuth()
+      if (s.status === 'crashed') {
+        setPhase({ kind: 'backend-down', detail: s.detail })
+      } else if (s.status === 'ready') {
+        // Sessions die with the sidecar (main clears its token on crash), so
+        // the auth screen is the correct destination after any restart.
+        if (phaseRef.current.kind !== 'auth') toAuth()
+      }
     })
     return () => {
       cancelled = true
       off()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const onSignedIn = (username: string) => setPhase({ kind: 'app', username, route: 'idle' })
-  const onLocked = () => toAuth()
+  }, [toAuth])
 
   switch (phase.kind) {
     case 'booting':
@@ -64,18 +78,20 @@ export default function App() {
     case 'backend-down':
       return <Splash text="Backend is not running." detail={phase.detail} error />
     case 'auth':
-      return <AuthGate initialized={phase.initialized} onSignedIn={onSignedIn} />
+      return (
+        <AuthGate
+          initialized={phase.initialized}
+          onSignedIn={(username) => setPhase({ kind: 'app', username, route: 'idle' })}
+          onRecheck={toAuth}
+        />
+      )
     case 'app': {
       const nav = (route: Route) => setPhase({ ...phase, route })
-      if (phase.route === 'accounts') {
-        return <Accounts onBack={() => nav('idle')} />
-      }
-      return <Idle username={phase.username} onNavigate={nav} onLocked={onLocked} />
+      if (phase.route === 'accounts') return <Accounts onBack={() => nav('idle')} />
+      return <Idle username={phase.username} onNavigate={nav} onLocked={toAuth} />
     }
   }
 }
-
-import { Logo } from './components/Logo'
 
 function Splash({ text, detail, error }: { text: string; detail?: string; error?: boolean }) {
   return (

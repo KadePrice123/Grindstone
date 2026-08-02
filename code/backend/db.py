@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 _SCHEMA = """
@@ -50,10 +52,26 @@ def data_dir() -> Path:
     return d
 
 
-def connect(path: Path | None = None) -> sqlite3.Connection:
+@contextmanager
+def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    """Open, commit-or-rollback, and CLOSE. Closing matters twice over: it
+    releases the file handle (Drive holds directory handles on Windows) and it
+    guarantees no journal is left beside a cloud-synced database.
+
+    journal_mode is deliberately DELETE, not WAL: this DB lives in a synced
+    folder by design, and a -wal sidecar means Drive can upload app.db
+    without the newest committed rows — a torn backup missing exactly the
+    credentials the user just enrolled. DELETE keeps every committed byte in
+    the one file and removes the journal between transactions. Write volume
+    here is a few rows per session, so WAL's concurrency buys us nothing.
+    """
     con = sqlite3.connect(path or (data_dir() / "app.db"))
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA foreign_keys=ON")
-    con.executescript(_SCHEMA)
-    return con
+    try:
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA journal_mode=DELETE")
+        con.execute("PRAGMA foreign_keys=ON")
+        con.executescript(_SCHEMA)
+        with con:
+            yield con
+    finally:
+        con.close()
