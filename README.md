@@ -1,4 +1,4 @@
-# dashboard — Grindstone Investments (placeholder name)
+# Grindstone — the Grindstone Trading dashboard (placeholder name)
 
 A desktop trading platform that looks and behaves like a **web browser**: one
 omnibox search bar, everything opens as tabs that tear off and regroup across OS
