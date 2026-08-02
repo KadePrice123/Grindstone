@@ -217,11 +217,21 @@ export class TabManager {
       webPreferences: {
         session: browsingSession(),
         contextIsolation: true,
-        nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
+        // Every node door, explicitly shut — a renderer-sandbox escape in a
+        // news tab lands in the same process tree as the credential vault.
+        nodeIntegration: false,
+        nodeIntegrationInWorker: false,
+        nodeIntegrationInSubFrames: false,
+        webviewTag: false,
+        experimentalFeatures: false,
         allowRunningInsecureContent: false,
-        // deliberately NO preload
+        safeDialogs: true,
+        disableDialogs: true,
+        navigateOnDragDrop: false,
+        autoplayPolicy: 'document-user-activation-required',
+        // deliberately NO preload: this view can never reach our bridges
       },
     })
     view.setBackgroundColor('#ffffff')
@@ -242,6 +252,14 @@ export class TabManager {
         this.newBrowserTab(home, target)
       }
       return { action: 'deny' }
+    })
+    // A web page may only ever navigate to another web page: no file://,
+    // no custom app schemes, nothing that could reach local resources.
+    wc.on('will-navigate', (event, target) => {
+      if (!/^https?:$/.test(new URL(target).protocol)) {
+        event.preventDefault()
+        log('blocked navigation to non-web scheme', target.slice(0, 80))
+      }
     })
     const sync = () => {
       tab.title = wc.getTitle() || parsed.hostname

@@ -186,6 +186,101 @@ try {
 
   const mark = await spy.eval('window.__e2e_mark')
   check(mark === 42, 'tabs: LIVE view survived tear-off + adopt (no reload)', `marker=${mark}`)
+
+  // ---------------------------------------------------------------- chart
+  // The chart is canvas-based; a CSP or v5-API mistake shows up as zero
+  // canvases plus console errors, never as a visible exception.
+  // Charts wait on a network round-trip (and a keyless-fallback provider on a
+  // cold profile), so give rendering real time before calling it a failure.
+  const canvases = await waitFor(
+    async () => {
+      const n = await spy.eval('document.querySelectorAll("canvas").length')
+      return n > 0 ? n : null
+    },
+    'the chart canvas',
+    45000
+  ).catch(() => 0)
+  // Honest assertion: a cold e2e profile has no broker account, so the
+  // chart legitimately has no data. What must ALWAYS hold is that the chart
+  // area resolves to one of two correct states — a canvas, or a labelled
+  // empty state — and never to a blank void or a hang.
+  const chartState = await spy.eval(
+    `JSON.stringify({
+       canvas: document.querySelectorAll('canvas').length,
+       empty: document.querySelector('.chart-empty')?.textContent?.slice(0,80) ?? null
+     })`
+  )
+  const cs = JSON.parse(chartState)
+  check(
+    cs.canvas > 0 || !!cs.empty,
+    'chart: renders a canvas, or says why it cannot',
+    cs.canvas > 0 ? `${cs.canvas} canvas` : `empty state: "${cs.empty}"`
+  )
+
+  if (canvases === 0) {
+    // Do not guess why: ask the page what it actually has.
+    const diag = await spy.eval(
+      `JSON.stringify({
+         boxes: document.querySelectorAll('.chart-box').length,
+         empty: document.querySelector('.chart-empty')?.textContent?.slice(0,120) ?? null,
+         w: document.querySelector('.chart-box')?.clientWidth ?? null,
+         h: document.querySelector('.chart-box')?.clientHeight ?? null,
+         bodyW: document.body.clientWidth,
+         errs: (window.__e2e_errs||[]).slice(-3)
+       })`
+    )
+    console.log('      chart diagnostic:', diag)
+    // Never await an unbounded page promise here: a hanging backend call
+    // would leave the harness stuck instead of reporting a failure.
+    const bars = await Promise.race([
+      spy.eval(
+        `window.grindstone.request('GET','/api/symbols/SPY/bars?timeframe=1Day&limit=20')
+          .then(r => JSON.stringify({status:r.status, source:r.body?.source, n:r.body?.bars?.length, reason:r.body?.reason}))`
+      ),
+      sleep(20000).then(() => '(no answer in 20s — backend call is hanging)'),
+    ])
+    console.log('      bars endpoint:', bars)
+  }
+  const chartErr = await spy.eval(
+    `(window.__e2e_errs || []).filter(e => /lightweight|chart|canvas/i.test(e)).length`
+  )
+  check(!chartErr, 'chart: no chart-related console errors')
+
+  // The bars endpoint must ANSWER, quickly, even when it has nothing to
+  // serve — a hanging data path was a real bug (unbounded Yahoo fallback).
+  const t0 = Date.now()
+  const barsAnswer = await Promise.race([
+    spy.eval(
+      `window.grindstone.request('GET','/api/symbols/SPY/bars?timeframe=1Day&limit=20')
+        .then(r => JSON.stringify({status:r.status, source:r.body?.source, n:r.body?.bars?.length}))`
+    ),
+    sleep(20000).then(() => null),
+  ])
+  check(
+    barsAnswer !== null,
+    'data: the bars endpoint always answers (never hangs)',
+    barsAnswer ? `${Date.now() - t0}ms ${barsAnswer}` : 'no answer in 20s'
+  )
+
+  // -------------------------------------------------------------- browsing
+  // News must open IN the app. iframes cannot show news sites (they send
+  // X-Frame-Options/frame-ancestors), so this must be a real browser view.
+  const beforeTabs = (await chromeA.eval('window.grindstoneTabs.getState()')).tabs.length
+  await spy.eval(`(window.grindstone.openUrl('https://example.com/'), 'ok')`)
+  await sleep(2500)
+  const afterState = await chromeA.eval('window.grindstoneTabs.getState()')
+  check(
+    afterState.tabs.length === beforeTabs + 1,
+    'browsing: a URL opens as an in-app tab, not in the OS browser',
+    `tabs ${beforeTabs} -> ${afterState.tabs.length}`
+  )
+  const browserTab = afterState.tabs.find((t) => t.kind === 'browser')
+  check(!!browserTab, 'browsing: the new tab is a browser tab with its own kind')
+  check(
+    !!browserTab && /example\.com/.test(browserTab.url ?? ''),
+    'browsing: the tab reports the page URL to the strip',
+    browserTab?.url
+  )
 } catch (err) {
   console.log('FAIL  harness error —', err.message)
   failures += 1

@@ -12,6 +12,7 @@ Rules of engagement, from the research and Yahoo's terms:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import threading
 import time
 from typing import Any
@@ -19,6 +20,54 @@ from typing import Any
 _MIN_INTERVAL = 1.1  # seconds between Yahoo calls, community-safe zone
 _lock = threading.Lock()
 _last_call = 0.0
+
+# A fallback that hangs is worse than a fallback that fails: an unbounded
+# yfinance call stalled a chart request indefinitely in testing.
+#
+# Two layers, because the first alone was not enough (also caught in testing):
+#  1. every call runs on a worker with a hard deadline;
+#  2. a CIRCUIT BREAKER, because a timeout does NOT cancel the underlying
+#     thread — stuck threads accumulate, exhaust the pool, and then even
+#     "bounded" calls queue forever. After repeated failures the provider
+#     reports unavailable immediately until a cooldown expires.
+_pool = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="yahoo")
+CALL_TIMEOUT = 10.0
+BREAKER_THRESHOLD = 2
+BREAKER_COOLDOWN = 300.0
+
+_breaker_lock = threading.Lock()
+_consecutive_failures = 0
+_open_until = 0.0
+
+
+def available() -> bool:
+    with _breaker_lock:
+        return time.monotonic() >= _open_until
+
+
+def _record(success: bool) -> None:
+    global _consecutive_failures, _open_until
+    with _breaker_lock:
+        if success:
+            _consecutive_failures = 0
+            _open_until = 0.0
+        else:
+            _consecutive_failures += 1
+            if _consecutive_failures >= BREAKER_THRESHOLD:
+                _open_until = time.monotonic() + BREAKER_COOLDOWN
+
+
+def _bounded(fn, *args, **kwargs):
+    """Run fn with a hard timeout; None on timeout/failure/open breaker."""
+    if not available():
+        return None
+    try:
+        out = _pool.submit(fn, *args, **kwargs).result(timeout=CALL_TIMEOUT)
+    except Exception:  # noqa: BLE001 — includes TimeoutError; callers degrade
+        _record(False)
+        return None
+    _record(True)
+    return out
 
 
 def _throttle() -> None:
@@ -46,14 +95,15 @@ class YahooProvider:
         )
 
     def quote(self, symbol: str) -> dict[str, Any] | None:
-        _throttle()
-        t = self._ticker(symbol)
-        try:
-            fi = t.fast_info
-            price = fi.last_price
-            prev = fi.previous_close
-        except Exception:  # noqa: BLE001 — yfinance raises a zoo of types
+        def work():
+            _throttle()
+            fi = self._ticker(symbol).fast_info
+            return fi.last_price, fi.previous_close
+
+        got = _bounded(work)
+        if got is None:
             return None
+        price, prev = got
         if price is None:
             return None
         change = pct = None
@@ -72,12 +122,13 @@ class YahooProvider:
         }
 
     def daily_bars(self, symbol: str, period: str = "1y") -> list[dict[str, Any]]:
-        _throttle()
-        t = self._ticker(symbol)
-        try:
-            df = t.history(period=period, interval="1d", repair=False,
-                           auto_adjust=True)
-        except Exception:  # noqa: BLE001
+        def work():
+            _throttle()
+            return self._ticker(symbol).history(period=period, interval="1d",
+                                                repair=False, auto_adjust=True)
+
+        df = _bounded(work)
+        if df is None or getattr(df, "empty", True):
             return []
         out = []
         for ts, row in df.iterrows():

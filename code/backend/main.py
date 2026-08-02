@@ -16,7 +16,7 @@ import os
 import secrets
 import socket
 import sys
-import threading
+import threading  # noqa: F401  (also used by the watchdog below)
 
 import uvicorn
 
@@ -88,6 +88,18 @@ def main() -> int:
     boot_con.close()
     state.recorder = Recorder(connect_market(), state.creds_for)
     state.recorder.start()
+
+    # Warm the keyless fallback's heavy import (pandas + curl_cffi is several
+    # seconds cold) off the request path — otherwise the first chart request
+    # on an account-less profile pays it and trips the call timeout.
+    def _warm() -> None:
+        try:
+            import yfinance  # noqa: F401
+            LOG.info("yahoo fallback warmed")
+        except Exception:  # noqa: BLE001 — optional dependency
+            LOG.info("yahoo fallback unavailable", exc_info=True)
+
+    threading.Thread(target=_warm, daemon=True, name="yahoo-warmup").start()
 
     config = uvicorn.Config(app, log_level="warning", access_log=False)
     server = uvicorn.Server(config)
