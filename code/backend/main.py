@@ -16,7 +16,8 @@ import os
 import secrets
 import socket
 import sys
-import threading  # noqa: F401  (also used by the watchdog below)
+import threading
+import time
 
 import uvicorn
 
@@ -92,7 +93,14 @@ def main() -> int:
     # Warm the keyless fallback's heavy import (pandas + curl_cffi is several
     # seconds cold) off the request path — otherwise the first chart request
     # on an account-less profile pays it and trips the call timeout.
+    #
+    # DELAYED ON PURPOSE. Importing yfinance from a thread during startup
+    # deadlocked the sidecar against the main thread's own imports: it bound
+    # its socket, logged "starting", and then never reached server.run(), so
+    # every request hung on a connection the OS had already accepted. Waiting
+    # until the server is serving costs nothing and removes the interleaving.
     def _warm() -> None:
+        time.sleep(8)
         try:
             import yfinance  # noqa: F401
             LOG.info("yahoo fallback warmed")

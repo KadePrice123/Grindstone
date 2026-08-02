@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS accounts (
     settings   TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key     TEXT NOT NULL,
+    value   TEXT NOT NULL,
+    PRIMARY KEY (user_id, key)
+);
 CREATE TABLE IF NOT EXISTS secrets (
     id         INTEGER PRIMARY KEY,
     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,

@@ -17,13 +17,17 @@ interface PageResult {
   total: number
   results: SearchResult[]
   featured: { symbol: string; name: string; asset_class: string } | null
+  web?: { used: boolean; installed: boolean; available: boolean }
 }
 
 function RowIcon({ r }: { r: SearchResult }) {
   if (r.type === 'symbol') return <ChartMiniIcon />
-  if (r.type === 'news') return <NewsMiniIcon />
+  if (r.type === 'news' || r.type === 'web-news') return <NewsMiniIcon />
+  if (r.type === 'web') return <BrowserMiniIcon />
   return <PageMiniIcon />
 }
+
+const IN_HOUSE = new Set(['symbol', 'news', 'page', 'action'])
 
 function age(iso?: string): string {
   if (!iso) return ''
@@ -77,9 +81,11 @@ export function SearchPage({
 
   const open = (r: SearchResult) => {
     if (r.type === 'symbol' && r.symbol) onNavigate({ name: 'symbol', symbol: r.symbol })
-    else if (r.type === 'news' && r.url) window.grindstone.openUrl(r.url)
-    else if (r.type === 'page' && (r.page === 'accounts' || r.page === 'data')) {
-      onNavigate({ name: r.page })
+    else if (r.url) window.grindstone.openUrl(r.url) // news + web -> in-app browser tab
+    else if (r.type === 'page') {
+      if (r.page === 'accounts' || r.page === 'data' || r.page === 'settings') {
+        onNavigate({ name: r.page })
+      }
     }
   }
 
@@ -126,12 +132,23 @@ export function SearchPage({
           <div className="dim">Nothing matched “{query}”.</div>
         ) : (
           data.results.map((r, i) => (
-            <div className="result-row" key={`${r.type}:${r.symbol ?? r.id ?? r.page}:${i}`} onClick={() => open(r)}>
+            <div
+              className="result-row"
+              key={`${r.type}:${r.symbol ?? r.id ?? r.page}:${i}`}
+              onClick={() => open(r)}
+            >
               <span className="result-ico">
-                {r.type === 'news' ? <BrowserMiniIcon /> : <RowIcon r={r} />}
+                <RowIcon r={r} />
               </span>
               <div className="result-body">
-                <div className="result-title">{r.title}</div>
+                <div className="result-title">
+                  {r.title}
+                  {IN_HOUSE.has(r.type) ? (
+                    <span className="src-tag in">Grindstone</span>
+                  ) : (
+                    <span className="src-tag web">{r.site ?? 'web'}</span>
+                  )}
+                </div>
                 <div className="subtle">
                   {r.subtitle}
                   {r.created_at ? ` · ${age(r.created_at)}` : ''}

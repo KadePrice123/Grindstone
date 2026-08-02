@@ -661,6 +661,56 @@ def _no_idle_animation():
                 )
 
 
+@check("web search: pinned backend, empty-vs-failure, boost reorders, settings")
+def _websearch_and_settings():
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from backend import search as search_mod, settings as settings_mod
+    from backend.db import connect
+    from backend.providers import websearch
+
+    # ddgs 9.x is a METASEARCH aggregator: backend="auto" scrapes Google,
+    # Bing, Yandex and Startpage — whose terms forbid automated querying —
+    # with a fingerprint-randomizing transport. Pinning to DuckDuckGo is what
+    # keeps this feature defensible; it must not drift back.
+    assert websearch.BACKEND == "duckduckgo", \
+        "web search backend must stay pinned to duckduckgo (see module docstring)"
+    src = (CODE / "backend" / "providers" / "websearch.py").read_text(encoding="utf-8")
+    assert "backend=BACKEND" in src, "the pinned backend is not actually passed to ddgs"
+    assert "max_results=" in src, "max_results must be keyword — positionally it binds to region"
+    # ddgs RAISES on an empty result set; counting that as a failure would
+    # open the breaker after three innocent searches.
+    assert "no results" in src.lower(), "empty results are not distinguished from failures"
+
+    # The boost must change ranking, not just exist.
+    web = [{"type": "web", "id": f"u{i}", "title": f"w{i}"} for i in range(4)]
+    house = [{"type": "page", "page": p, "title": p} for p in ("accounts", "data")] + \
+            [{"type": "symbol", "symbol": "TSLA", "title": "TSLA"}]
+    plain = search_mod._rrf_weighted([(house, 1.0), (web, 1.0)])
+    boosted = search_mod._rrf_weighted([(house, 6.0), (web, 1.0)])
+    p_pos = [r["type"] for r in plain].index("symbol")
+    b_pos = [r["type"] for r in boosted].index("symbol")
+    assert b_pos < p_pos, f"in-house boost does not reorder results ({p_pos} -> {b_pos})"
+
+    # Settings validate, clamp, and describe themselves.
+    with tempfile.TemporaryDirectory() as tmp:
+        with connect(Path(tmp) / "a.db") as db:
+            db.execute("INSERT INTO users (username, pw_hash, kdf_salt, wrapped_dek)"
+                       " VALUES ('u','h',x'00',x'00')")
+            vals = settings_mod.put(db, 1, {"inhouse_boost": 999})
+            assert vals["inhouse_boost"] == 4.0, "out-of-range setting must clamp"
+            vals = settings_mod.put(db, 1, {"web_search_enabled": False})
+            assert vals["web_search_enabled"] is False
+            try:
+                settings_mod.put(db, 1, {"not_a_setting": 1})
+                raise AssertionError("unknown setting accepted")
+            except ValueError:
+                pass
+    assert all({"key", "kind", "label", "help"} <= set(s) for s in settings_mod.schema()), \
+        "settings schema must be self-describing for the UI"
+
+
 @check("tab system: live re-parenting, no view leaks, drag protocol wired")
 def _tab_system():
     app_dir = CODE / "app"

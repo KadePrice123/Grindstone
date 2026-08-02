@@ -61,13 +61,14 @@ export interface AccountRow {
 }
 
 export interface SearchResult {
-  type: 'symbol' | 'news' | 'page' | 'action'
+  type: 'symbol' | 'news' | 'page' | 'action' | 'web' | 'web-news'
   title: string
   subtitle?: string
   symbol?: string
   asset_class?: string
-  id?: number
+  id?: number | string
   url?: string
+  site?: string
   page?: string
   action?: string
   created_at?: string

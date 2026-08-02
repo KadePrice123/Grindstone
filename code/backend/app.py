@@ -29,7 +29,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
+from . import settings as settings_mod
 from . import universe as universe_mod
+from .providers import websearch
 from .logs import LOG
 from .brokers import base as brokers_base
 from .brokers.alpaca import PAPER_URL, AlpacaAdapter
@@ -399,12 +401,31 @@ def create_app(state: State) -> FastAPI:
     @app.get("/api/search/page")
     def search_page(q: str = "", page: int = 1, per_page: int = 10,
                     s=Depends(current_session)) -> dict[str, Any]:
+        with state.db() as db:
+            prefs = settings_mod.get_all(db, s.user_id)
         con = state.market()
         try:
             return search_mod.page(q, state.universe, con, page_no=page,
-                                   per_page=per_page)
+                                   per_page=per_page, prefs=prefs)
         finally:
             con.close()
+
+    # ------------------------------------------------------------ settings
+    @app.get("/api/settings")
+    def settings_get(s=Depends(current_session)) -> dict[str, Any]:
+        with state.db() as db:
+            values = settings_mod.get_all(db, s.user_id)
+        return {"values": values, "schema": settings_mod.schema(),
+                "web": websearch.status()}
+
+    @app.put("/api/settings")
+    def settings_put(body: dict[str, Any], s=Depends(current_session)) -> dict[str, Any]:
+        try:
+            with state.db() as db:
+                values = settings_mod.put(db, s.user_id, body)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        return {"values": values}
 
     @app.get("/api/symbols/{symbol}/bars")
     def symbol_bars(symbol: str, timeframe: str = "1Day", limit: int = 500,

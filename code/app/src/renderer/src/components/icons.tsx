@@ -82,6 +82,20 @@ export const PageMiniIcon = () => (
   </Icon>
 )
 
+export const SettingsIcon = () => (
+  <Icon label="Settings">
+    <path d="M4 6.5 H6.6" />
+    <circle cx="9" cy="6.5" r="2.2" />
+    <path d="M11.4 6.5 H20" />
+    <path d="M4 12 H12.6" />
+    <circle cx="15" cy="12" r="2.2" />
+    <path d="M17.4 12 H20" />
+    <path d="M9.4 17.5 H20" />
+    <circle cx="7" cy="17.5" r="2.2" />
+    <path d="M4 17.5 H4.6" />
+  </Icon>
+)
+
 export const SearchMiniIcon = () => (
   <Icon label="Search">
     <circle cx="10.5" cy="10.5" r="6" />

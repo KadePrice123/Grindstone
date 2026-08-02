@@ -13,6 +13,7 @@ import { Accounts } from '../pages/Accounts'
 import { DataPage } from '../pages/DataPage'
 import { Idle } from '../pages/Idle'
 import { SearchPage } from '../pages/SearchPage'
+import { SettingsPage } from '../pages/SettingsPage'
 import { SymbolPage } from '../pages/SymbolPage'
 
 function meta(route: Route): { title: string; icon: string } {
@@ -25,6 +26,8 @@ function meta(route: Route): { title: string; icon: string } {
       return { title: route.symbol, icon: 'chart' }
     case 'search':
       return { title: route.query, icon: 'search' }
+    case 'settings':
+      return { title: 'Settings', icon: 'settings' }
     default:
       return { title: 'New tab', icon: 'home' }
   }
@@ -76,6 +79,8 @@ export function ContentApp({ initial }: { initial: Route }) {
         return <SymbolPage symbol={route.symbol} />
       case 'search':
         return <SearchPage query={route.query} onNavigate={navigate} />
+      case 'settings':
+        return <SettingsPage onBack={() => setStack((s) => s.slice(0, -1))} />
       default:
         return <Idle onNavigate={navigate} onLocked={() => setLocked(true)} />
     }

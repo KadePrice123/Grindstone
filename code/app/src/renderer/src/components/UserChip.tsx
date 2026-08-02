@@ -61,6 +61,9 @@ export function UserChip({
           <button onClick={() => (setOpen(false), onNavigate({ name: 'data' }))}>
             Data management
           </button>
+          <button onClick={() => (setOpen(false), onNavigate({ name: 'settings' }))}>
+            Settings
+          </button>
           <button onClick={lock}>Lock</button>
           <button onClick={signOut}>Sign out</button>
         </div>

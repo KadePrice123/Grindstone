@@ -12,6 +12,7 @@ import sqlite3
 from typing import Any
 
 from . import newsstore
+from .providers import websearch
 from .universe import Universe
 
 RRF_K = 60
@@ -23,7 +24,8 @@ PAGES = [
     {"key": "ai", "title": "AI", "words": ["ai", "assistant", "chat"]},
     {"key": "positions", "title": "Positions", "words": ["positions", "portfolio", "pnl", "p&l"]},
     {"key": "data", "title": "Data management", "words": ["data", "recording", "storage", "history"]},
-    {"key": "settings", "title": "Settings", "words": ["settings", "preferences", "theme"]},
+    {"key": "settings", "title": "Settings",
+     "words": ["settings", "preferences", "theme", "search", "web"]},
 ]
 
 NEWS_WORDS = {"news", "headlines", "articles", "article"}
@@ -60,24 +62,42 @@ def _pages_match(q: str) -> list[dict[str, Any]]:
     return out
 
 
+def _key(r: dict[str, Any]) -> str:
+    return f'{r["type"]}:{r.get("symbol") or r.get("id") or r.get("page")}'
+
+
 def _rrf(lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     scores: dict[str, float] = {}
     rows: dict[str, dict[str, Any]] = {}
-
-    def key(r: dict[str, Any]) -> str:
-        return f'{r["type"]}:{r.get("symbol") or r.get("id") or r.get("page")}'
-
     for lst in lists:
         for rank, r in enumerate(lst):
-            k = key(r)
+            k = _key(r)
             scores[k] = scores.get(k, 0.0) + 1.0 / (RRF_K + rank + 1)
             rows.setdefault(k, r)
-    ordered = sorted(rows.values(), key=lambda r: scores[key(r)], reverse=True)
-    return ordered
+    return sorted(rows.values(), key=lambda r: scores[_key(r)], reverse=True)
+
+
+def _rrf_weighted(groups: list[tuple[list[dict[str, Any]], float]]) -> list[dict[str, Any]]:
+    """Fuse already-ranked groups, each with a weight. This is how the
+    in-house boost works: platform results and web results are ranked
+    separately, then the platform group's contribution is multiplied by
+    (1 + boost) so the user's preference is one number, not a heuristic."""
+    scores: dict[str, float] = {}
+    rows: dict[str, dict[str, Any]] = {}
+    for lst, weight in groups:
+        for rank, r in enumerate(lst):
+            k = _key(r)
+            scores[k] = scores.get(k, 0.0) + weight / (RRF_K + rank + 1)
+            rows.setdefault(k, r)
+    return sorted(rows.values(), key=lambda r: scores[_key(r)], reverse=True)
+
+
+def _web_row(r: dict[str, Any]) -> dict[str, Any]:
+    return {**r, "id": r["url"]}
 
 
 def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
-         per_page: int = 10) -> dict[str, Any]:
+         per_page: int = 10, prefs: dict[str, Any] | None = None) -> dict[str, Any]:
     """Full results page (the Google-style landing when you press Enter
     without picking a suggestion). Same retrieval as the dropdown, but deep:
     symbols fused with a wider news sweep, then paginated."""
@@ -122,7 +142,26 @@ def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
             have = {r["id"] for r in news}
             news += [r for r in extra if r["id"] not in have]
 
-    fused = _rrf([symbols, news, _pages_match(q)])
+    prefs = prefs or {}
+    boost = float(prefs.get("inhouse_boost", 1.0))
+
+    # The open web, fetched only on page 1 (deeper pages page through what we
+    # already ranked — a fresh scrape per page would be slow and unstable).
+    web: list[dict[str, Any]] = []
+    if page_no == 1:
+        if prefs.get("web_search_enabled", True):
+            web += [_web_row(r) for r in websearch.web_results(q, limit=12)]
+        if prefs.get("web_news_enabled", True) and (news_toks or scope or featured):
+            subject = scope["symbol"] if scope else (featured["symbol"] if featured else q)
+            term = f"{subject} stock news" if (scope or featured) else q
+            web += [_web_row(r) for r in websearch.web_news(term, limit=10)]
+
+    # In-house lists are fused normally, then boosted as a group: the user's
+    # own data and the platform's pages outrank the open web by however much
+    # they chose in settings (0 = no preference).
+    inhouse = _rrf([symbols, news, _pages_match(q)])
+    fused = _rrf_weighted([(inhouse, 1.0 + boost), (web, 1.0)])
+
     total = len(fused)
     start = (page_no - 1) * per_page
     return {
@@ -133,6 +172,7 @@ def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
         "results": fused[start:start + per_page],
         "featured": {"symbol": featured["symbol"], "name": featured["name"],
                      "asset_class": featured["asset_class"]} if featured else None,
+        "web": {"used": bool(web), **websearch.status()},
     }
 
 

@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import path from 'node:path'
 import { registerApiBridge, clearSession } from './api'
+import { log } from './log'
 import { Sidecar } from './sidecar'
 import { TabManager } from './tabs'
 
@@ -27,9 +28,12 @@ app.whenReady().then(async () => {
 
   tabs.bootstrap() // lock screen first; the auth view probes backend health
   try {
-    await sidecar.start()
-  } catch {
-    /* the auth view reports backend-down itself; restarts are scheduled */
+    const s = await sidecar.start()
+    log('sidecar ready on port', s.port, 'version', s.version)
+  } catch (e) {
+    // Never swallow this: a silent start failure looks like "backend not
+    // running" in the UI with no clue anywhere as to why.
+    log('SIDECAR FAILED TO START:', String(e))
   }
 })
 
