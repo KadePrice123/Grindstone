@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react'
 import { api, SearchResult } from '../api'
 import { Logo } from '../components/Logo'
 import { Omnibox } from '../components/Omnibox'
@@ -20,53 +19,49 @@ const FAVORITES: {
 
 export function Idle({
   onNavigate,
-  onLocked,
 }: {
   onNavigate: (r: Route) => void
   onLocked: () => void
 }) {
-  const [menuOpen, setMenuOpen] = useState(false)
-  const [username, setUsername] = useState('')
-
-  useEffect(() => {
-    api<{ username: string }>('GET', '/api/auth/me')
-      .then((r) => setUsername(r.username))
-      .catch(() => setUsername(''))
-  }, [])
-
   const openResult = (r: SearchResult) => {
-    if (r.type === 'symbol' && r.symbol) {
-      onNavigate({ name: 'symbol', symbol: r.symbol })
-    } else if (r.type === 'action' && r.action === 'symbol-news' && r.symbol) {
+    if ((r.type === 'symbol' || r.type === 'action') && r.symbol) {
       onNavigate({ name: 'symbol', symbol: r.symbol })
     } else if (r.type === 'news' && r.url) {
-      window.open(r.url) // routed to the OS browser by the shell
+      window.grindstone.openUrl(r.url) // reads in-app, not in the OS browser
     } else if (r.type === 'page') {
       if (r.page === 'accounts') onNavigate({ name: 'accounts' })
       else if (r.page === 'data') onNavigate({ name: 'data' })
-      // apis / ai / positions / settings pages arrive in later milestones
     }
   }
 
-  const lock = async () => {
+  /** Enter with nothing selected: a bare ticker behaves like a URL and goes
+   *  straight to its page; anything else lands on the results page. */
+  const submit = async (query: string) => {
+    const q = query.trim()
     try {
-      await api('POST', '/api/auth/lock')
-    } finally {
-      onLocked()
+      const res = await api<{ results: SearchResult[] }>(
+        'GET',
+        `/api/search?q=${encodeURIComponent(q)}`
+      )
+      const first = res.results[0]
+      if (
+        first?.type === 'symbol' &&
+        first.symbol &&
+        first.symbol.toUpperCase() === q.toUpperCase()
+      ) {
+        onNavigate({ name: 'symbol', symbol: first.symbol })
+        return
+      }
+    } catch {
+      /* fall through to the results page */
     }
-  }
-  const signOut = async () => {
-    try {
-      await api('POST', '/api/auth/logout')
-    } finally {
-      onLocked()
-    }
+    onNavigate({ name: 'search', query: q })
   }
 
   return (
-    <div className="center-stage" onClick={() => menuOpen && setMenuOpen(false)}>
+    <div className="center-stage">
       <Logo size={84} />
-      <Omnibox onOpen={openResult} autoFocus />
+      <Omnibox onOpen={openResult} onSubmit={submit} autoFocus />
       <div className="favorites">
         {FAVORITES.map((f) => (
           <div
@@ -81,28 +76,6 @@ export function Idle({
           </div>
         ))}
       </div>
-
-      <div className="user-chip">
-        <button
-          title={username || 'Profile'}
-          onClick={(e) => {
-            e.stopPropagation()
-            setMenuOpen((v) => !v)
-          }}
-        >
-          {(username || '?').slice(0, 1).toUpperCase()}
-        </button>
-      </div>
-      {menuOpen ? (
-        <div className="user-menu" onClick={(e) => e.stopPropagation()}>
-          <div className="subtle" style={{ padding: '6px 12px' }}>
-            {username}
-          </div>
-          <button onClick={() => onNavigate({ name: 'data' })}>Data management</button>
-          <button onClick={lock}>Lock</button>
-          <button onClick={signOut}>Sign out</button>
-        </div>
-      ) : null}
     </div>
   )
 }

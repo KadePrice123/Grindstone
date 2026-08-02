@@ -14,16 +14,20 @@ export type Route =
   | { name: 'accounts' }
   | { name: 'data' }
   | { name: 'symbol'; symbol: string }
+  | { name: 'search'; query: string }
 
 export function parseRoute(raw: string | null): Route {
   if (!raw) return { name: 'idle' }
   if (raw.startsWith('symbol:')) return { name: 'symbol', symbol: raw.slice(7).toUpperCase() }
+  if (raw.startsWith('search:')) return { name: 'search', query: raw.slice(7) }
   if (raw === 'accounts' || raw === 'data') return { name: raw }
   return { name: 'idle' }
 }
 
 export function routeKey(r: Route): string {
-  return r.name === 'symbol' ? `symbol:${r.symbol}` : r.name
+  if (r.name === 'symbol') return `symbol:${r.symbol}`
+  if (r.name === 'search') return `search:${r.query}`
+  return r.name
 }
 
 export default function App() {

@@ -14,6 +14,7 @@ at spawn. Both checks apply to /api/auth/* too — token issuance is not exempt
 """
 from __future__ import annotations
 
+import datetime as dt
 import hmac
 import sqlite3
 import threading
@@ -394,6 +395,77 @@ def create_app(state: State) -> FastAPI:
             else:
                 res["empty"] = True
         return res
+
+    @app.get("/api/search/page")
+    def search_page(q: str = "", page: int = 1, per_page: int = 10,
+                    s=Depends(current_session)) -> dict[str, Any]:
+        con = state.market()
+        try:
+            return search_mod.page(q, state.universe, con, page_no=page,
+                                   per_page=per_page)
+        finally:
+            con.close()
+
+    @app.get("/api/symbols/{symbol}/bars")
+    def symbol_bars(symbol: str, timeframe: str = "1Day", limit: int = 500,
+                    s=Depends(current_session)) -> dict[str, Any]:
+        """Chart data. Recorded bars first (the user's own store), topped up
+        from the live provider; Yahoo daily as the keyless fallback. The
+        response always names its source — a chart that lies about where its
+        candles came from is worse than no chart."""
+        symbol = symbol.upper()
+        if timeframe not in recorder_mod.TIMEFRAMES:
+            raise HTTPException(422, f"timeframe must be one of {', '.join(recorder_mod.TIMEFRAMES)}")
+        limit = max(10, min(limit, 5000))
+        entry = state.universe.exact(symbol)
+        if entry and entry["asset_class"] in ("index", "future"):
+            return {"symbol": symbol, "timeframe": timeframe, "bars": [],
+                    "source": "none",
+                    "reason": f"no connected source carries {entry['asset_class']} bars yet"}
+
+        creds = state.creds_for(s.user_id)
+        if creds:
+            span = {"1Min": 3, "5Min": 10, "15Min": 30, "1Hour": 120, "1Day": 1500}[timeframe]
+            start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=span)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            try:
+                bars = AlpacaData(creds["key_id"], creds["secret_key"]).stock_bars(
+                    symbol, timeframe, start=start, limit=min(limit, 10000))
+                if bars:
+                    return {"symbol": symbol, "timeframe": timeframe,
+                            "bars": bars[-limit:], "source": "alpaca (IEX)"}
+            except brokers_base.BrokerError as e:
+                LOG.info("bars via alpaca failed for %s: %s", symbol, e)
+
+        # Recorded store — whatever the user's own jobs captured.
+        con = state.market()
+        try:
+            rows = con.execute(
+                "SELECT ts, open, high, low, close, volume FROM rec_bars"
+                " WHERE symbol=? AND timeframe=? ORDER BY ts DESC LIMIT ?",
+                (symbol, timeframe, limit)).fetchall()
+        finally:
+            con.close()
+        if rows:
+            bars = [{"ts": r["ts"], "open": r["open"], "high": r["high"],
+                     "low": r["low"], "close": r["close"], "volume": r["volume"]}
+                    for r in reversed(rows)]
+            return {"symbol": symbol, "timeframe": timeframe, "bars": bars,
+                    "source": "your recorded data"}
+
+        if timeframe == "1Day" and market.YahooProvider is not None:
+            try:
+                bars = market.YahooProvider().daily_bars(symbol)
+                if bars:
+                    return {"symbol": symbol, "timeframe": timeframe,
+                            "bars": bars[-limit:], "source": "yahoo (delayed)"}
+            except Exception:  # noqa: BLE001
+                LOG.info("yahoo bars failed for %s", symbol, exc_info=True)
+
+        return {"symbol": symbol, "timeframe": timeframe, "bars": [],
+                "source": "none",
+                "reason": "no data source available — add an Alpaca account, "
+                          "or record bars from Data management"}
 
     @app.get("/api/symbols/{symbol}/summary")
     def symbol_summary(symbol: str, s=Depends(current_session)) -> dict[str, Any]:

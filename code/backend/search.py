@@ -76,6 +76,66 @@ def _rrf(lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     return ordered
 
 
+def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
+         per_page: int = 10) -> dict[str, Any]:
+    """Full results page (the Google-style landing when you press Enter
+    without picking a suggestion). Same retrieval as the dropdown, but deep:
+    symbols fused with a wider news sweep, then paginated."""
+    q = (q or "").strip()
+    per_page = max(1, min(per_page, 50))
+    page_no = max(1, page_no)
+    if not q:
+        return {"query": q, "page": 1, "pages": 0, "total": 0, "results": [],
+                "featured": None}
+
+    tokens = q.split()
+    news_toks = [t for t in tokens if t.lower() in NEWS_WORDS]
+    other = [t for t in tokens if t.lower() not in NEWS_WORDS]
+    scope = uni.exact(other[0]) if (news_toks and other) else None
+
+    # A ticker mentioned anywhere in the query gets a chart above the results.
+    featured = uni.exact(q) or scope
+    if featured is None:
+        for t in tokens:
+            hit = uni.exact(t)
+            if hit:
+                featured = hit
+                break
+
+    symbols: list[dict[str, Any]] = []
+    if not news_toks:
+        seen: set[str] = set()
+        for e in uni.prefix(q, limit=20) + [e for (e, _s) in uni.fuzzy(q, limit=25)]:
+            if e["symbol"] in seen:
+                continue
+            seen.add(e["symbol"])
+            symbols.append(_sym_row(e))
+
+    if scope is not None:
+        news = [_news_row(it) for it in
+                newsstore.latest(con, symbols=[scope["symbol"]], limit=60)]
+    else:
+        news = [_news_row(it) for it in newsstore.search(con, q, limit=60)]
+        if featured is not None:
+            extra = [_news_row(it) for it in
+                     newsstore.latest(con, symbols=[featured["symbol"]], limit=30)]
+            have = {r["id"] for r in news}
+            news += [r for r in extra if r["id"] not in have]
+
+    fused = _rrf([symbols, news, _pages_match(q)])
+    total = len(fused)
+    start = (page_no - 1) * per_page
+    return {
+        "query": q,
+        "page": page_no,
+        "pages": max(1, (total + per_page - 1) // per_page),
+        "total": total,
+        "results": fused[start:start + per_page],
+        "featured": {"symbol": featured["symbol"], "name": featured["name"],
+                     "asset_class": featured["asset_class"]} if featured else None,
+    }
+
+
 def query(q: str, uni: Universe, con: sqlite3.Connection,
           limit: int = 12, live_news=None) -> dict[str, Any]:
     """Returns {results: [...], intent: {...}|None}. Never raises on user input.

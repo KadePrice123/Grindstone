@@ -1,7 +1,9 @@
 /**
  * The ONLY surface renderers get. No tokens, no Node, no direct network.
  * `grindstone` is the data bridge; `grindstoneTabs` is the shell bridge the
- * tab strip uses (and content pages use a small slice of: meta + open).
+ * tab strip uses (content pages use a small slice: meta, open, openUrl, nav).
+ *
+ * In-app browser tabs get NO preload at all — they never see any of this.
  */
 import { contextBridge, ipcRenderer } from 'electron'
 
@@ -23,13 +25,28 @@ const grindstone = {
     return () => ipcRenderer.removeListener('sidecar:status', listener)
   },
 
-  /** Content pages report their tab identity as the user navigates. */
-  setTabMeta: (title: string, icon: string): void => {
-    ipcRenderer.send('tab:meta', { title, icon })
+  /** Content pages report tab identity + how deep their in-tab history is. */
+  setTabMeta: (title: string, icon: string, depth: number): void => {
+    ipcRenderer.send('tab:meta', { title, icon, depth })
   },
-  /** Open a route in a NEW tab of this window. */
+  /** Open an app route in a NEW tab of this window. */
   openTab: (route: string): void => {
     ipcRenderer.send('tab:open', route)
+  },
+  /** Open a URL as an in-app browser tab (news articles stay in the app). */
+  openUrl: (url: string): void => {
+    ipcRenderer.send('tab:openUrl', url)
+  },
+  /** Chrome's Back/Home buttons reach the active content page through main. */
+  onNav: (cb: (what: 'back' | 'home') => void): (() => void) => {
+    const back = () => cb('back')
+    const home = () => cb('home')
+    ipcRenderer.on('nav:back', back)
+    ipcRenderer.on('nav:home', home)
+    return () => {
+      ipcRenderer.removeListener('nav:back', back)
+      ipcRenderer.removeListener('nav:home', home)
+    }
   },
 }
 
@@ -37,11 +54,16 @@ export interface StripTab {
   id: number
   title: string
   icon: string
+  kind: 'app' | 'browser'
+  url?: string
 }
 export interface StripState {
   tabs: StripTab[]
   activeId: number | null
   maximized: boolean
+  bounds: { x: number; y: number; width: number; height: number }
+  canGoBack: boolean
+  draggingId: number | null
 }
 
 const grindstoneTabs = {
@@ -58,6 +80,8 @@ const grindstoneTabs = {
   dragStart: (id: number): void => ipcRenderer.send('tabdrag:start', id),
   dragMove: (sx: number, sy: number): void => ipcRenderer.send('tabdrag:move', sx, sy),
   dragEnd: (sx: number, sy: number): void => ipcRenderer.send('tabdrag:end', sx, sy),
+  back: (): void => ipcRenderer.send('nav:back'),
+  home: (): void => ipcRenderer.send('nav:home'),
   minimize: (): void => ipcRenderer.send('win:minimize'),
   maximizeToggle: (): void => ipcRenderer.send('win:maximize'),
   closeWindow: (): void => ipcRenderer.send('win:close'),

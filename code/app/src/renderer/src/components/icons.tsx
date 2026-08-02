@@ -82,6 +82,21 @@ export const PageMiniIcon = () => (
   </Icon>
 )
 
+export const SearchMiniIcon = () => (
+  <Icon label="Search">
+    <circle cx="10.5" cy="10.5" r="6" />
+    <path d="M15 15 L20.5 20.5" />
+  </Icon>
+)
+
+export const BrowserMiniIcon = () => (
+  <Icon label="Web page">
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M3.5 12 H20.5" />
+    <path d="M12 3.5 C15.5 7 15.5 17 12 20.5 C8.5 17 8.5 7 12 3.5 Z" />
+  </Icon>
+)
+
 export const DataIcon = () => (
   <Icon label="Data">
     <ellipse cx="12" cy="5.5" rx="7" ry="2.8" />

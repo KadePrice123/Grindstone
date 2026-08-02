@@ -195,8 +195,9 @@ input {
   position: fixed;
   left: 16px;
   bottom: 16px;
+  z-index: 40;
 }
-.user-chip button {
+.user-avatar {
   width: 40px;
   height: 40px;
   border-radius: 50%;
@@ -205,17 +206,21 @@ input {
   cursor: pointer;
   font-weight: 600;
   color: var(--accent);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.user-avatar:hover {
+  border-color: var(--accent);
 }
 .user-menu {
-  position: fixed;
-  left: 16px;
-  bottom: 64px;
+  position: absolute;
+  left: 0;
+  bottom: 48px;
   background: var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 6px;
-  min-width: 160px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  min-width: 175px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
 }
 .user-menu button {
   display: block;
@@ -231,7 +236,72 @@ input {
   background: var(--surface);
 }
 
+/* ---------- lock screen drag bar (frameless window) ---------- */
+.auth-dragbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 16px;
+  -webkit-app-region: drag; /* without this a frameless window cannot move */
+  z-index: 50;
+}
+.auth-brand {
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.auth-close {
+  -webkit-app-region: no-drag;
+  width: 44px;
+  height: 38px;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+  cursor: default;
+}
+.auth-close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
 /* ---------- tab strip (chrome mode) ---------- */
+.strip-btn {
+  align-self: center;
+  height: 28px;
+  min-width: 30px;
+  margin-left: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+  cursor: default;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+}
+.strip-btn:hover:not(:disabled) {
+  background: #1d2125;
+  color: var(--text);
+}
+.strip-btn:disabled {
+  opacity: 0.3;
+}
+.strip-btn.home {
+  color: var(--accent);
+  margin-left: 8px;
+}
+
+/* ---------- omnibox dropdown ---------- */
 .strip {
   display: flex;
   align-items: stretch;
@@ -269,6 +339,16 @@ input {
 .strip-tab.active {
   background: var(--bg);
   color: var(--text);
+}
+/* A grabbed tab must read as grabbed the instant it moves — before this it
+   only appeared to move on drop. */
+.strip-tab.dragging {
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  opacity: 0.92;
+  z-index: 5;
+  cursor: grabbing;
 }
 .strip-ico {
   display: flex;
@@ -444,6 +524,142 @@ input {
 .news-head {
   margin-bottom: 3px;
   transition: color 0.12s;
+}
+
+/* ---------- charts ---------- */
+.chart-box {
+  width: 100%;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.chart-box.compact {
+  cursor: pointer;
+}
+.chart-card {
+  padding: 14px 14px 10px;
+}
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.chart-source {
+  margin-left: auto;
+}
+.chart-empty {
+  height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.seg {
+  display: flex;
+  gap: 2px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 2px;
+}
+.seg-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 5px 11px;
+  border-radius: 7px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.seg-btn:hover {
+  color: var(--text);
+}
+.seg-btn.on {
+  background: var(--accent);
+  color: #14100a;
+  font-weight: 600;
+}
+
+/* ---------- search results page ---------- */
+.page.wide {
+  max-width: 1180px;
+}
+.search-page {
+  max-width: 780px;
+  padding-top: 28px;
+}
+.search-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 18px;
+  font-size: 15px;
+}
+.featured {
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.featured:hover {
+  border-color: var(--accent);
+}
+.featured-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.featured-link {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 12.5px;
+}
+.result-row {
+  display: flex;
+  gap: 12px;
+  padding: 12px 2px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+.result-row:first-of-type {
+  border-top: 0;
+}
+.result-ico {
+  color: var(--text-dim);
+  padding-top: 2px;
+}
+.result-ico svg {
+  width: 18px;
+  height: 18px;
+}
+.result-title {
+  color: #8ab4f8;
+  margin-bottom: 2px;
+}
+.result-row:hover .result-title {
+  text-decoration: underline;
+}
+.result-body {
+  min-width: 0;
+}
+.pager {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  margin: 6px 0 30px;
+  flex-wrap: wrap;
+}
+.page-btn {
+  min-width: 38px;
+  padding: 8px 10px;
+}
+.quote-inline {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-left: auto;
+}
+.quote-price.sm {
+  font-size: 19px;
 }
 
 /* ---------- accounts page ---------- */

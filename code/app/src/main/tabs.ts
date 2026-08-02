@@ -12,9 +12,26 @@
  * (other window). On release: over a strip -> adopt into that window at the
  * hovered index; outside every strip -> tear off into a new window there.
  */
-import { BaseWindow, WebContentsView, ipcMain, shell } from 'electron'
+import { BaseWindow, WebContentsView, ipcMain, session, shell } from 'electron'
 import path from 'node:path'
 import { log } from './log'
+
+/** Untrusted third-party pages live in their own session: no preload, no
+ *  node, denied permissions, downloads blocked. Article reading must never
+ *  become a foothold into the app that holds broker credentials. */
+const BROWSE_PARTITION = 'persist:browsing'
+let browsingHardened = false
+
+function browsingSession(): Electron.Session {
+  const s = session.fromPartition(BROWSE_PARTITION)
+  if (!browsingHardened) {
+    browsingHardened = true
+    s.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
+    s.setPermissionCheckHandler(() => false)
+    s.on('will-download', (e) => e.preventDefault())
+  }
+  return s
+}
 
 export const TABBAR_H = 40
 const MIN_W = 900
@@ -26,6 +43,8 @@ export interface TabInfo {
   id: number
   title: string
   icon: string // page-type key the strip maps to an icon
+  kind: 'app' | 'browser'
+  url?: string
 }
 
 interface Tab {
@@ -33,6 +52,8 @@ interface Tab {
   view: WebContentsView
   title: string
   icon: string
+  kind: 'app' | 'browser'
+  url?: string
 }
 
 interface Win {
@@ -48,6 +69,8 @@ type StripState = {
   activeId: number | null
   maximized: boolean
   bounds: { x: number; y: number; width: number; height: number }
+  canGoBack: boolean
+  draggingId: number | null
 }
 
 export class TabManager {
@@ -58,6 +81,9 @@ export class TabManager {
   private locked = true
   private drag: { tabId: number; overWinId: number | null } | null = null
   private quitting = false
+  /** Content tabs navigate internally; they report their depth so the strip
+   *  can enable Back for app pages the same way it does for web pages. */
+  private appHistoryDepth = new Map<number, number>()
   onAllClosed: (() => void) | null = null
 
   constructor(preload: string) {
@@ -131,7 +157,12 @@ export class TabManager {
     return w
   }
 
+  private forgetTab(id: number) {
+    this.appHistoryDepth.delete(id)
+  }
+
   private onWindowClosed(w: Win) {
+    for (const t of w.tabs) this.forgetTab(t.id)
     // Electron does NOT destroy a window's WebContentsViews when the window
     // closes — they leak as orphaned renderers (observed: a closed window's
     // chrome view stayed alive as a live CDP target and answered IPC with a
@@ -163,7 +194,66 @@ export class TabManager {
       view: this.makeView({ mode: 'content', route }),
       title: 'New tab',
       icon: route === 'idle' ? 'home' : route,
+      kind: 'app',
     }
+    w.tabs.push(tab)
+    if (activate) this.activate(w, tab.id)
+    this.pushStrip(w)
+    return tab
+  }
+
+  /** A real web page, in-app (FR-SHELL-6). Hardened and preload-free: this
+   *  view can never reach the bridge that talks to the vault. */
+  newBrowserTab(w: Win, url: string, activate = true): Tab | null {
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      return null
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null
+
+    const view = new WebContentsView({
+      webPreferences: {
+        session: browsingSession(),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
+        allowRunningInsecureContent: false,
+        // deliberately NO preload
+      },
+    })
+    view.setBackgroundColor('#ffffff')
+    const tab: Tab = {
+      id: this.nextTabId++,
+      view,
+      title: parsed.hostname,
+      icon: 'browser',
+      kind: 'browser',
+      url: parsed.toString(),
+    }
+
+    const wc = view.webContents
+    wc.setWindowOpenHandler(({ url: target }) => {
+      // Popups become tabs, never new OS windows we do not control.
+      const home = this.wins.find((x) => x.tabs.some((t) => t.id === tab.id))
+      if (home && /^https?:$/.test(new URL(target).protocol)) {
+        this.newBrowserTab(home, target)
+      }
+      return { action: 'deny' }
+    })
+    const sync = () => {
+      tab.title = wc.getTitle() || parsed.hostname
+      tab.url = wc.getURL()
+      const home = this.wins.find((x) => x.tabs.some((t) => t.id === tab.id))
+      if (home) this.pushStrip(home)
+    }
+    wc.on('page-title-updated', sync)
+    wc.on('did-navigate', sync)
+    wc.on('did-navigate-in-page', sync)
+    wc.loadURL(parsed.toString())
+
     w.tabs.push(tab)
     if (activate) this.activate(w, tab.id)
     this.pushStrip(w)
@@ -195,6 +285,7 @@ export class TabManager {
       w.activeId = null
       if (next) this.activate(w, next.id)
     }
+    this.forgetTab(tab.id)
     tab.view.webContents.close()
     if (w.tabs.length === 0) w.win.close()
     else this.pushStrip(w)
@@ -264,11 +355,20 @@ export class TabManager {
 
   // -------------------------------------------------------------- strip io
   private stripState(w: Win): StripState {
+    const active = w.tabs.find((t) => t.id === w.activeId)
     return {
-      tabs: w.tabs.map((t) => ({ id: t.id, title: t.title, icon: t.icon })),
+      tabs: w.tabs.map((t) => ({
+        id: t.id, title: t.title, icon: t.icon, kind: t.kind, url: t.url,
+      })),
       activeId: w.activeId,
       maximized: w.win.isMaximized(),
       bounds: w.win.getContentBounds(),
+      canGoBack: active
+        ? active.kind === 'browser'
+          ? active.view.webContents.navigationHistory.canGoBack()
+          : (this.appHistoryDepth.get(active.id) ?? 0) > 0
+        : false,
+      draggingId: this.drag?.tabId ?? null,
     }
   }
 
@@ -338,13 +438,14 @@ export class TabManager {
     })
     ipcMain.on('win:close', (e) => this.winFromSender(e.sender)?.win.close())
 
-    // content tabs report their identity (title/icon) as the user navigates
-    ipcMain.on('tab:meta', (e, meta: { title?: string; icon?: string }) => {
+    // content tabs report their identity (title/icon/history depth)
+    ipcMain.on('tab:meta', (e, meta: { title?: string; icon?: string; depth?: number }) => {
       const w = this.winFromContent(e.sender)
       const tab = w?.tabs.find((t) => t.view.webContents.id === e.sender.id)
       if (!w || !tab) return
       if (typeof meta.title === 'string') tab.title = meta.title.slice(0, 80)
       if (typeof meta.icon === 'string') tab.icon = meta.icon.slice(0, 24)
+      if (typeof meta.depth === 'number') this.appHistoryDepth.set(tab.id, meta.depth)
       this.pushStrip(w)
     })
     // content asks to open a route in a NEW tab (ctrl+click behavior)
@@ -352,12 +453,41 @@ export class TabManager {
       const w = this.winFromContent(e.sender)
       if (w && !this.locked && typeof route === 'string') this.newTab(w, route.slice(0, 200))
     })
+    // content asks to open a URL as an in-app browser tab (news articles)
+    ipcMain.on('tab:openUrl', (e, url: string) => {
+      const w = this.winFromContent(e.sender)
+      if (w && !this.locked && typeof url === 'string') {
+        this.newBrowserTab(w, url.slice(0, 2000))
+      }
+    })
+
+    // navigation: Back works for both tab kinds; Home returns to the idle page
+    ipcMain.on('nav:back', (e) => {
+      const w = this.winFromSender(e.sender)
+      const tab = w?.tabs.find((t) => t.id === w.activeId)
+      if (!w || !tab) return
+      if (tab.kind === 'browser') {
+        if (tab.view.webContents.navigationHistory.canGoBack()) {
+          tab.view.webContents.navigationHistory.goBack()
+        }
+      } else {
+        tab.view.webContents.send('nav:back')
+      }
+    })
+    ipcMain.on('nav:home', (e) => {
+      const w = this.winFromSender(e.sender)
+      if (!w) return
+      const tab = w.tabs.find((t) => t.id === w.activeId)
+      if (tab && tab.kind === 'app') tab.view.webContents.send('nav:home')
+      else this.newTab(w, 'idle')
+    })
 
     // ------------------------------------------------------------- dragging
     ipcMain.on('tabdrag:start', (e, tabId: number) => {
       const w = this.winFromSender(e.sender)
       if (w && w.tabs.some((t) => t.id === tabId)) {
         this.drag = { tabId, overWinId: null }
+        this.pushStrip(w) // strip shows the tab as lifted the moment it moves
       }
     })
     ipcMain.on('tabdrag:move', (_e, sx: number, sy: number) => {
@@ -394,6 +524,7 @@ export class TabManager {
         this.adoptTab(src, hit.win, drag.tabId, hit.index)
       }
       // same-window drop: reorder already happened live
+      for (const w of this.wins) this.pushStrip(w) // clear the lifted state
     })
   }
 

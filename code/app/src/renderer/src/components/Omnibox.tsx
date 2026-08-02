@@ -29,9 +29,12 @@ function RowIcon({ r }: { r: SearchResult }) {
 
 export function Omnibox({
   onOpen,
+  onSubmit,
   autoFocus,
 }: {
   onOpen: (r: SearchResult) => void
+  /** Enter without picking a suggestion — go to the results page. */
+  onSubmit?: (query: string) => void
   autoFocus?: boolean
 }) {
   const [q, setQ] = useState('')
@@ -41,6 +44,7 @@ export function Omnibox({
   const [sel, setSel] = useState(0)
   const timer = useRef<number | null>(null)
   const seq = useRef(0)
+  const moved = useRef(false) // has the user arrow-selected a suggestion?
   const boxRef = useRef<HTMLDivElement>(null)
 
   // The dropdown must always answer a non-empty query — silence reads as
@@ -77,6 +81,7 @@ export function Omnibox({
 
   const onChange = (text: string) => {
     setQ(text)
+    moved.current = false
     if (timer.current) window.clearTimeout(timer.current)
     timer.current = window.setTimeout(() => run(text), DEBOUNCE_MS)
   }
@@ -87,23 +92,36 @@ export function Omnibox({
     onOpen(r)
   }
 
+  const submit = () => {
+    const text = q.trim()
+    if (!text) return
+    setOpen(false)
+    onSubmit?.(text)
+  }
+
   const onKey = (e: React.KeyboardEvent) => {
-    if (!open && e.key === 'Enter') {
-      run(q)
+    if (e.key === 'Escape') {
+      setOpen(false)
+      return
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      // Arrow-selected a row? open it. Otherwise this is a search: the
+      // browser-bar behavior — Enter goes to the results page (and an exact
+      // ticker is treated like a URL, handled by the caller).
+      if (open && moved.current && results[sel]) choose(results[sel])
+      else submit()
       return
     }
     if (!open) return
     if (e.key === 'ArrowDown') {
       e.preventDefault()
+      moved.current = true
       setSel((s) => Math.min(s + 1, results.length - 1))
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
+      moved.current = true
       setSel((s) => Math.max(s - 1, 0))
-    } else if (e.key === 'Enter') {
-      e.preventDefault()
-      choose(results[sel])
-    } else if (e.key === 'Escape') {
-      setOpen(false)
     }
   }
 
@@ -140,7 +158,10 @@ export function Omnibox({
             <div
               key={`${r.type}:${r.symbol ?? r.id ?? r.page ?? r.action}:${i}`}
               className={`omni-row${i === sel ? ' selected' : ''}`}
-              onMouseEnter={() => setSel(i)}
+              onMouseEnter={() => {
+                moved.current = true
+                setSel(i)
+              }}
               onMouseDown={(e) => {
                 e.preventDefault()
                 choose(r)

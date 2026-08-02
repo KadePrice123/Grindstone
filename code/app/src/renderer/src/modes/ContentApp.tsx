@@ -1,17 +1,18 @@
 /**
- * One tab's content. Navigation happens in-tab (Chrome parity); the tab
- * reports its title/icon to main so the strip stays truthful. Auth is
- * window-level: on 401 the main process flips the window to the lock
- * screen — we just render a quiet splash for the moment that takes.
+ * One tab's content: in-tab navigation with real history (the strip's Back
+ * button drives it through main), plus the persistent user chip that follows
+ * you across every page.
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Route } from '../App'
 import { routeKey } from '../App'
-import { api, setAuthExpiredHandler } from '../api'
+import { setAuthExpiredHandler } from '../api'
 import { Logo } from '../components/Logo'
+import { UserChip } from '../components/UserChip'
 import { Accounts } from '../pages/Accounts'
 import { DataPage } from '../pages/DataPage'
 import { Idle } from '../pages/Idle'
+import { SearchPage } from '../pages/SearchPage'
 import { SymbolPage } from '../pages/SymbolPage'
 
 function meta(route: Route): { title: string; icon: string } {
@@ -22,19 +23,34 @@ function meta(route: Route): { title: string; icon: string } {
       return { title: 'Data management', icon: 'data' }
     case 'symbol':
       return { title: route.symbol, icon: 'chart' }
+    case 'search':
+      return { title: route.query, icon: 'search' }
     default:
       return { title: 'New tab', icon: 'home' }
   }
 }
 
 export function ContentApp({ initial }: { initial: Route }) {
-  const [route, setRoute] = useState<Route>(initial)
+  const [stack, setStack] = useState<Route[]>([initial])
   const [locked, setLocked] = useState(false)
+  const route = stack[stack.length - 1]
+  const stackRef = useRef(stack)
+  stackRef.current = stack
+
+  const navigate = useCallback((r: Route) => setStack((s) => [...s, r]), [])
 
   useEffect(() => {
     const m = meta(route)
-    window.grindstone.setTabMeta(m.title, m.icon)
-  }, [route])
+    window.grindstone.setTabMeta(m.title, m.icon, stack.length - 1)
+  }, [route, stack.length])
+
+  useEffect(() => {
+    const off = window.grindstone.onNav((what) => {
+      if (what === 'back') setStack((s) => (s.length > 1 ? s.slice(0, -1) : s))
+      else setStack([{ name: 'idle' }])
+    })
+    return off
+  }, [])
 
   useEffect(() => {
     setAuthExpiredHandler(() => setLocked(true))
@@ -45,30 +61,35 @@ export function ContentApp({ initial }: { initial: Route }) {
     return (
       <div className="center-stage">
         <Logo size={64} />
-        <div className="dim">Locked</div>
+        <div className="dim">Locked — unlock in the main window</div>
       </div>
     )
   }
 
-  const nav = (r: Route) => setRoute(r)
-  const back = () => nav({ name: 'idle' })
+  const body = (() => {
+    switch (route.name) {
+      case 'accounts':
+        return <Accounts onBack={() => setStack((s) => s.slice(0, -1))} />
+      case 'data':
+        return <DataPage onBack={() => setStack((s) => s.slice(0, -1))} />
+      case 'symbol':
+        return <SymbolPage symbol={route.symbol} />
+      case 'search':
+        return <SearchPage query={route.query} onNavigate={navigate} />
+      default:
+        return <Idle onNavigate={navigate} onLocked={() => setLocked(true)} />
+    }
+  })()
 
-  switch (route.name) {
-    case 'accounts':
-      return <Accounts onBack={back} />
-    case 'data':
-      return <DataPage onBack={back} />
-    case 'symbol':
-      return <SymbolPage symbol={route.symbol} onBack={back} />
-    default:
-      return <Idle onNavigate={nav} onLocked={() => setLocked(true)} />
-  }
+  return (
+    <>
+      {body}
+      <UserChip onNavigate={navigate} onLocked={() => setLocked(true)} />
+    </>
+  )
 }
 
-/** Content pages can ask for a route in a new tab (used by ctrl/middle-click). */
+/** Content pages can ask for a route in a new tab (ctrl/middle-click). */
 export function openInNewTab(r: Route): void {
   window.grindstone.openTab(routeKey(r))
 }
-
-// api import kept referenced for the auth handler side effect module load
-void api

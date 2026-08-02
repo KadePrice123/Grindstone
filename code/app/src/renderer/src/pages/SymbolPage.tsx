@@ -1,84 +1,149 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError, SymbolSummary } from '../api'
+import { Bar, Chart, IndicatorKey } from '../components/Chart'
 import { ChartMiniIcon } from '../components/icons'
+
+const TIMEFRAMES: { key: string; label: string }[] = [
+  { key: '1Min', label: '1m' },
+  { key: '5Min', label: '5m' },
+  { key: '15Min', label: '15m' },
+  { key: '1Hour', label: '1H' },
+  { key: '1Day', label: '1D' },
+]
+
+const INDICATORS: { key: IndicatorKey; label: string }[] = [
+  { key: 'vol', label: 'Volume' },
+  { key: 'sma20', label: 'SMA 20' },
+  { key: 'sma50', label: 'SMA 50' },
+  { key: 'ema20', label: 'EMA 20' },
+  { key: 'rsi14', label: 'RSI 14' },
+]
 
 function fmt(n: number | null | undefined, dp = 2): string {
   return n == null ? '—' : n.toLocaleString(undefined, { maximumFractionDigits: dp })
 }
 
 function age(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime()
-  const m = Math.floor(ms / 60000)
+  const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000)
   if (m < 60) return `${Math.max(m, 0)}m ago`
   const h = Math.floor(m / 60)
-  if (h < 48) return `${h}h ago`
-  return `${Math.floor(h / 24)}d ago`
+  return h < 48 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
 }
 
-export function SymbolPage({ symbol, onBack }: { symbol: string; onBack: () => void }) {
+export function SymbolPage({ symbol }: { symbol: string }) {
   const [data, setData] = useState<SymbolSummary | null>(null)
+  const [bars, setBars] = useState<Bar[]>([])
+  const [barSource, setBarSource] = useState<string>('')
+  const [barNote, setBarNote] = useState<string>('')
+  const [timeframe, setTimeframe] = useState('1Day')
+  const [indicators, setIndicators] = useState<IndicatorKey[]>(['vol'])
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let stop = false
-    // Navigating SPY -> AAPL must not render AAPL's header over SPY's price
-    // and news while the fetch is in flight (review 2026-08-02).
     setData(null)
     setError(null)
     const load = async () => {
       try {
-        const d = await api<SymbolSummary>('GET', `/api/symbols/${encodeURIComponent(symbol)}/summary`)
+        const d = await api<SymbolSummary>(
+          'GET',
+          `/api/symbols/${encodeURIComponent(symbol)}/summary`
+        )
         if (!stop) {
           setData(d)
-          setError(null) // a transient failure must not leave a permanent banner
+          setError(null)
         }
       } catch (e) {
         if (!stop) setError(e instanceof ApiError ? e.message : String(e))
       }
     }
     load()
-    const t = window.setInterval(load, 30_000) // refresh; real streaming lands in M3
+    const t = window.setInterval(load, 30_000)
     return () => {
       stop = true
       window.clearInterval(t)
     }
   }, [symbol])
 
+  const loadBars = useCallback(async () => {
+    try {
+      const b = await api<{ bars: Bar[]; source: string; reason?: string }>(
+        'GET',
+        `/api/symbols/${encodeURIComponent(symbol)}/bars?timeframe=${timeframe}&limit=600`
+      )
+      setBars(b.bars)
+      setBarSource(b.source)
+      setBarNote(b.reason ?? '')
+    } catch (e) {
+      setBars([])
+      setBarNote(e instanceof ApiError ? e.message : String(e))
+    }
+  }, [symbol, timeframe])
+
+  useEffect(() => {
+    setBars([])
+    loadBars()
+  }, [loadBars])
+
+  const toggle = (k: IndicatorKey) =>
+    setIndicators((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]))
+
   const q = data?.quote
   const up = (q?.change ?? 0) >= 0
 
   return (
-    <div className="page">
+    <div className="page wide">
       <div className="page-head">
-        <button className="back" onClick={onBack} title="Back">
-          ←
-        </button>
         <ChartMiniIcon />
         <h1>{symbol}</h1>
         <span className="dim">{data?.name}</span>
+        {q?.available ? (
+          <span className="quote-inline">
+            <span className="quote-price sm">{fmt(q.price)}</span>
+            <span className={up ? 'quote-change up' : 'quote-change down'}>
+              {q.change != null ? `${up ? '+' : ''}${fmt(q.change)} (${fmt(q.change_pct)}%)` : ''}
+            </span>
+            <span className="omni-tag">{q.source}</span>
+          </span>
+        ) : (
+          <span className="subtle">{q?.reason ?? ''}</span>
+        )}
       </div>
 
       {error ? <div className="test-result bad">{error}</div> : null}
 
-      <div className="card">
-        {q?.available ? (
-          <div className="quote-row">
-            <span className="quote-price">{fmt(q.price)}</span>
-            <span className={up ? 'quote-change up' : 'quote-change down'}>
-              {q.change != null ? `${up ? '+' : ''}${fmt(q.change)} (${fmt(q.change_pct)}%)` : ''}
-            </span>
-            <span className="subtle">
-              {q.bid != null ? `bid ${fmt(q.bid)} · ask ${fmt(q.ask)} · ` : ''}
-              O {fmt(q.day_open)} H {fmt(q.day_high)} L {fmt(q.day_low)}
-            </span>
-            <span className="omni-tag" title="Where this number comes from">
-              {q.source}
-            </span>
+      <div className="card chart-card">
+        <div className="chart-toolbar">
+          <div className="seg">
+            {TIMEFRAMES.map((t) => (
+              <button
+                key={t.key}
+                className={`seg-btn${timeframe === t.key ? ' on' : ''}`}
+                onClick={() => setTimeframe(t.key)}
+              >
+                {t.label}
+              </button>
+            ))}
           </div>
+          <div className="seg">
+            {INDICATORS.map((i) => (
+              <button
+                key={i.key}
+                className={`seg-btn${indicators.includes(i.key) ? ' on' : ''}`}
+                onClick={() => toggle(i.key)}
+              >
+                {i.label}
+              </button>
+            ))}
+          </div>
+          <span className="subtle chart-source">
+            {bars.length > 0 ? `${bars.length} bars · ${barSource}` : barNote || 'loading…'}
+          </span>
+        </div>
+        {bars.length > 0 ? (
+          <Chart bars={bars} indicators={indicators} height={indicators.includes('rsi14') ? 480 : 400} />
         ) : (
-          <div className="dim">
-            No quote — {q?.reason ?? 'loading…'}
-          </div>
+          <div className="chart-empty dim">{barNote || 'No bars for this timeframe.'}</div>
         )}
       </div>
 
@@ -93,8 +158,8 @@ export function SymbolPage({ symbol, onBack }: { symbol: string; onBack: () => v
             <div
               className="news-row"
               key={n.id}
-              onClick={() => n.url && window.open(n.url)}
-              title="Open article in your browser"
+              onClick={() => n.url && window.grindstone.openUrl(n.url)}
+              title="Open in a new tab"
             >
               <div className="news-head">{n.headline}</div>
               <div className="subtle">

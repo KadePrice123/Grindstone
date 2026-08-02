@@ -51,22 +51,42 @@ export function AuthShell() {
     }
   }, [toAuth])
 
-  switch (phase.kind) {
-    case 'booting':
-      return <Splash text="Starting backend…" spin />
-    case 'opening':
-      return <Splash text="Opening…" spin />
-    case 'backend-down':
-      return <Splash text="Backend is not running." detail={phase.detail} error />
-    case 'auth':
-      return (
-        <AuthGate
-          initialized={phase.initialized}
-          onSignedIn={() => setPhase({ kind: 'opening' })}
-          onRecheck={toAuth}
-        />
-      )
-  }
+  // The window is frameless, so the lock screen must provide its own drag
+  // handle — without one the window cannot be moved before signing in.
+  const body = (() => {
+    switch (phase.kind) {
+      case 'booting':
+        return <Splash text="Starting backend…" spin />
+      case 'opening':
+        return <Splash text="Opening…" spin />
+      case 'backend-down':
+        return <Splash text="Backend is not running." detail={phase.detail} error />
+      case 'auth':
+        return (
+          <AuthGate
+            initialized={phase.initialized}
+            onSignedIn={() => setPhase({ kind: 'opening' })}
+            onRecheck={toAuth}
+          />
+        )
+    }
+  })()
+
+  return (
+    <>
+      <div className="auth-dragbar">
+        <span className="auth-brand">Grindstone</span>
+        <button
+          className="auth-close"
+          title="Close"
+          onClick={() => window.grindstoneTabs.closeWindow()}
+        >
+          ×
+        </button>
+      </div>
+      {body}
+    </>
+  )
 }
 
 function Splash({
