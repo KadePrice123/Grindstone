@@ -37,7 +37,60 @@ PAGES = [
      "multichart"], "ready": True},
     {"key": "settings", "title": "Settings",
      "words": ["settings", "setting", "preferences", "theme", "web"], "ready": True},
+    {"key": "help", "title": "Help", "words": ["help", "guide", "manual", "docs",
+     "how", "tutorial"], "ready": True},
 ]
+
+# Help SECTIONS are searchable destinations of their own (Kade's spec:
+# searching "drawing" must land on the drawing section, not just the page).
+# Kept in lockstep with HelpPage.tsx's section ids — the gate cross-checks.
+HELP_TOPICS = [
+    {"section": "getting-started", "title": "Getting started",
+     "words": ["start", "profile", "password", "login", "vault", "first"]},
+    {"section": "search", "title": "Search & addresses",
+     "words": ["omnibox", "address", "gs", "url", "browser", "web"]},
+    {"section": "tabs", "title": "Tabs & windows",
+     "words": ["tab", "tabs", "window", "tear", "drag", "previous", "new"]},
+    {"section": "split-view", "title": "Split view",
+     "words": ["split", "divider", "side", "pane", "pair"]},
+    {"section": "wheels", "title": "Gesture wheels",
+     "words": ["wheel", "wheels", "gesture", "radial", "right-click", "rightclick",
+               "lock", "hub"]},
+    {"section": "charts", "title": "Charts",
+     "words": ["chart", "candle", "candles", "timeframe", "indicator", "indicators",
+               "sma", "ema", "rsi", "volume", "period"]},
+    {"section": "drawing", "title": "Drawing tools",
+     "words": ["draw", "drawing", "line", "trend", "hline", "vline", "circle",
+               "select", "trim", "erase", "annotate"]},
+    {"section": "measuring", "title": "Measuring",
+     "words": ["measure", "measuring", "inspect", "distance", "ruler", "dimension"]},
+    {"section": "multi-charts", "title": "Multi-symbol charts",
+     "words": ["compare", "comparison", "isolate", "solo", "normalize", "multi",
+               "overlay"]},
+    {"section": "data", "title": "Data recording",
+     "words": ["record", "recording", "jobs", "retention", "storage", "chain"]},
+    {"section": "settings-help", "title": "Settings explained",
+     "words": ["configure", "boost", "engine", "theme", "depth"]},
+    {"section": "troubleshooting", "title": "Troubleshooting",
+     "words": ["problem", "error", "broken", "backend", "fix", "stuck"]},
+]
+
+
+def _help_row(t: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "page", "page": "help", "section": t["section"],
+            "title": f'Help · {t["title"]}', "subtitle": "How-to", "ready": True}
+
+
+def _help_match(q: str) -> list[dict[str, Any]]:
+    ql = q.lower().strip()
+    if not ql:
+        return []
+    out = []
+    for t in HELP_TOPICS:
+        if (any(w.startswith(ql) or ql in w for w in t["words"])
+                or ql in t["title"].lower()):
+            out.append(_help_row(t))
+    return out
 
 NEWS_WORDS = {"news", "headlines", "articles", "article"}
 
@@ -116,7 +169,10 @@ def _pin(fused: list[dict[str, Any]], pins: list[dict[str, Any]]) -> list[dict[s
 
 
 def _key(r: dict[str, Any]) -> str:
-    return f'{r["type"]}:{r.get("symbol") or r.get("id") or r.get("page")}'
+    # section distinguishes help topics — without it every Help · X row
+    # deduped into one under the shared page key 'help'.
+    base = r.get("symbol") or r.get("id") or r.get("page")
+    return f'{r["type"]}:{base}:{r.get("section", "")}'
 
 
 def _rrf(lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -237,7 +293,7 @@ def page(q: str, uni: Universe, con: sqlite3.Connection, page_no: int = 1,
         pins.append(_sym_row(exact_sym))
     if hit is not None and not hit[1]:
         pins.append(hit[0])
-    inhouse = _pin(_rrf([symbols, news, _pages_match(q)]), pins)
+    inhouse = _pin(_rrf([symbols, news, _pages_match(q), _help_match(q)]), pins)
 
     # Two sections, kept strictly separate. An earlier version fused the
     # leftover platform rows into the second section, and since platform rows
@@ -302,12 +358,14 @@ def query(q: str, uni: Universe, con: sqlite3.Connection,
     fuzzy = [_sym_row(e) for (e, _score) in uni.fuzzy(q, limit=10)]
     news = [_news_row(it) for it in newsstore.search(con, q, limit=8)]
     pages = _pages_match(q)
+    help_rows = _help_match(q)
 
     # Web hits belong in the dropdown too — a browser bar that only knows its
     # own data is not a browser bar. Fetched by the caller so it can respect
     # settings and stay off the critical path when disabled.
     web_rows = [_web_row(r) for r in (web(q) if web else [])]
-    fused = _rrf_weighted([(_rrf([prefix, fuzzy, news, pages]), 2.0), (web_rows, 1.0)])
+    fused = _rrf_weighted([(_rrf([prefix, fuzzy, news, pages, help_rows]), 2.0),
+                           (web_rows, 1.0)])
 
     # Named destinations pin to the top: a page that owns the name, then the
     # exact ticker, then a weaker page claim.

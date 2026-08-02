@@ -361,7 +361,24 @@ input {
   gap: 2px;
   padding: 6px 0 0 8px;
   -webkit-app-region: no-drag;
-  overflow: hidden;
+  /* Many tabs scroll INSIDE this box; the New/Previous-tab buttons live in
+     .strip-actions outside it, so they can never be pushed off-screen. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  min-width: 0;
+}
+.strip-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 4px 0 4px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+.strip-actions .strip-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 .strip-tab {
   display: flex;

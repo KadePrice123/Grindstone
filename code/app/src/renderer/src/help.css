@@ -1,0 +1,138 @@
+/* help.gs — the manual */
+.help-page {
+  max-width: 900px;
+}
+.help-toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+.help-toc a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13px;
+}
+.help-toc a:hover {
+  text-decoration: underline;
+}
+.help-sec h2 {
+  margin-bottom: 10px;
+}
+.help-sec.help-flash {
+  /* one-shot arrival highlight — never loops */
+  animation: help-arrive 1.4s ease-out 1;
+}
+@keyframes help-arrive {
+  from {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+  to {
+    border-color: var(--border);
+    box-shadow: none;
+  }
+}
+.help-body {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+.help-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.55;
+  font-size: 13.5px;
+}
+.help-text ul,
+.help-text ol {
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.help-text code {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12.5px;
+}
+.help-text kbd {
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 12px;
+  background: var(--bg);
+}
+.help-figwrap {
+  flex-shrink: 0;
+  width: 170px;
+}
+.hl-fig {
+  width: 100%;
+  height: auto;
+}
+.hl-seg {
+  fill: color-mix(in srgb, var(--surface) 92%, transparent);
+  stroke: var(--border);
+}
+.hl-seg.on {
+  fill: color-mix(in srgb, var(--accent) 30%, var(--surface));
+  stroke: var(--accent);
+}
+.hl-hub {
+  fill: var(--bg);
+  stroke: var(--border);
+}
+.hl-frame {
+  fill: none;
+  stroke: var(--border);
+}
+.hl-pane {
+  fill: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  stroke: var(--border);
+}
+.hl-pane.dim {
+  opacity: 0.5;
+}
+.hl-div {
+  fill: var(--accent);
+}
+.hl-btn {
+  fill: var(--surface);
+  stroke: var(--accent);
+}
+.hl-line {
+  stroke: var(--text-dim);
+  stroke-width: 2;
+}
+.hl-cut {
+  stroke: var(--loss);
+  stroke-width: 3;
+  stroke-dasharray: 5 4;
+}
+.hl-dim {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+.hl-chip {
+  fill: var(--surface);
+  stroke: var(--accent);
+}
+.hl-x {
+  fill: var(--accent);
+}
+.hl-arrow {
+  fill: var(--text-dim);
+}
+.hl-t {
+  fill: var(--text);
+  font-size: 11px;
+  text-anchor: middle;
+}
+.hl-t.sm {
+  font-size: 8.5px;
+  fill: var(--text-dim);
+}

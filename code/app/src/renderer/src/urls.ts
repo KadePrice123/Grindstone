@@ -20,7 +20,7 @@ const TLD =
 
 /** Platform pages that are addressable by name. */
 const PAGES = ['home', 'accounts', 'data', 'settings', 'search', 'article', 'news',
-  'charts'] as const
+  'charts', 'help'] as const
 
 /**
  * Bare words that are addresses in their own right. A browser bar navigates
@@ -38,6 +38,7 @@ const PAGE_ROUTES: Record<string, string> = {
   settings: 'settings',
   news: 'news',
   charts: 'charts',
+  help: 'help',
 }
 
 const BARE: Record<string, string> = {
@@ -48,6 +49,9 @@ const BARE: Record<string, string> = {
   setting: 'settings',
   preferences: 'settings',
   headlines: 'news',
+  guide: 'help',
+  manual: 'help',
+  docs: 'help',
 }
 
 /** The route key for a page from the backend's registry, or null if that
@@ -99,7 +103,7 @@ export function asGs(input: string): GsTarget | null {
   const name = head.replace(/\.gs$/i, '').toLowerCase()
   if (!name) return null
   const params = new URLSearchParams(qs)
-  return { page: name, query: params.get('q') ?? params.get('id') ?? '' }
+  return { page: name, query: params.get('q') ?? params.get('id') ?? params.get('s') ?? '' }
 }
 
 /** A .gs target as a route key (App.tsx's parseRoute vocabulary). */
@@ -112,6 +116,8 @@ export function gsRoute(gs: GsTarget): string {
       return `search:${gs.query}`
     case 'article':
       return `article:${gs.query}`
+    case 'help':
+      return gs.query ? `help:${gs.query}` : 'help'
     default:
       return gs.page
   }
@@ -149,6 +155,8 @@ export function gsAddress(routeName: string, arg?: string): string {
       return `search.gs?q=${encodeURIComponent(arg ?? '')}`
     case 'article':
       return `article.gs?id=${arg ?? ''}`
+    case 'help':
+      return arg ? `help.gs?s=${encodeURIComponent(arg)}` : 'help.gs'
     default:
       return `${routeName}.gs`
   }

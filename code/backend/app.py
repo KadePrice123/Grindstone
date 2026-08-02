@@ -507,16 +507,30 @@ def create_app(state: State) -> FastAPI:
         return {"quotes": out}
 
     @app.get("/api/symbols/{symbol}/bars")
-    def symbol_bars(symbol: str, timeframe: str = "1Day", limit: int = 500,
+    def symbol_bars(symbol: str, timeframe: str = "1Day", limit: int = 0,
                     s=Depends(current_session)) -> dict[str, Any]:
         """Chart data. Recorded bars first (the user's own store), topped up
         from the live provider; Yahoo daily as the keyless fallback. The
         response always names its source — a chart that lies about where its
-        candles came from is worse than no chart."""
+        candles came from is worse than no chart.
+
+        DEPTH: limit=0 (the default) means "as configured" — the user's
+        chart_candles setting, whose own default is ALL available history.
+        An explicit limit still wins (the search page's featured card wants
+        90, never everything)."""
         symbol = symbol.upper()
         if timeframe not in recorder_mod.TIMEFRAMES:
             raise HTTPException(422, f"timeframe must be one of {', '.join(recorder_mod.TIMEFRAMES)}")
-        limit = max(10, min(limit, 5000))
+
+        if limit <= 0:
+            with state.db() as db:
+                pref = settings_mod.get_all(db, s.user_id).get("chart_candles", "all")
+            want_all = pref == "all"
+            limit = 10_000 if want_all else max(10, min(int(pref), 5000))
+        else:
+            want_all = False
+            limit = max(10, min(limit, 5000))
+
         entry = state.universe.exact(symbol)
         if entry and entry["asset_class"] in ("index", "future"):
             return {"symbol": symbol, "timeframe": timeframe, "bars": [],
@@ -525,7 +539,13 @@ def create_app(state: State) -> FastAPI:
 
         creds = state.creds_for(s.user_id)
         if creds:
-            span = {"1Min": 3, "5Min": 10, "15Min": 30, "1Hour": 120, "1Day": 1500}[timeframe]
+            # Fetch windows sized to fill the requested depth; "all" reaches
+            # back as far as the feed does (Alpaca IEX starts 2016; a single
+            # request tops out at 10k bars, which covers 39 years of dailies
+            # and ~3 weeks of 1-minute bars — an honest ceiling, not a bug).
+            span = ({"1Min": 30, "5Min": 90, "15Min": 250, "1Hour": 1000, "1Day": 4000}
+                    if want_all else
+                    {"1Min": 3, "5Min": 10, "15Min": 30, "1Hour": 120, "1Day": 1500})[timeframe]
             start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=span)).strftime(
                 "%Y-%m-%dT%H:%M:%SZ")
             try:
@@ -555,7 +575,11 @@ def create_app(state: State) -> FastAPI:
 
         if timeframe == "1Day" and market.YahooProvider is not None:
             try:
-                bars = market.YahooProvider().daily_bars(symbol)
+                # Period sized to the ask: 'max' is the whole listing history.
+                period = ("max" if want_all else
+                          "1y" if limit <= 251 else
+                          "5y" if limit <= 1250 else "max")
+                bars = market.YahooProvider().daily_bars(symbol, period=period)
                 if bars:
                     return {"symbol": symbol, "timeframe": timeframe,
                             "bars": bars[-limit:], "source": "yahoo (delayed)"}

@@ -47,6 +47,14 @@ SPEC: dict[str, dict[str, Any]] = {
         "label": "Theme",
         "help": "Applies to the whole app.",
     },
+    "chart_candles": {
+        "kind": "choice", "default": "all",
+        "choices": ["all", "5000", "2000", "1000", "500", "200"],
+        "label": "Candles per chart",
+        "help": "How much history charts load. 'all' pulls everything the "
+                "source has for the ticker; a number caps it (faster on "
+                "intraday timeframes).",
+    },
     # Hidden state blobs: not rendered by the generic settings page (their
     # owning UI edits them), but stored/validated through the same door.
     "multi_chart": {

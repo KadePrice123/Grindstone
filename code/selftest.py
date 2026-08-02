@@ -1311,6 +1311,107 @@ def _chart_tools_v3():
         "the chart tools are no longer exercised with trusted input"
 
 
+@check("candle depth setting + fixed tab actions")
+def _candles_and_tab_actions():
+    sys.path.insert(0, str(CODE))
+    from backend import settings as settings_mod
+
+    # The setting exists with the specced default: ALL available history.
+    spec = settings_mod.SPEC.get("chart_candles")
+    assert spec and spec["default"] == "all" and "all" in spec["choices"], \
+        "chart_candles must exist and default to 'all'"
+    assert all(c == "all" or c.isdigit() for c in spec["choices"])
+
+    # The bars endpoint honors it: limit=0 (the new default) consults the
+    # setting; 'all' reaches for full history (Yahoo period max, deep spans).
+    app_src = (CODE / "backend" / "app.py").read_text(encoding="utf-8")
+    assert "chart_candles" in app_src and "want_all" in app_src, \
+        "the bars endpoint no longer consults the candle-depth setting"
+    assert '"max" if want_all' in app_src, \
+        "'all' no longer requests Yahoo's full listing history"
+    # Pages defer to it: their main chart fetches carry NO limit param.
+    for page in ("SymbolPage.tsx", "ChartsPage.tsx"):
+        src = (CODE / "app" / "src" / "renderer" / "src" / "pages" / page
+               ).read_text(encoding="utf-8")
+        main_fetches = [ln for ln in src.splitlines()
+                        if "/bars?timeframe=${timeframe}" in ln]
+        assert main_fetches and all("limit=" not in ln for ln in main_fetches), \
+            f"{page} hardcodes a chart depth instead of the user's setting"
+
+    # Tab actions live OUTSIDE the scroller (always reachable) and the
+    # Previous-tab jump exists end to end.
+    tabs_src = (CODE / "app" / "src" / "main" / "tabs.ts").read_text(encoding="utf-8")
+    assert "'tabs:prev'" in tabs_src and "prevActiveId" in tabs_src, \
+        "the Previous-tab jump left the tab system"
+    strip = (CODE / "app" / "src" / "renderer" / "src" / "components" /
+             "TabStrip.tsx").read_text(encoding="utf-8")
+    assert "strip-actions" in strip and "prevTab" in strip, \
+        "the fixed New/Previous tab buttons left the strip"
+    assert "strip-new" not in strip, \
+        "the old inline + is back — it scrolls away with a full strip"
+    css = (CODE / "app" / "src" / "renderer" / "src" / "styles.css"
+           ).read_text(encoding="utf-8")
+    assert "overflow-x: auto" in css.split(".strip-tabs {")[1].split("}")[0], \
+        "a full strip no longer scrolls — tabs will overflow invisibly"
+
+
+@check("help system: sections match the search index, content names real UI")
+def _help_system():
+    import re as re_mod
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from backend import search as search_mod
+    from backend.marketdb import connect_market
+    from backend.universe import Universe
+
+    rend = CODE / "app" / "src" / "renderer" / "src"
+    help_src = (rend / "pages" / "HelpPage.tsx").read_text(encoding="utf-8")
+
+    # The two lists that MUST stay in lockstep: backend topics point at page
+    # section ids — a drifted pair sends a search to a section that is not
+    # there, which reads as "search is broken".
+    page_sections = set(re_mod.findall(r"^  '([a-z-]+)',$", help_src, re_mod.M))
+    topic_sections = {t["section"] for t in search_mod.HELP_TOPICS}
+    assert topic_sections == page_sections, (
+        f"help topics and page sections drifted: only-in-search="
+        f"{topic_sections - page_sections} only-in-page={page_sections - topic_sections}")
+
+    # Searching a feature lands on its section, ranked first (Kade's spec:
+    # "searching for drawing will pull the drawing section").
+    with tempfile.TemporaryDirectory() as tmp:
+        con = connect_market(Path(tmp) / "m.db")
+        con.execute("INSERT INTO assets (symbol, name, exchange, asset_class, tradable)"
+                    " VALUES ('SPY','SPDR','ARCA','us_equity',1)")
+        con.commit()
+        uni = Universe()
+        uni.load(con)
+        for q, section in (("drawing", "drawing"), ("trim", "drawing"),
+                           ("isolate", "multi-charts"), ("measure", "measuring"),
+                           ("split", "split-view"), ("wheel", "wheels")):
+            rows = search_mod.query(q, uni, con)["results"]
+            hit = next((r for r in rows if r.get("page") == "help"), None)
+            assert hit and hit["section"] == section, \
+                f"searching {q!r} does not surface Help·{section}: {hit}"
+            assert rows.index(hit) <= 2, \
+                f"Help·{section} ranks too low for {q!r}: position {rows.index(hit)}"
+        con.close()
+
+    # The manual must name the REAL UI, not an imagined one.
+    for real in ("Trim", "Sel", "Clear M", "⇄", "Candles per chart",
+                 "Split with", "⦿", "Esc", "Timeframe", "Gesture wheels"):
+        assert real in help_src, f"help content never mentions {real!r}"
+    # ...and never a stale count or path that rots.
+    assert "SELFTEST OK" not in help_src, "help must not hardcode the gate count"
+
+    # Addressing: help.gs and section deep-links round-trip.
+    urls_src = (rend / "urls.ts").read_text(encoding="utf-8")
+    assert "'help'" in urls_src and "help.gs?s=" in urls_src, \
+        "help is not addressable"
+    app_tsx = (rend / "App.tsx").read_text(encoding="utf-8")
+    assert "help:" in app_tsx, "the help route cannot carry a section"
+
+
 @check("frontend: sources present; typecheck when toolchain available")
 def _frontend():
     app_dir = CODE / "app"

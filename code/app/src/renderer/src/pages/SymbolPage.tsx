@@ -166,9 +166,11 @@ export function SymbolPage({
   const loadBars = useCallback(async () => {
     const mine = ++barsSeq.current
     try {
+      // No limit param: the backend applies the user's chart_candles setting
+      // (default = ALL history the source has for this ticker).
       const b = await api<{ bars: Bar[]; source: string; reason?: string }>(
         'GET',
-        `/api/symbols/${encodeURIComponent(symbol)}/bars?timeframe=${timeframe}&limit=600`
+        `/api/symbols/${encodeURIComponent(symbol)}/bars?timeframe=${timeframe}`
       )
       if (mine !== barsSeq.current) return
       setBars(b.bars)

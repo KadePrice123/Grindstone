@@ -107,13 +107,19 @@ async function connect(target) {
     /** Raw CDP — Input.dispatchMouseEvent sends TRUSTED input, the only way
      *  to exercise the chart tools the way a hand does. */
     send: raw,
-    /** A real left click at view coordinates. The mouseMoved FIRST matters:
-     *  lightweight-charts reports click coordinates from its own tracked
-     *  crosshair, and a press with no prior move has no position — the
-     *  chart's click param arrives point-less and every guard drops it. */
+    /** A real left click at view coordinates, arriving the way a HAND does:
+     *  a short streamed approach, a beat, then press+release. Two measured
+     *  reasons — lightweight-charts derives click coordinates from its
+     *  crosshair (a press with no prior move is point-less and dropped), and
+     *  on dense charts the crosshair updates on rAF, so a lone move
+     *  immediately followed by press loses the race and the click never
+     *  fires (found when 'all'-depth charts landed: 8,433 bars). */
     click: async (x, y) => {
       const base = { x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1 }
-      await raw('Input.dispatchMouseEvent', { type: 'mouseMoved', x: base.x, y: base.y })
+      for (const dx of [-24, -9, 0]) {
+        await raw('Input.dispatchMouseEvent', { type: 'mouseMoved', x: base.x + dx, y: base.y })
+        await sleep(30)
+      }
       await raw('Input.dispatchMouseEvent', { type: 'mousePressed', ...base })
       await raw('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
     },
@@ -764,6 +770,25 @@ try {
           .find(x => (x.title ?? '').startsWith(${JSON.stringify(title)}));
         if (!b) return 'missing'; b.click(); return 'ok' })()`
     )
+  /** A hand hunting a thin line: try the aim point, then small vertical/
+   *  horizontal nudges until the target attr changes (the engine's 8px
+   *  tolerance + hover halos make this exactly how humans hit lines). */
+  const fanClick = async (fx, fy, attrName, want) => {
+    for (const [dx, dy] of [[0, 0], [0, -8], [0, 8], [-8, 0], [8, 0], [0, -16], [0, 16]]) {
+      const r = await chartView.eval(
+        `(() => { const el = document.querySelector('[data-draw-tool]');
+           el.scrollIntoView({ block: 'center' });
+           const b = el.getBoundingClientRect();
+           return { x: b.x, y: b.y, w: b.width, h: b.height } })()`
+      )
+      await sleep(100)
+      await chartView.click(r.x + r.w * fx + dx, r.y + r.h * fy + dy)
+      await sleep(350)
+      if ((await attr(attrName)) === want) return true
+    }
+    return false
+  }
+
   // Click through a FRESH rect every time: the metrics card above the chart
   // populates asynchronously and shoves the chart down after the first
   // measurement — a cached rect quietly aims clicks at the toolbar.
@@ -787,22 +812,50 @@ try {
   const cx = (fx) => chartRect.x + chartRect.w * fx
   const cy = (fy) => chartRect.y + chartRect.h * fy
 
+  // Candle depth: the default setting is ALL history — a keyless profile
+  // gets Yahoo 'max', which for SPY is decades of dailies, not one year.
+  const allBars = await chartView.eval(
+    `parseInt(document.querySelector('.chart-source')?.textContent ?? '0', 10)`
+  )
+  check(allBars > 1000, 'candles: default "all" loads full history', `${allBars} bars`)
+
+  /** Place-with-verify: clicks can lose the crosshair race on very dense
+   *  charts even with the streamed approach, so placements retry until the
+   *  drawing count reflects them — like a human clicking again when nothing
+   *  appeared. */
+  const placeOne = async (fx, fy, wantCount) => {
+    for (let i = 0; i < 3; i++) {
+      await chartClick(fx, fy)
+      await sleep(350)
+      if ((await attr('data-draw-count')) === wantCount) return true
+    }
+    return (await attr('data-draw-count')) === wantCount
+  }
+  const placeTwo = async (fx1, fy1, fx2, fy2, wantCount) => {
+    for (let i = 0; i < 3; i++) {
+      await chartClick(fx1, fy1)
+      await sleep(300)
+      await chartClick(fx2, fy2)
+      await sleep(400)
+      if ((await attr('data-draw-count')) === wantCount) return true
+      // a half-placed anchor would corrupt the next attempt — cancel it
+      await chartView.eval(
+        `document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))`
+      )
+      await sleep(200)
+    }
+    return (await attr('data-draw-count')) === wantCount
+  }
+
   // Trend line: arm from the toolbar, two real clicks, one drawing.
   check((await toolBtn('Trend line')) === 'ok', 'tools: the Line button exists')
   await waitFor(async () => (await attr('data-draw-tool')) === 'trend', 'trend armed', 5000)
-  await chartClick(0.30, 0.70)
-  await sleep(250)
-  await chartClick(0.60, 0.35)
-  const drew = await waitFor(
-    async () => ((await attr('data-draw-count')) === '1' ? 'ok' : null),
-    'the trend line to exist',
-    6000
-  ).catch(() => null)
-  check(drew === 'ok', 'tools: two real clicks place a trend line')
+  const drew = await placeTwo(0.30, 0.70, 0.60, 0.35, '1')
+  check(drew, 'tools: two real clicks place a trend line')
 
   // Select it mid-span: the editor appears with per-endpoint fields.
   await toolBtn('Select drawings')
-  await chartClick(0.45, 0.525)
+  const selHit = await fanClick(0.45, 0.525, 'data-draw-selected', '1')
   const selected = await waitFor(
     async () => {
       const n = await attr('data-draw-selected')
@@ -816,7 +869,7 @@ try {
     6000
   ).catch(() => null)
   check(!!selected, 'tools: select opens the exact-value editor',
-    selected ? `${selected.fields} fields` : '')
+    selected ? `${selected.fields} fields` : `fanHit=${selHit}`)
 
   // Delete the selection from the toolbar.
   await toolBtn('Delete')
@@ -831,14 +884,12 @@ try {
   // the trend splits at the intersection (clicked span dies), the h-line
   // donor splits in two -> 3 drawings remain.
   await toolBtn('Horizontal price line')
-  await chartClick(0.5, 0.5)
+  const placedH = await placeOne(0.5, 0.5, '1')
   await toolBtn('Trend line')
-  await chartClick(0.30, 0.70)
-  await sleep(250)
-  await chartClick(0.70, 0.30)
-  await waitFor(async () => (await attr('data-draw-count')) === '2', 'h-line + trend', 6000)
+  const placedT = await placeTwo(0.30, 0.70, 0.70, 0.30, '2')
+  check(placedH && placedT, 'tools: h-line + crossing trend placed for trim')
   await toolBtn('Trim')
-  await chartClick(0.35, 0.65) // the span below/left of the crossing
+  const trimHit = await fanClick(0.35, 0.65, 'data-draw-count', '3') // lower-left span
   const trimmed = await waitFor(
     async () => {
       const n = await attr('data-draw-count')
@@ -848,19 +899,24 @@ try {
     6000
   ).catch(() => null)
   check(trimmed === 'ok', 'tools: trim removes only the clicked span (SolidWorks-style)',
-    `count=${await attr('data-draw-count')}`)
+    `count=${await attr('data-draw-count')} fanHit=${trimHit}`)
 
   // Measure between two candles: one annotation, then clear it.
   await toolBtn('Measure')
-  await chartClick(0.35, 0.45)
-  await sleep(250)
-  await chartClick(0.65, 0.55)
-  const measured = await waitFor(
-    async () => ((await attr('data-measure-count')) === '1' ? 'ok' : null),
-    'the measurement annotation',
-    6000
-  ).catch(() => null)
-  check(measured === 'ok', 'tools: measure connects two real points')
+  let measured = false
+  for (let i = 0; i < 3 && !measured; i++) {
+    await chartClick(0.35, 0.45)
+    await sleep(300)
+    await chartClick(0.65, 0.55)
+    await sleep(400)
+    measured = (await attr('data-measure-count')) === '1'
+    if (!measured) {
+      await chartView.eval(
+        `document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))`
+      )
+    }
+  }
+  check(measured, 'tools: measure connects two real points')
   const clearedBtn = await toolBtn('Clear all measurements')
   const cleared = await waitFor(
     async () => ((await attr('data-measure-count')) === '0' ? 'ok' : null),
@@ -911,8 +967,96 @@ try {
   )
   await sleep(250)
 
+  // ---------------------------------------------- candle-depth setting cap
+  // Set 200 candles, revisit the symbol page: the chart must load exactly
+  // the cap, then restore 'all' so later tests see full history again.
+  await chartView.eval(
+    `window.grindstone.request('PUT','/api/settings',{chart_candles:'200'}).then(r=>r.status)`
+  )
+  await chromeA.eval(typeAddress('home.gs'))
+  await sleep(600)
+  await chromeA.eval(typeAddress('spy.gs'))
+  const capped = await waitFor(
+    async () => {
+      const n = await chartView.eval(
+        `parseInt(document.querySelector('.chart-source')?.textContent ?? '0', 10)`
+      )
+      return n === 200 ? 'ok' : null
+    },
+    'the 200-candle cap to apply',
+    20000
+  ).catch(async () =>
+    `got=${await chartView.eval(
+      `document.querySelector('.chart-source')?.textContent ?? 'none'`
+    )}`)
+  check(capped === 'ok', 'candles: the setting caps chart history', String(capped))
+  await chartView.eval(
+    `window.grindstone.request('PUT','/api/settings',{chart_candles:'all'}).then(r=>r.status)`
+  )
+
+  // -------------------------------------------- fixed tab actions (strip)
+  // New-tab lives OUTSIDE the tab scroller now — click it, then bounce
+  // between the two most recent tabs with Previous-tab, twice.
+  const beforeNew = (await chromeA.eval('window.grindstoneTabs.getState()')).tabs.length
+  await chromeA.eval(
+    `([...document.querySelectorAll('.strip-actions .strip-btn')]
+        .find(b => b.title === 'New tab').click(), 'ok')`
+  )
+  const grew = await waitFor(
+    async () => {
+      const s = await chromeA.eval('window.grindstoneTabs.getState()')
+      return s.tabs.length === beforeNew + 1 ? s : null
+    },
+    'the fixed New-tab button to open a tab',
+    6000
+  ).catch(() => null)
+  check(!!grew, 'tabs: the always-available New-tab button works',
+    grew ? `tabs=${grew.tabs.length}` : '')
+  const activeNow = grew?.activeId
+  await chromeA.eval(
+    `([...document.querySelectorAll('.strip-actions .strip-btn')]
+        .find(b => b.title.startsWith('Previous tab')).click(), 'ok')`
+  )
+  const bounced = await waitFor(
+    async () => {
+      const s = await chromeA.eval('window.grindstoneTabs.getState()')
+      return s.activeId !== activeNow ? s.activeId : null
+    },
+    'Previous-tab to jump back',
+    6000
+  ).catch(() => null)
+  check(bounced !== null, 'tabs: Previous-tab returns to the last active tab')
+  await chromeA.eval(
+    `([...document.querySelectorAll('.strip-actions .strip-btn')]
+        .find(b => b.title.startsWith('Previous tab')).click(), 'ok')`
+  )
+  const bouncedBack = await waitFor(
+    async () => {
+      const s = await chromeA.eval('window.grindstoneTabs.getState()')
+      return s.activeId === activeNow ? 'ok' : null
+    },
+    'Previous-tab to bounce back again',
+    6000
+  ).catch(() => null)
+  check(bouncedBack === 'ok', 'tabs: Previous-tab twice bounces between the same two tabs')
+
   // ------------------------------------------------------------- charts.gs
+  // One retry: typing into the omnibox immediately after a burst of strip
+  // state pushes has flaked exactly once — a human would just retype.
   await chromeA.eval(typeAddress('charts.gs'))
+  const firstTry = await waitFor(
+    async () => {
+      const s = await chromeA.eval('window.grindstoneTabs.getState()')
+      const t = s.tabs.find((x) => x.id === s.activeId)
+      return t && t.title === 'Charts' ? 'ok' : null
+    },
+    'charts.gs (first attempt)',
+    6000
+  ).catch(() => null)
+  if (firstTry === null) {
+    await sleep(800)
+    await chromeA.eval(typeAddress('charts.gs'))
+  }
   const chartsPage = await waitFor(
     async () => {
       const s = await chromeA.eval('window.grindstoneTabs.getState()')
@@ -921,8 +1065,18 @@ try {
     },
     'charts.gs to open the multi-chart page',
     8000
-  ).catch(() => null)
+  ).catch(async () => {
+    const s2 = await chromeA.eval('window.grindstoneTabs.getState()')
+    const act = s2.tabs.find((x) => x.id === s2.activeId)
+    console.log('      charts.gs diag:', JSON.stringify({
+      active: act ? { title: act.title, kind: act.kind } : null,
+      url: s2.activeUrl,
+      addr: await chromeA.eval(`document.querySelector('input.addr')?.value ?? null`),
+    }))
+    return null
+  })
   check(chartsPage === 'charts.gs', 'charts: charts.gs is a real addressable page', String(chartsPage))
+
 
   // Isolate: solo a ticker from its legend chip, then restore.
   const chartsTargets = (await targets()).filter((t) => t.url.includes('mode=content'))
@@ -969,6 +1123,52 @@ try {
     ).catch(() => null)
     check(isoOff === 'ok', 'charts: disabling isolation restores the previous set')
   }
+
+  // ------------------------------------------------------------------ help
+  // Feature search deep-links into the manual: "drawing" surfaces the
+  // drawing SECTION (not just the page), and the address round-trips.
+  const helpHit = await chromeA.eval(
+    `window.grindstone === undefined ? null :
+     null`
+  )
+  const helpRows = await (async () => {
+    // ask through any content view (chrome has no request bridge)
+    for (const t of (await targets()).filter((x) => x.url.includes('mode=content'))) {
+      const c = await connect(t)
+      const ok = await c.eval(`typeof window.grindstone?.request === 'function'`)
+      if (ok) {
+        return await c.eval(
+          `window.grindstone.request('GET','/api/search?q=drawing')
+             .then(r => JSON.stringify((r.body?.results ?? [])
+               .filter(x => x.page === 'help').slice(0, 1)))`
+        )
+      }
+    }
+    return null
+  })()
+  const helpRow = helpRows ? JSON.parse(helpRows)[0] : null
+  check(
+    !!helpRow && helpRow.section === 'drawing',
+    'help: searching "drawing" surfaces the drawing section',
+    helpRows ?? 'no content view answered'
+  )
+  await chromeA.eval(typeAddress('help.gs?s=drawing'))
+  const helpOpen = await waitFor(
+    async () => {
+      for (const t of (await targets()).filter((x) => x.url.includes('mode=content'))) {
+        const c = await connect(t)
+        const cur = await c.eval(
+          `document.querySelector('.help-page')?.getAttribute('data-help-current') ?? null`
+        )
+        if (cur === 'drawing') return 'ok'
+      }
+      return null
+    },
+    'help.gs?s=drawing to open scrolled to the drawing section',
+    10000
+  ).catch(() => null)
+  check(helpOpen === 'ok', 'help: help.gs?s=drawing lands on the drawing section')
+  void helpHit
 } catch (err) {
   console.log('FAIL  harness error —', err.message)
   failures += 1

@@ -99,6 +99,10 @@ interface Win {
   chrome: WebContentsView
   tabs: Tab[]
   activeId: number | null
+  /** The tab that was active before this one — the Previous-tab button's
+   *  target (alt-tab for tabs: press it twice and you are back where you
+   *  started). Cleared when that tab closes or leaves the window. */
+  prevActiveId: number | null
   /** Chrome-style split view: aId LEFT, bId RIGHT. Persists while a tab
    *  outside the pair is active (the pair hides); dies with either member. */
   split: { aId: number; bId: number; ratio: number } | null
@@ -120,6 +124,8 @@ type StripState = {
   loading: boolean
   draggingId: number | null
   split: { aId: number; bId: number; ratio: number } | null
+  /** The Previous-tab button's target; null disables it. */
+  prevId: number | null
 }
 
 export class TabManager {
@@ -199,7 +205,7 @@ export class TabManager {
 
     const w: Win = {
       id: this.nextWinId++, win, chrome, tabs: [], activeId: null,
-      split: null, divider: null,
+      prevActiveId: null, split: null, divider: null,
     }
     this.wins.push(w)
 
@@ -426,6 +432,7 @@ export class TabManager {
   activate(w: Win, tabId: number) {
     const tab = w.tabs.find((t) => t.id === tabId)
     if (!tab) return
+    if (w.activeId !== null && w.activeId !== tab.id) w.prevActiveId = w.activeId
     w.activeId = tab.id
     this.reconcile(w)
     this.pushStrip(w)
@@ -594,6 +601,10 @@ export class TabManager {
         w.tabs.some((t) => t.id === w.split!.bId)
           ? { ...w.split }
           : null,
+      prevId:
+        w.prevActiveId !== null && w.tabs.some((t) => t.id === w.prevActiveId)
+          ? w.prevActiveId
+          : null,
     }
   }
 
@@ -634,6 +645,14 @@ export class TabManager {
     ipcMain.on('tabs:activate', (e, tabId: number) => {
       const w = this.winFromSender(e.sender)
       if (w) this.activate(w, tabId)
+    })
+    // Alt-tab for tabs: jump to the previously active tab. activate() sets
+    // prevActiveId to the tab being LEFT, so pressing this twice bounces
+    // between the same two tabs (the useful behavior, not a history walk).
+    ipcMain.on('tabs:prev', (e) => {
+      const w = this.winFromSender(e.sender)
+      if (!w || w.prevActiveId === null) return
+      if (w.tabs.some((t) => t.id === w.prevActiveId)) this.activate(w, w.prevActiveId)
     })
     ipcMain.on('tabs:close', (e, tabId: number) => {
       const w = this.winFromSender(e.sender)

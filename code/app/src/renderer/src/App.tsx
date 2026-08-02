@@ -22,6 +22,7 @@ export type Route =
   | { name: 'settings' }
   | { name: 'news' }
   | { name: 'charts' }
+  | { name: 'help'; section?: string }
   | { name: 'article'; id?: number; url?: string }
 
 export function parseRoute(raw: string | null): Route {
@@ -31,6 +32,10 @@ export function parseRoute(raw: string | null): Route {
   if (raw.startsWith('article:')) {
     const rest = raw.slice(8)
     return /^\d+$/.test(rest) ? { name: 'article', id: Number(rest) } : { name: 'article', url: rest }
+  }
+  if (raw.startsWith('help')) {
+    const section = raw.startsWith('help:') ? raw.slice(5) : undefined
+    return { name: 'help', ...(section ? { section } : {}) }
   }
   if (raw === 'accounts' || raw === 'data' || raw === 'settings' || raw === 'news'
       || raw === 'charts') {
@@ -43,6 +48,7 @@ export function routeKey(r: Route): string {
   if (r.name === 'symbol') return `symbol:${r.symbol}`
   if (r.name === 'search') return `search:${r.query}`
   if (r.name === 'article') return `article:${r.id ?? r.url ?? ''}`
+  if (r.name === 'help') return r.section ? `help:${r.section}` : 'help'
   return r.name
 }
 

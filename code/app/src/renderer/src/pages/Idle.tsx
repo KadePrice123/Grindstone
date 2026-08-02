@@ -32,6 +32,10 @@ export function Idle({
     } else if ((r.type === 'web' || r.type === 'web-news') && r.url) {
       window.grindstone.openUrl(r.url) // the web: the actual site
     } else if (r.type === 'page') {
+      if (r.page === 'help' && r.section) {
+        onNavigate({ name: 'help', section: r.section })
+        return
+      }
       const key = pageRoute(r.page ?? '')
       if (key) onNavigate(parseRoute(key))
     }

@@ -191,6 +191,9 @@ Sign out, About).
 - **FR-SHELL-1 Tabs.** Opening any result opens a tab; the omnibox docks to the
   top; tab strip appears. Tabs show a page-type icon (§8), title, close button,
   and a per-page menu (bookmark/favorite, duplicate, pin, page settings).
+  - **Fixed tab actions** *(2026-08-02)*: New-tab (+) and Previous-tab (⇄)
+    sit right of the tab scroller and never scroll out of reach; ⇄ bounces
+    between the two most recent tabs. The tab list itself scrolls when full.
   - **Split view** *(delivered 2026-08-02)*: right-clicking a tab opens the
     native tab menu (the gesture wheel deliberately does NOT spawn on tabs);
     "Split with <tab>" pairs it side-by-side with any other tab in the window
@@ -265,6 +268,16 @@ Sign out, About).
   idle page as tiles with the page's logo. Default set on first run:
   **Accounts**, **APIs**, **AI**, **Positions** (§4.9).
 
+### 4.4a Help (delivered 2026-08-02)
+
+`help.gs` — the in-app manual. Every section (getting started, search &
+addresses, tabs, split view, wheels, charts, drawing, measuring, multi-charts,
+data, settings, troubleshooting) is a SEARCHABLE DESTINATION: backend
+HELP_TOPICS maps feature words to section ids, so searching "drawing" or
+"trim" deep-links to `help.gs?s=drawing`, scrolled and highlighted. Sections
+carry step-by-step how-tos and inline SVG illustrations; the gate cross-checks
+the topic↔section lockstep and that the content names the real UI.
+
 ### 4.5 Omnibox search
 
 - **FR-SEARCH-1** As-you-type dropdown (<100 ms perceived) over mixed entity
@@ -290,6 +303,9 @@ Sign out, About).
   crosshair, OHLCV readout, volume, log/linear, timeframes 1m→1M, session
   shading, symbol compare (multiple tickers on one chart — required for
   multi-underlying option strategies).
+  *(2026-08-02: chart history depth is user-set — Settings → "Candles per
+  chart", default ALL available history; Yahoo's range=max quietly returns
+  MONTHLY bars, so the provider uses the epoch form for full dailies.)*
   *(First slice delivered 2026-08-02: the dedicated multi-symbol chart tab,
   `charts.gs` — line-series comparison of any symbol set, per-symbol
   show/hide, normalize-to-% toggle, persisted per user. The Main wheel's SW

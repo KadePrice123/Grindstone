@@ -102,6 +102,10 @@ export function SearchPage({
       // Our own news has clean article text — read it in-app.
       onNavigate({ name: 'article', id: r.id })
     } else if (r.type === 'page') {
+      if (r.page === 'help' && r.section) {
+        onNavigate({ name: 'help', section: r.section })
+        return
+      }
       const key = pageRoute(r.page ?? '')
       if (key) onNavigate(parseRoute(key))
     } else if (r.url) {

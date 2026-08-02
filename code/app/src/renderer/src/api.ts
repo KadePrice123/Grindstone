@@ -104,6 +104,8 @@ export interface SearchResult {
   url?: string
   site?: string
   page?: string
+  /** Help results: the section id the result deep-links to. */
+  section?: string
   /** Pages only: false = announced but not built, so it must not look clickable. */
   ready?: boolean
   action?: string

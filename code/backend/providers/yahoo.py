@@ -136,8 +136,16 @@ class YahooProvider:
     def _chart(self, symbol: str, rng: str, interval: str) -> dict[str, Any] | None:
         def work():
             _throttle()
+            # MEASURED 2026-08-02: range=max&interval=1d silently comes back
+            # MONTHLY — 402 bars for 33 years of SPY, one per month, with the
+            # response still claiming interval 1d. The epoch form does not
+            # downsample: period1=0..now returned all 8,433 dailies. Only
+            # 'max' misbehaves; the bounded ranges honor their interval.
+            params = ({"period1": "0", "period2": str(int(time.time())),
+                       "interval": interval}
+                      if rng == "max" else {"range": rng, "interval": interval})
             r = httpx.get(_CHART.format(symbol=self._map(symbol)),
-                          params={"range": rng, "interval": interval},
+                          params=params,
                           headers=_HEADERS, timeout=10.0, follow_redirects=True)
             r.raise_for_status()
             body = r.json()

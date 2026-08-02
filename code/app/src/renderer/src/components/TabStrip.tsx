@@ -44,6 +44,7 @@ interface StripState {
   loading: boolean
   draggingId: number | null
   split: { aId: number; bId: number; ratio: number } | null
+  prevId: number | null
 }
 
 declare global {
@@ -52,6 +53,7 @@ declare global {
       getState: () => Promise<StripState | null>
       onState: (cb: (s: StripState) => void) => () => void
       newTab: () => void
+      prevTab: () => void
       activate: (id: number) => void
       close: (id: number) => void
       reorder: (id: number, toIndex: number) => void
@@ -110,6 +112,7 @@ export function TabStrip() {
     loading: false,
     draggingId: null,
     split: null,
+    prevId: null,
   })
   const [dragDx, setDragDx] = useState(0)
   const [addr, setAddr] = useState('')
@@ -282,9 +285,27 @@ export function TabStrip() {
             </div>
           )
         })}
-        <div className="strip-new" title="New tab" onClick={() => window.grindstoneTabs.newTab()}>
+      </div>
+
+      {/* FIXED tab actions — outside the scroller, so a strip full of tabs
+          can never push New-tab out of reach (it used to sit inline after
+          the last tab and scrolled away with them). */}
+      <div className="strip-actions">
+        <button
+          className="strip-btn"
+          title="New tab"
+          onClick={() => window.grindstoneTabs.newTab()}
+        >
           +
-        </div>
+        </button>
+        <button
+          className="strip-btn"
+          title="Previous tab — jump back to the last tab you were on"
+          disabled={state.prevId === null}
+          onClick={() => window.grindstoneTabs.prevTab()}
+        >
+          ⇄
+        </button>
       </div>
 
       <div className="strip-spacer" onDoubleClick={() => window.grindstoneTabs.maximizeToggle()} />

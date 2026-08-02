@@ -157,6 +157,7 @@ export interface StripState {
   draggingId: number | null
   /** Chrome-style split view: the paired tabs and the divider position. */
   split: { aId: number; bId: number; ratio: number } | null
+  prevId: number | null
 }
 
 const grindstoneTabs = {
@@ -167,6 +168,8 @@ const grindstoneTabs = {
     return () => ipcRenderer.removeListener('tabs:state', listener)
   },
   newTab: (): void => ipcRenderer.send('tabs:new'),
+  /** Jump to the previously active tab (alt-tab for tabs). */
+  prevTab: (): void => ipcRenderer.send('tabs:prev'),
   activate: (id: number): void => ipcRenderer.send('tabs:activate', id),
   close: (id: number): void => ipcRenderer.send('tabs:close', id),
   reorder: (id: number, toIndex: number): void => ipcRenderer.send('tabs:reorder', id, toIndex),

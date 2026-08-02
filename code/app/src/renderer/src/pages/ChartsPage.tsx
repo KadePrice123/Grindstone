@@ -263,7 +263,10 @@ export function ChartsPage() {
       }
       api<{ bars: Bar[]; source: string; reason?: string }>(
         'GET',
-        `/api/symbols/${encodeURIComponent(sym)}/bars?timeframe=${timeframe}&limit=400`
+        // No limit param: the user's chart_candles setting decides (default:
+        // all available). The featured search card and the 52-week range
+        // fetch keep explicit limits — those depths are intentional.
+        `/api/symbols/${encodeURIComponent(sym)}/bars?timeframe=${timeframe}`
       )
         .then((r) => {
           if (stop) return
