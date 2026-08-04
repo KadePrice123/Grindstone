@@ -18,6 +18,13 @@ import {
   BacktestStatus,
 } from '../api'
 import { BacktestIcon } from '../components/icons'
+import {
+  DEFAULT_FORM,
+  SpecForm,
+  SpecFormState,
+  compileForm,
+  tryDecompile,
+} from './BacktestSpecForm'
 
 const POLL_ACTIVE_MS = 2_500
 const POLL_IDLE_MS = 20_000
@@ -56,12 +63,20 @@ export function BacktestPage() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  // Editor state: a preset loaded for editing, or a scratch spec.
+  // Editor state: a preset loaded for editing, or a scratch spec. Two views
+  // of ONE truth (edSpec): the form compiles into it, the JSON textarea edits
+  // it directly — an AI agent and a human drive the same validator and the
+  // same run endpoint.
   const [edName, setEdName] = useState('')
-  const [edSpec, setEdSpec] = useState('')
+  const [edSpec, setEdSpec] = useState(() => JSON.stringify(compileForm(DEFAULT_FORM), null, 2))
   const [edFrom, setEdFrom] = useState<number | null>(null) // preset id or null
   const [edCheck, setEdCheck] = useState<{ ok: boolean; text: string } | null>(null)
   const [range, setRange] = useState({ start: '', end: '' })
+  const [edMode, setEdMode] = useState<'form' | 'json'>('form')
+  const [formInitial, setFormInitial] = useState<SpecFormState>(DEFAULT_FORM)
+  const [formKey, setFormKey] = useState(0) // remounts SpecForm on load/switch
+  const [formNote, setFormNote] = useState<string | null>(null)
+  const [dataNote, setDataNote] = useState<string | null>(null)
 
   const active = runs?.find((r) => r.status === 'running') ?? null
 
@@ -151,7 +166,55 @@ export function BacktestPage() {
     setEdSpec(JSON.stringify(p.spec, null, 2))
     setEdFrom(p.builtin ? null : p.id)
     setEdCheck(null)
+    setFormNote(null)
+    // Open in the friendliest mode the spec allows: the form when it fits,
+    // JSON (with a why) when the spec uses features beyond it.
+    const f = tryDecompile(p.spec)
+    if (f) {
+      setFormInitial(f)
+      setFormKey((k) => k + 1)
+      setEdMode('form')
+    } else {
+      setEdMode('json')
+      setFormNote('this spec uses features beyond the form — editing as JSON')
+    }
   }
+
+  const switchMode = (mode: 'form' | 'json') => {
+    setFormNote(null)
+    if (mode === 'json' || edMode === mode) {
+      setEdMode(mode)
+      return
+    }
+    // JSON -> form only when nothing would be dropped.
+    try {
+      const f = tryDecompile(JSON.parse(edSpec))
+      if (!f) {
+        setFormNote('this spec uses features beyond the form — keep editing JSON')
+        return
+      }
+      setFormInitial(f)
+      setFormKey((k) => k + 1)
+      setEdMode('form')
+    } catch {
+      setFormNote('fix the JSON first — it does not parse yet')
+    }
+  }
+
+  const syncNow = () =>
+    act(async () => {
+      await api('POST', '/api/backtests/data/sync', { underlying: 'SPY' })
+      setDataNote('sync started — the store updates in the background')
+    })
+
+  const setupRecording = () =>
+    act(async () => {
+      const r = await api<{ created: string[]; note: string }>(
+        'POST', '/api/backtests/data/setup-recording', { underlying: 'SPY' })
+      setDataNote(r.created.length
+        ? `recording jobs created: ${r.created.join(', ')} — manage them on data.gs`
+        : 'recording jobs already exist — manage them on data.gs')
+    })
 
   const savePreset = (e: FormEvent) => {
     e.preventDefault()
@@ -208,25 +271,71 @@ export function BacktestPage() {
         <h1>Backtest</h1>
         {status ? (
           <span className="dim">
-            {status.can_run
-              ? `chains: ${status.options_db.size_mb.toLocaleString()} MB`
-              : 'chain data missing'}
+            {status.source === 'recorded'
+              ? `your recorded data: ${status.recorded.days} day${status.recorded.days === 1 ? '' : 's'}`
+              : status.can_run
+                ? `chains: ${status.options_db.size_mb.toLocaleString()} MB`
+                : 'chain data missing'}
           </span>
         ) : null}
       </div>
 
-      {status && !status.can_run ? (
+      {status ? (
         <div className="card">
-          <h2>Chain data not found</h2>
-          <div className="subtle">
-            Backtests replay recorded SPY option chains — a multi-GB database that does
-            not ship with the app. Expected at <code>{status.options_db.path}</code>
-            {status.bars_db.present ? null : (
-              <> (bars database also missing at <code>{status.bars_db.path}</code>)</>
+          <h2>Data</h2>
+          <div className="subtle" style={{ marginBottom: 10 }}>
+            {status.source === 'workspace' ? (
+              <>
+                Reading this machine's chain database (
+                {status.options_db.size_mb.toLocaleString()} MB at{' '}
+                <code>{status.options_db.path}</code>). Recording still works alongside
+                it — the app keeps its own store for machines without this file.
+              </>
+            ) : status.source === 'custom' ? (
+              <>
+                Reading the database set in Settings: <code>{status.options_db.path}</code>
+                {status.options_db.present ? '' : ' — not found there'}.
+              </>
+            ) : status.recorded.days > 0 ? (
+              <>
+                Reading the app's own store, built from your recorded snapshots:{' '}
+                <strong>
+                  {status.recorded.days} days ({status.recorded.first} →{' '}
+                  {status.recorded.last})
+                </strong>
+                , {status.recorded.contracts.toLocaleString()} contract rows. Every run
+                syncs the latest recordings in first. Short histories make honest but
+                thin backtests — the store grows every day recording runs.
+              </>
+            ) : (
+              <>
+                No chain data yet. The app has created its own store and will fill it
+                from recorded chain snapshots: click <em>Set up recording</em> (needs a
+                data-capable account on accounts.gs), or point Settings at an existing
+                chain database. Recording feeds Alpaca today; more providers and a
+                hosted data feed can fill the same store later.
+              </>
             )}
-            . Point Settings at your copy, or place the files there and refresh. The
-            calibration references ({status.calibration.references.length} tastytrade
-            exports) ship with the app either way.
+          </div>
+          {status.sync.state === 'running' ? (
+            <div className="subtle">syncing recorded data…</div>
+          ) : status.sync.state === 'error' ? (
+            <div className="test-result bad">last sync failed: {status.sync.error}</div>
+          ) : status.sync.state === 'done' ? (
+            <div className="subtle">
+              last sync: +{status.sync.days} day{status.sync.days === 1 ? '' : 's'},{' '}
+              {status.sync.contracts?.toLocaleString()} contracts
+            </div>
+          ) : null}
+          {dataNote ? <div className="test-result ok">{dataNote}</div> : null}
+          <div className="row-actions" style={{ marginTop: 8 }}>
+            <button className="btn" disabled={busy || status.sync.state === 'running'}
+                    onClick={syncNow}>
+              {status.sync.state === 'running' ? 'Syncing…' : 'Sync recorded data'}
+            </button>
+            <button className="btn" disabled={busy} onClick={setupRecording}>
+              Set up recording
+            </button>
           </div>
         </div>
       ) : null}
@@ -298,6 +407,28 @@ export function BacktestPage() {
 
       <form className="card" onSubmit={savePreset}>
         <h2>{edFrom !== null ? 'Edit preset' : 'New preset'}</h2>
+        <div className="row-actions" style={{ marginBottom: 10 }}>
+          <button
+            className={`btn${edMode === 'form' ? ' primary' : ''}`}
+            type="button"
+            onClick={() => switchMode('form')}
+          >
+            Form
+          </button>
+          <button
+            className={`btn${edMode === 'json' ? ' primary' : ''}`}
+            type="button"
+            onClick={() => switchMode('json')}
+          >
+            JSON
+          </button>
+          <span className="subtle">
+            {edMode === 'form'
+              ? 'the form writes the same spec an AI agent would'
+              : 'full spec language — sweeps, params, custom rules'}
+          </span>
+        </div>
+        {formNote ? <div className="test-result bad">{formNote}</div> : null}
         <div className="form-grid">
           <label>Name</label>
           <input
@@ -307,16 +438,28 @@ export function BacktestPage() {
             placeholder="my_put_spread"
             spellCheck={false}
           />
-          <label>Spec (JSON)</label>
-          <textarea
-            className="field"
-            value={edSpec}
-            onChange={(e) => setEdSpec(e.target.value)}
-            placeholder='{"legs": [{"action": "sell", "right": "put", "delta": 0.3, "dte": 45}], "exits": {"dte": 21, "take_profit": 0.5}}'
-            rows={12}
-            spellCheck={false}
-            style={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
+        </div>
+        {edMode === 'form' ? (
+          <SpecForm
+            key={formKey}
+            initial={formInitial}
+            onSpec={(spec) => setEdSpec(JSON.stringify(spec, null, 2))}
           />
+        ) : (
+          <div className="form-grid">
+            <label>Spec (JSON)</label>
+            <textarea
+              className="field"
+              value={edSpec}
+              onChange={(e) => setEdSpec(e.target.value)}
+              placeholder='{"legs": [{"action": "sell", "right": "put", "delta": 0.3, "dte": 45}], "exits": {"dte": 21, "take_profit": 0.5}}'
+              rows={12}
+              spellCheck={false}
+              style={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
+            />
+          </div>
+        )}
+        <div className="form-grid">
           <label>From</label>
           <input
             className="field"

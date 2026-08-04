@@ -185,6 +185,10 @@ class RunIn(BaseModel):
     end: str | None = None
 
 
+class BtDataIn(BaseModel):
+    underlying: str = Field(default="SPY", min_length=1, max_length=12)
+
+
 # ------------------------------------------------------------------ factory
 def create_app(state: State) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -817,16 +821,72 @@ def create_app(state: State) -> FastAPI:
             con.close()
 
     # ----------------------------------------------------------- backtests
-    def _bt_paths(user_id: int) -> dict[str, str]:
+    def _bt_paths(user_id: int, underlying: str = "SPY") -> dict[str, str]:
         with state.db() as db:
-            return backtests_mod.engine_paths(settings_mod.get_all(db, user_id))
+            return backtests_mod.engine_paths(
+                settings_mod.get_all(db, user_id), underlying)
 
     @app.get("/api/backtests/status")
-    def bt_status(s=Depends(current_session)) -> dict[str, Any]:
+    def bt_status(underlying: str = "SPY",
+                  s=Depends(current_session)) -> dict[str, Any]:
         with state.db() as db:
-            status = backtests_mod.data_status(settings_mod.get_all(db, s.user_id))
+            status = backtests_mod.data_status(
+                settings_mod.get_all(db, s.user_id), underlying)
         status["active"] = state.backtests.active()
+        status["sync"] = state.backtests.sync_status()
         return status
+
+    @app.post("/api/backtests/data/sync")
+    def bt_data_sync(body: BtDataIn, s=Depends(current_session)) -> dict[str, Any]:
+        started = state.backtests.sync_now(body.underlying)
+        return {"ok": True, "started": started}
+
+    @app.post("/api/backtests/data/setup-recording")
+    def bt_setup_recording(body: BtDataIn,
+                           s=Depends(current_session)) -> dict[str, Any]:
+        """One click wires the recorder into the backtest store: an hourly
+        chain snapshot plus daily bars for the underlying, long retention.
+        The sync (before every 'recorded' run, or manual) does the rest —
+        the user never assembles a database by hand."""
+        symbol = body.underlying.upper().strip()
+        # Deliberately NOT gated on the universe: a fresh install has not
+        # synced it yet (no creds), and that is exactly when this button is
+        # clicked. A wrong symbol just makes jobs that report their failure
+        # every tick — visible, fixable, harmless.
+        entry = state.universe.exact(symbol)
+        wanted = [
+            # kind, timeframe, interval, retention_days
+            ("chain", "", 3600, 1825),
+            ("bars", "1Day", 86400, 1825),
+        ]
+        con = state.market()
+        created = []
+        try:
+            with con:
+                for kind, timeframe, interval, retention in wanted:
+                    have = con.execute(
+                        "SELECT id FROM record_jobs WHERE user_id=? AND kind=?"
+                        " AND symbol=? AND timeframe=?",
+                        (s.user_id, kind, symbol, timeframe),
+                    ).fetchone()
+                    if have:
+                        continue
+                    err = recorder_mod.validate_job(
+                        kind, symbol, timeframe, interval, retention,
+                        (entry or {}).get("asset_class") if entry else None)
+                    if err:
+                        raise HTTPException(422, err)
+                    con.execute(
+                        "INSERT INTO record_jobs (user_id, kind, symbol, timeframe,"
+                        " interval_seconds, retention_days) VALUES (?,?,?,?,?,?)",
+                        (s.user_id, kind, symbol, timeframe, interval, retention),
+                    )
+                    created.append(kind)
+        finally:
+            con.close()
+        return {"ok": True, "created": created,
+                "note": "jobs record while you are signed in with a data-capable"
+                        " account; runs sync the recorded snapshots automatically"}
 
     @app.get("/api/backtests/vocab")
     def bt_vocab(s=Depends(current_session)) -> dict[str, Any]:
@@ -925,7 +985,6 @@ def create_app(state: State) -> FastAPI:
     def bt_run_start(body: RunIn, s=Depends(current_session)) -> dict[str, Any]:
         if body.kind not in ("run", "calibration"):
             raise HTTPException(422, f"unknown kind {body.kind!r}")
-        paths = _bt_paths(s.user_id)
         spec = None
         name = body.name
         for label, value in (("start", body.start), ("end", body.end)):
@@ -960,11 +1019,19 @@ def create_app(state: State) -> FastAPI:
             name = name or "engine calibration"
             if not backtests_mod.data_status()["calibration"]["references"]:
                 raise HTTPException(422, "no calibration references found")
-        if not Path(paths["options_db"]).is_file():
+        # The data source follows the strategy's underlying; the honesty
+        # check is data_status's, so the page and this refusal always agree.
+        underlying = str((spec or {}).get("underlying", "SPY"))
+        with state.db() as db:
+            st = backtests_mod.data_status(
+                settings_mod.get_all(db, s.user_id), underlying)
+        if not st["can_run"]:
+            raise HTTPException(422, st["reason"] or "no chain data available")
+        if body.kind == "calibration" and st["source"] == "recorded":
             raise HTTPException(
-                422, f"chain database not found at {paths['options_db']} — "
-                     "set its path in Settings (labeled estimated data, "
-                     "backtests need the recorded chains)")
+                422, "calibration needs the 2013+ reference chain database — "
+                     "recorded data cannot reproduce the known trades")
+        paths = _bt_paths(s.user_id, underlying)
         try:
             return state.backtests.start(
                 s.user_id, body.kind, spec, name,

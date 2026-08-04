@@ -1521,11 +1521,163 @@ def _backtests_api():
             r = c.post("/api/backtests/runs",
                        json={"kind": "run", "spec": good, "start": "not-a-date"})
             assert r.status_code == 422 and "ISO date" in r.json()["detail"]
+
+            # A fresh install owns its data store from the first status call
+            # (source 'recorded', honestly empty), and one click wires the
+            # recorder into it.
+            st = c.get("/api/backtests/status").json()
+            assert st["source"] == "recorded" and st["recorded"]["days"] == 0
+            assert not st["can_run"] and "record" in st["reason"]
+            r = c.post("/api/backtests/data/setup-recording",
+                       json={"underlying": "SPY"}).json()
+            assert sorted(r["created"]) == ["bars", "chain"], r
+            r = c.post("/api/backtests/data/setup-recording",
+                       json={"underlying": "SPY"}).json()
+            assert r["created"] == [], "setup-recording is not idempotent"
+            jobs = c.get("/api/datamgmt/jobs").json()
+            assert len(jobs) == 2 and {j["kind"] for j in jobs} == {"bars", "chain"}
+            # empty sync completes cleanly through the background thread
+            assert c.post("/api/backtests/data/sync",
+                          json={"underlying": "SPY"}).json()["ok"]
+            import time as _time
+            for _ in range(50):
+                sync = c.get("/api/backtests/status").json()["sync"]
+                if sync["state"] in ("done", "error"):
+                    break
+                _time.sleep(0.1)
+            assert sync["state"] == "done" and sync["days"] == 0, sync
+            # calibration must refuse the recorded source honestly
+            r = c.post("/api/backtests/runs", json={"kind": "calibration"})
+            assert r.status_code == 422, r.text
         finally:
             if old is None:
                 os.environ.pop("GRINDSTONE_DATA_DIR", None)
             else:
                 os.environ["GRINDSTONE_DATA_DIR"] = old
+
+
+@check("recorded-data pipeline: rec_chain -> app-owned store -> engine runs on it")
+def _btdata_pipeline():
+    """The path a real user takes: no spy_options.db anywhere — the recorder
+    captured chain snapshots, the app's own database is built from them, and
+    the engine backtests on that. Chains are synthetic but ARBITRAGE-CLEAN
+    (Black-76 prices, exact put-call parity) so the engine's forward
+    extraction, strike selection and fills all exercise for real, through the
+    actual runner subprocess."""
+    import json as _json
+    import math
+    import os
+    import subprocess
+    import tempfile
+    sys.path.insert(0, str(CODE))
+
+    def norm_cdf(x):
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+    def b76(F, K, T, v, call):
+        if T <= 0 or v <= 0:
+            return max(F - K, 0.0) if call else max(K - F, 0.0)
+        d1 = (math.log(F / K) + 0.5 * v * v * T) / (v * math.sqrt(T))
+        d2 = d1 - v * math.sqrt(T)
+        if call:
+            return F * norm_cdf(d1) - K * norm_cdf(d2)
+        return K * norm_cdf(-d2) - F * norm_cdf(-d1)
+
+    with tempfile.TemporaryDirectory() as td:
+        old = os.environ.get("GRINDSTONE_DATA_DIR")
+        os.environ["GRINDSTONE_DATA_DIR"] = td
+        try:
+            from backend import btdata
+            from backend.marketdb import connect_market
+
+            # --- a recorder's worth of synthetic SPY chains: 5 weekdays,
+            # two expirations, snapshots at 19:45Z (in-hours ET), plus one
+            # stale weekend snapshot that must be filtered out.
+            mcon = connect_market(Path(td) / "market.db")
+            days = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08",
+                    "2026-01-09"]
+            exps = ["2026-01-16", "2026-02-20"]
+            iv = 0.20
+            with mcon:
+                for i, day in enumerate(days):
+                    F = 500.0 + i * 0.5
+                    ts = f"{day}T19:45:00Z"
+                    d0 = dt_date(day)
+                    for exp in exps:
+                        T = max(( dt_date(exp) - d0).days, 1) / 365.0
+                        for k in range(400, 601, 5):
+                            for right in ("C", "P"):
+                                px = b76(F, float(k), T, iv, right == "C")
+                                d1 = (math.log(F / k) + 0.5 * iv * iv * T) / (iv * math.sqrt(T))
+                                delta = norm_cdf(d1) if right == "C" else norm_cdf(d1) - 1.0
+                                mcon.execute(
+                                    "INSERT INTO rec_chain (underlying, ts, occ_symbol,"
+                                    " expiration, strike, right, bid, ask, iv, delta)"
+                                    " VALUES ('SPY',?,?,?,?,?,?,?,?,?)",
+                                    (ts, f"SPY{exp}{right}{k}", exp, float(k), right,
+                                     max(px - 0.02, 0.01), px + 0.02, iv, delta))
+                # stale weekend snapshot: same rows, Saturday ts — must not sync
+                mcon.execute(
+                    "INSERT INTO rec_chain (underlying, ts, occ_symbol, expiration,"
+                    " strike, right, bid, ask) VALUES"
+                    " ('SPY','2026-01-10T19:45:00Z','X','2026-01-16',500,'P',1,1.1)")
+
+            # --- sync into the app-owned store
+            store = btdata.data_db_path("SPY")
+            dcon = btdata.connect_data(store)
+            r = btdata.sync_from_recorded(mcon, dcon, "SPY")
+            assert r["days"] == 5, f"synced {r['days']} days, wanted 5 (weekend filtered)"
+            got = btdata.stats(dcon)
+            assert got["first"] == "2026-01-05" and got["last"] == "2026-01-09"
+            row = dcon.execute(
+                "SELECT bid, ask, mark, delta FROM opt WHERE d=20260105 AND cp=1"
+                " AND strike=500000 AND exp=20260116").fetchone()
+            assert row is not None, "strike*1000 / cp / ymd mapping broke"
+            assert abs(row["mark"] - 0.5 * (row["bid"] + row["ask"])) < 1e-9
+            # incremental: nothing new -> nothing copied
+            assert btdata.sync_from_recorded(mcon, dcon, "SPY")["days"] == 0
+            dcon.close()
+            mcon.close()
+
+            # --- the REAL runner subprocess backtests on the synced store
+            out_dir = Path(td) / "run"
+            out_dir.mkdir()
+            job = {
+                "run_id": 1, "kind": "run", "name": "pipeline",
+                "spec": {"name": "pipeline", "capital": 100000,
+                         "legs": [{"action": "sell", "right": "put",
+                                   "delta": 0.2, "dte": 10}],
+                         "exits": {"dte": 9}},
+                "out_dir": str(out_dir),
+                "paths": {"options_db": str(store), "bars_db": str(store),
+                          "vix_csv": str(CODE / "backend" / "bt" / "data" / "vix_history.csv"),
+                          "cache": str(Path(td) / "cache.db")},
+            }
+            (out_dir / "job.json").write_text(_json.dumps(job), encoding="utf-8")
+            env = dict(os.environ, PYTHONIOENCODING="utf-8")
+            r2 = subprocess.run(
+                [sys.executable, "-u", "-m", "backend.bt_runner",
+                 str(out_dir / "job.json")],
+                cwd=CODE, capture_output=True, text=True, timeout=120, env=env,
+                stdin=subprocess.DEVNULL)
+            assert r2.returncode == 0, f"runner failed:\n{r2.stderr[-800:]}"
+            result = _json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
+            assert not result.get("error"), f"engine error: {result.get('error')}"
+            assert len(result["daily"]) == 5, \
+                f"engine saw {len(result['daily'])} trading days, wanted 5"
+            assert result["trades"] or result.get("skipped"), \
+                "no trade and no skip reason — selection never engaged"
+            assert (out_dir / "report.html").is_file()
+        finally:
+            if old is None:
+                os.environ.pop("GRINDSTONE_DATA_DIR", None)
+            else:
+                os.environ["GRINDSTONE_DATA_DIR"] = old
+
+
+def dt_date(s: str):
+    import datetime as _dt
+    return _dt.date.fromisoformat(s)
 
 
 @check("backtest page: registered in every seam that must agree")

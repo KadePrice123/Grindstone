@@ -241,13 +241,34 @@ export interface BacktestRun {
   spec?: Record<string, unknown> | null
 }
 
+export interface BacktestRecordedStats {
+  days: number
+  first: string | null
+  last: string | null
+  contracts: number
+  bar_days: number
+}
+
+export interface BacktestSyncStatus {
+  state: 'idle' | 'running' | 'done' | 'error'
+  days?: number
+  contracts?: number
+  bars?: number
+  error?: string
+}
+
 export interface BacktestStatus {
   options_db: { path: string; present: boolean; size_mb: number }
   bars_db: { path: string; present: boolean }
   vix_csv: { present: boolean }
   calibration: { references: string[]; mapped: string[] }
+  source: 'workspace' | 'recorded' | 'custom'
+  underlying: string
+  recorded: BacktestRecordedStats
+  reason: string
   can_run: boolean
   active: { id: number; progress: BacktestProgress } | null
+  sync: BacktestSyncStatus
 }
 
 export interface TestResult {

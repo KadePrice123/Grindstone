@@ -127,8 +127,17 @@ M1 (spine) + search/data (early M4 slice) — the app boots and *works*:
   three tastytrade calibration references + four showcase strategies), runs in
   a killable subprocess with live progress, full HTML reports in a tab, and a
   "Verify engine" flow that replays the shipped reference exports against the
-  exact data — the regression harness for anyone modifying engine code. Needs
-  `spy_options.db` / `spy_bars.db` (multi-GB, not in git; path set in
-  Settings) — without them the page says so and everything else still works.
+  exact data — the regression harness for anyone modifying engine code.
+- Backtest data is self-serve (2026-08-03): the app owns its store at
+  `data/backtest_data/<SYM>.db` (created automatically, both engine tables in
+  one file) and fills it from recorded chain/bars snapshots — one click on the
+  page wires the recording jobs, every run syncs the newest recordings first,
+  and the whole pipeline is gate-checked end to end on synthetic
+  arbitrage-clean chains. Machines with a full `spy_options.db` (or a
+  Settings path) use that instead; the page always says which source a run
+  reads and how much recorded history exists. Specs are editable two ways:
+  a form (legs, exit toggles, sizing) for humans, raw JSON for the full spec
+  language and future AI agents — both compile to the same spec.
+  Pickup notes for in-flight work: `code/docs/NOTES.md`.
 Roadmap: REQUIREMENTS.md §10. Alpaca paper key verified working (in
 `env/alpaca.env`).

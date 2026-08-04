@@ -953,8 +953,15 @@ to Releases.
   engine can always be re-verified against the exact trades it is known to
   have made from the exact data ("Verify engine"); the engine's 120
   known-answer tests run inside the gate. The multi-GB chain databases stay
-  external (Settings-pathed, honestly reported when absent). Parameter sweeps
-  remain future work.
+  external (Settings-pathed, honestly reported when absent). **Data
+  self-serve (also 2026-08-03)**: the app owns a per-underlying backtest
+  store (`data/backtest_data/`), created automatically and filled from the
+  recorder's chain/bars snapshots (one-click job wiring, auto-sync before
+  every run on that source) — a fresh install backtests on its own recorded
+  data with no hand-made database; provider adapters and a hosted data feed
+  land in the same two tables. Specs are editable as a form (humans) or raw
+  JSON (the full language; AI agents) compiling to one spec. Parameter
+  sweeps remain future work; running notes in docs/NOTES.md.
 
 ## 12. Open decisions for Kade
 

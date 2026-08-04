@@ -32,12 +32,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import btdata
 from .bt import spec as bt_spec
 from .bt import tastyio
 from .bt.expr import RuleError
 from .db import data_dir
 from .logs import LOG
-from .marketdb import connect_market
+from .marketdb import connect_market, market_path
 
 HERE = Path(__file__).resolve().parent          # .../code/backend
 PRESETS_DIR = HERE / "bt" / "presets"           # bundled JSON strategy specs
@@ -65,18 +66,45 @@ REPORT_KEY_TTL = 60.0  # seconds a minted report key stays valid
 
 
 # ------------------------------------------------------------------- paths
-def engine_paths(user_settings: dict[str, Any] | None = None) -> dict[str, str]:
-    """Where the engine's inputs live. The chain databases are multi-GB and
-    never ship with the repo; default to the workspace layout (siblings of the
-    project folder) and let Settings override. Bundled inputs (VIX history,
-    calibration references) resolve into the repo itself."""
+def engine_paths(user_settings: dict[str, Any] | None = None,
+                 underlying: str = "SPY") -> dict[str, str]:
+    """Where the engine's inputs live, most explicit first:
+
+    1. a Settings-supplied path (the user said exactly where),
+    2. the workspace layout (this machine's multi-GB spy_options.db),
+    3. the app-owned recorded-data store (data/backtest_data/<SYM>.db) —
+       created by the app, filled by the recorder via btdata.sync, and the
+       only option a fresh install ever needs to think about.
+
+    The app-owned file holds BOTH engine tables (opt + bars), so it serves as
+    options_db and bars_db at once. `source` tells the UI which world a run
+    would read from."""
     s = user_settings or {}
+    u = underlying.upper()
     workspace = data_dir().parent.parent  # <workspace>/<project>/data -> <workspace>
-    options_db = s.get("backtest_options_db") or str(workspace / "spy_options.db")
-    bars_db = s.get("backtest_bars_db") or str(workspace / "spy_bars.db")
+    app_db = str(btdata.data_db_path(u))
+    explicit_opt = s.get("backtest_options_db") or None
+    explicit_bars = s.get("backtest_bars_db") or None
+    ws_opt = workspace / "spy_options.db"
+    ws_bars = workspace / "spy_bars.db"
+    if explicit_opt:
+        source = "custom"
+        options_db = explicit_opt
+        bars_db = explicit_bars or (str(ws_bars) if ws_bars.is_file() else app_db)
+    elif u == "SPY" and ws_opt.is_file():
+        source = "workspace"
+        options_db = str(ws_opt)
+        bars_db = explicit_bars or str(ws_bars)
+    else:
+        source = "recorded"
+        options_db = app_db
+        bars_db = explicit_bars or app_db
     return {
         "options_db": options_db,
         "bars_db": bars_db,
+        "source": source,
+        "underlying": u,
+        "app_db": app_db,
         "vix_csv": str(VIX_CSV),
         "cache": str(data_dir() / "backtest_cache.db"),
         "calibration": str(CALIBRATION_DIR),
@@ -84,13 +112,29 @@ def engine_paths(user_settings: dict[str, Any] | None = None) -> dict[str, str]:
     }
 
 
-def data_status(user_settings: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Honest availability report: what can run on this machine right now.
-    The UI shows this instead of letting a run fail 60s in."""
-    p = engine_paths(user_settings)
+def data_status(user_settings: dict[str, Any] | None = None,
+                underlying: str = "SPY") -> dict[str, Any]:
+    """Honest availability report: what can run on this machine right now,
+    and how much recorded data the app-owned store holds. Opening the store
+    CREATES it — a fresh install has its database from the first look, which
+    is the point: the user never makes one by hand."""
+    p = engine_paths(user_settings, underlying)
     opt = Path(p["options_db"])
     bars = Path(p["bars_db"])
     refs = tastyio.discover(p["calibration"]) if os.path.isdir(p["calibration"]) else []
+    con = btdata.connect_data(p["app_db"])
+    try:
+        recorded = btdata.stats(con)
+    finally:
+        con.close()
+    if p["source"] == "recorded":
+        can_run = recorded["days"] > 0
+        reason = ("" if can_run else
+                  "no recorded chain data yet — set up recording below, or point"
+                  " Settings at a chain database")
+    else:
+        can_run = opt.is_file()
+        reason = "" if can_run else f"chain database not found at {p['options_db']}"
     return {
         "options_db": {"path": p["options_db"], "present": opt.is_file(),
                        "size_mb": round(opt.stat().st_size / 2**20, 1) if opt.is_file() else 0},
@@ -98,7 +142,11 @@ def data_status(user_settings: dict[str, Any] | None = None) -> dict[str, Any]:
         "vix_csv": {"present": Path(p["vix_csv"]).is_file()},
         "calibration": {"references": [os.path.basename(f) for f in refs],
                         "mapped": sorted(CALIBRATION_MAP)},
-        "can_run": opt.is_file() and bars.is_file(),
+        "source": p["source"],
+        "underlying": p["underlying"],
+        "recorded": recorded,
+        "can_run": can_run,
+        "reason": reason,
     }
 
 
@@ -189,6 +237,9 @@ class BacktestManager:
         self._cancelled_run: int | None = None  # per-RUN, not a bare flag: a
         # bare flag raced start() and could mislabel the previous run's finish
         self._report_keys: dict[int, tuple[str, str, float]] = {}  # run -> (key, file, expiry)
+        self._sync_lock = threading.Lock()
+        self._sync_thread: threading.Thread | None = None
+        self._sync_status: dict[str, Any] = {"state": "idle"}
         # A sidecar restart orphans any 'running' row — the subprocess died
         # with us (parent watchdog) or will write into a row nobody reads.
         con = self._market()
@@ -241,6 +292,15 @@ class BacktestManager:
                     "paths": paths, "calibration_map": CALIBRATION_MAP,
                     "presets_dir": str(PRESETS_DIR),
                 }
+                if paths.get("source") == "recorded":
+                    # The runner refreshes the store from recorded data first,
+                    # so a run always sees everything captured up to now. In
+                    # the subprocess, not here: a first-ever sync can move
+                    # millions of rows and the start endpoint must return fast.
+                    job["sync"] = {
+                        "market_db": str(self._market_path or market_path()),
+                        "underlying": paths.get("underlying", "SPY"),
+                    }
                 job_path = out_dir / "job.json"
                 job_path.write_text(json.dumps(job), encoding="utf-8")
 
@@ -289,6 +349,41 @@ class BacktestManager:
         with self._lock:
             return (self._run_id == run_id and self._proc is not None
                     and self._proc.poll() is None)
+
+    # ----------------------------------------------------------- data sync
+    def sync_now(self, underlying: str) -> bool:
+        """Kick a background recorded-data sync (kick_market_refresh style:
+        the lock closes the double-spawn gap, failures land in status, never
+        an exception in a request thread). sqlite-to-sqlite only — no numpy
+        enters this process."""
+        with self._sync_lock:
+            if self._sync_thread is not None and self._sync_thread.is_alive():
+                return False
+            self._sync_status = {"state": "running", "underlying": underlying.upper()}
+
+            def run() -> None:
+                try:
+                    mcon = self._market()
+                    dcon = btdata.connect_data(btdata.data_db_path(underlying))
+                    try:
+                        result = btdata.sync_from_recorded(mcon, dcon, underlying)
+                    finally:
+                        mcon.close()
+                        dcon.close()
+                    self._sync_status = {"state": "done",
+                                         "underlying": underlying.upper(), **result}
+                    LOG.info("backtest data sync (%s): %s", underlying, result)
+                except Exception as exc:  # noqa: BLE001 — report, never crash
+                    LOG.exception("backtest data sync failed")
+                    self._sync_status = {"state": "error", "error": str(exc)}
+
+            self._sync_thread = threading.Thread(target=run, daemon=True,
+                                                 name="bt-data-sync")
+            self._sync_thread.start()
+            return True
+
+    def sync_status(self) -> dict[str, Any]:
+        return dict(self._sync_status)
 
     def active(self) -> dict[str, Any] | None:
         with self._lock:

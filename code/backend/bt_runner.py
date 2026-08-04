@@ -140,10 +140,31 @@ def run_calibration(job: dict) -> dict:
     }
 
 
+def _sync_recorded(job: dict) -> None:
+    """Refresh the app-owned store from recorded data before the run, so a
+    backtest on 'recorded' source always includes everything captured so far
+    (incremental: milliseconds when nothing new arrived)."""
+    import sqlite3
+
+    from backend import btdata
+    cfg = job["sync"]
+    mcon = sqlite3.connect(f"file:{cfg['market_db']}?mode=ro", uri=True)
+    mcon.row_factory = sqlite3.Row
+    dcon = btdata.connect_data(job["paths"]["options_db"])
+    try:
+        btdata.sync_from_recorded(mcon, dcon, cfg["underlying"],
+                                  progress=_progress("syncing recorded data"))
+    finally:
+        mcon.close()
+        dcon.close()
+
+
 def main() -> int:
     job = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     out_dir = Path(job["out_dir"])
     try:
+        if job.get("sync"):
+            _sync_recorded(job)
         if job["kind"] == "calibration":
             result = run_calibration(job)
         else:

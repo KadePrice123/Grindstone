@@ -329,10 +329,19 @@ const SECTIONS: Sec[] = [
           chain data. Every number it shows is <em>model-derived from end-of-day
           snapshots</em> — labeled estimated, never broker truth.</p>
         <ul>
+          <li><strong>Data</strong>: the app owns its backtest store and fills it from
+            your recorded chain snapshots — <em>Set up recording</em> creates the right
+            jobs (hourly chains + daily bars), every run syncs the latest recordings in
+            first, and <em>Sync recorded data</em> does it on demand. Machines with a
+            full chain database (or a path set in Settings) use that instead; the Data
+            card always says which source a run would read.</li>
           <li><strong>Presets</strong>: strategy specs (legs, entry, exits, sizing, costs)
             saved by name. The seeded built-ins include the three calibration references;
-            built-ins are read-only — <em>Duplicate</em> one to make it yours. The editor
-            validates as you type and names exactly what it does not recognize.</li>
+            built-ins are read-only — <em>Duplicate</em> one to make it yours. Edit with
+            the <em>Form</em> (legs, exit toggles, sizing — it writes the spec for you)
+            or as raw <em>JSON</em> for the full spec language; both compile to the same
+            thing, and the editor validates as you type, naming exactly what it does not
+            recognize.</li>
           <li><strong>Run</strong>: pick a preset (or edit a spec inline), optionally narrow
             the date window, and <em>Run backtest</em>. Runs execute in their own process —
             60–110 seconds for the full 13 years — and <em>Cancel</em> stops them cold.
