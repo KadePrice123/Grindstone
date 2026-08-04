@@ -45,6 +45,17 @@ CREATE TABLE IF NOT EXISTS secrets (
     hint       TEXT NOT NULL DEFAULT '',
     UNIQUE (account_id, field)
 );
+CREATE TABLE IF NOT EXISTS favorites (
+    id         INTEGER PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('symbol','page','web')),
+    key        TEXT NOT NULL,
+    label      TEXT NOT NULL,
+    icon       TEXT NOT NULL DEFAULT '',
+    pos        INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (user_id, kind, key)
+);
 CREATE TABLE IF NOT EXISTS backtest_presets (
     id          INTEGER PRIMARY KEY,
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

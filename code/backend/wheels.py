@@ -22,11 +22,17 @@ Segment vocabulary (the same declarative seam extensions will use, 6.11):
     {"type": "nav",         "route": name,   "label"?}   open a platform page
     {"type": "tool",        "tool": name,    "label"?}   run a shell tool
     {"type": "ticker",      "ticker": "SPY"}             open/focus the ticker
+    {"type": "link",        "address": a, "label", "icon"?}  a favorited
+                            destination: a .gs address or an https URL; icon
+                            is the captured tab image for web links
     {"type": "placeholder", "label": str}                announced, not built
 
 Position is the index: segment 0 sits at 12 o'clock, the rest clockwise.
 The "tabs" wheel is dynamic — its segments are built by the shell from the
-open tabs at spawn time and are not stored or editable here.
+open tabs at spawn time and are not stored or editable here. "favorites" is
+dynamic the same way, built from the user's starred pages: symbol favorites
+become ticker segments (so the quote display + day-direction color rules
+apply unchanged), page/web favorites become link segments.
 """
 from __future__ import annotations
 
@@ -38,10 +44,12 @@ DOC_KEY = "gesture_wheels"
 
 # Bumped when the DEFAULTS change shape or content in a way stored docs
 # should adopt (v2: the chart wheel family; v3: the full charting toolset —
-# draw/measure/timeframe wheels, visibility toggles, select/delete/trim). A
-# stored doc with an older version is regenerated from defaults — honest
-# data loss, taken deliberately over silently mixing old and new.
-DOC_VERSION = 3
+# draw/measure/timeframe wheels, visibility toggles, select/delete/trim;
+# v4: the tickers wheel became the dynamic Favorites wheel, and page/web
+# favorites ride in 'link' segments). A stored doc with an older version is
+# regenerated from defaults — honest data loss, taken deliberately over
+# silently mixing old and new.
+DOC_VERSION = 4
 
 MAX_WHEELS = 16
 MAX_SEGMENTS = 12
@@ -68,15 +76,21 @@ CHART_TOOLS = ("pointer", "trend", "hline", "vline", "circle",
                "ind:vol", "ind:sma20", "ind:sma50", "ind:ema20", "ind:rsi14",
                "settings", "normalize", "vis:draw", "vis:ind", "isolate",
                *[f"tf:{t}" for t in TIMEFRAMES])
-SEG_TYPES = ("wheel", "nav", "tool", "ticker", "chart", "placeholder", "empty")
+SEG_TYPES = ("wheel", "nav", "tool", "ticker", "link", "chart",
+             "placeholder", "empty")
+MAX_LINK_ADDRESS = 300
+MAX_LINK_ICON = 128 * 1024  # matches favorites.MAX_ICON_CHARS
 # Dynamic wheels build their segments from live state at spawn time:
 #   tabs          the open tabs (paginated past 8)
+#   favorites     the user's starred pages (paginated past 8): symbol
+#                 favorites as ticker segments, page/web as link segments
 #   chart-add     open ticker tabs not yet on the spawned-over chart
 #   chart-ind     indicator toggles marked with current state, + settings
 #   chart-tickers the chart's symbols: hide/show, and isolate state
 #   chart-tf      the timeframes, current one marked
-DYNAMIC_KINDS = ("tabs", "chart-add", "chart-ind", "chart-tickers", "chart-tf")
-BUILTIN_IDS = ("main", "ai", "tabs", "tickers",
+DYNAMIC_KINDS = ("tabs", "favorites", "chart-add", "chart-ind",
+                 "chart-tickers", "chart-tf")
+BUILTIN_IDS = ("main", "ai", "tabs", "favorites",
                "chart", "chart-add", "chart-ind", "chart-tickers",
                "chart-draw", "chart-measure", "chart-tf")
 
@@ -98,7 +112,7 @@ def default_doc() -> dict[str, Any]:
                     {"type": "nav", "route": "news", "label": "News"},          # SE
                     {"type": "tool", "tool": "search", "label": "Search"},      # S
                     {"type": "nav", "route": "charts", "label": "Charts"},      # SW
-                    {"type": "wheel", "wheel": "tickers", "label": "Tickers"},  # W
+                    {"type": "wheel", "wheel": "favorites", "label": "Favorites"},  # W
                     {"type": "nav", "route": "settings", "label": "Settings"},  # NW
                 ],
             },
@@ -176,15 +190,11 @@ def default_doc() -> dict[str, Any]:
                 "dynamic": "tabs", "segments": [],
             },
             {
-                "id": "tickers", "name": "Tickers", "symbol": "$", "builtin": True,
-                "segments": [
-                    {"type": "ticker", "ticker": "SPY"},
-                    {"type": "ticker", "ticker": "QQQ"},
-                    {"type": "ticker", "ticker": "GLD"},
-                    {"type": "wheel", "wheel": "main", "label": "Main"},
-                    {"type": "ticker", "ticker": "USO"},
-                    {"type": "ticker", "ticker": "VIX"},
-                ],
+                # v4: the hand-typed tickers wheel became the Favorites wheel
+                # — built at spawn from the user's starred pages, so what the
+                # wheel offers and what the home grid shows can never drift.
+                "id": "favorites", "name": "Favorites", "symbol": "★",
+                "builtin": True, "dynamic": "favorites", "segments": [],
             },
         ],
     }
@@ -279,6 +289,30 @@ def validate(doc: Any) -> dict[str, Any]:
                         or not ticker.replace(".", "").isalnum()):
                     _fail(f"wheel {wid} segment #{i + 1}: bad ticker {ticker!r}")
                 clean["ticker"] = ticker.upper()
+            elif stype == "link":
+                # A favorited destination copied onto a wheel: identity is
+                # embedded (not a favorites-row id), so un-starring later
+                # never leaves a dangling segment — like a bookmark copied
+                # to a toolbar.
+                addr = seg.get("address")
+                if (not isinstance(addr, str)
+                        or not (1 <= len(addr) <= MAX_LINK_ADDRESS)):
+                    _fail(f"wheel {wid} segment #{i + 1}: bad link address")
+                head = addr.split("?", 1)[0]
+                is_gs = head.endswith(".gs") and head[:-3].replace("-", "").isalnum()
+                is_web = addr.startswith(("http://", "https://"))
+                if not (is_gs or is_web):
+                    _fail(f"wheel {wid} segment #{i + 1}: link must be a .gs "
+                          f"address or an http(s) URL")
+                clean["address"] = addr
+                icon = seg.get("icon", "")
+                if not isinstance(icon, str) or len(icon) > MAX_LINK_ICON:
+                    _fail(f"wheel {wid} segment #{i + 1}: icon too large")
+                if icon and not icon.startswith("data:image/"):
+                    _fail(f"wheel {wid} segment #{i + 1}: icon must be a "
+                          f"data:image/* URI")
+                if icon:
+                    clean["icon"] = icon
             out_segments.append(clean)
 
         out_wheels.append({

@@ -11,7 +11,7 @@
  *     auth routes are special-cased only to *capture* it. A future
  *     token-returning route therefore cannot leak by omission.
  */
-import { ipcMain, WebFrameMain } from 'electron'
+import { ipcMain, WebFrameMain, webContents } from 'electron'
 import http from 'node:http'
 import { log } from './log'
 import type { Sidecar } from './sidecar'
@@ -281,6 +281,15 @@ export function registerApiBridge(
     // A 401 on any non-login route means the backend dropped our session.
     if (res.status === 401 && route !== '/api/auth/login') {
       setToken(null)
+    }
+
+    // Favorites render in four places at once (home grid, omnibox star,
+    // wheel, picker) across SEPARATE views; every mutation flows through
+    // this proxy, so this is the one chokepoint that can tell them all to
+    // refetch. Views without a listener (hardened browser tabs) ignore it.
+    if (res.status >= 200 && res.status < 300 && m !== 'GET'
+        && route.startsWith('/api/favorites')) {
+      for (const wc of webContents.getAllWebContents()) wc.send('favorites:changed')
     }
 
     return { status: res.status, body: scrub(payload) }

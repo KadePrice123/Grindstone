@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import backtests as backtests_mod
+from . import favorites as favorites_mod
 from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
 from . import settings as settings_mod
@@ -492,6 +493,47 @@ def create_app(state: State) -> FastAPI:
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
         return {"values": values}
+
+    # ------------------------------------------------------------ favorites
+    @app.get("/api/pages")
+    def pages_list(s=Depends(current_session)) -> dict[str, Any]:
+        """The provider-app registry, for the launcher. One source of truth:
+        search_mod.PAGES already knows every page and whether it is built —
+        a second hardcoded list in the renderer is exactly how the old home
+        grid drifted."""
+        return {"pages": [
+            {"key": p["key"], "title": p["title"], "ready": bool(p.get("ready"))}
+            for p in search_mod.PAGES
+        ]}
+
+    @app.get("/api/favorites")
+    def favorites_list(s=Depends(current_session)) -> dict[str, Any]:
+        with state.db() as db:
+            return {"favorites": favorites_mod.list_(db, s.user_id)}
+
+    @app.post("/api/favorites")
+    def favorites_add(body: dict[str, Any],
+                      s=Depends(current_session)) -> dict[str, Any]:
+        icon = body.get("icon") or ""
+        # 'web' favorites capture the site's favicon (the tab image) at star
+        # time; the shell passes the URL it observed via page-favicon-updated.
+        if not icon and body.get("kind") == "web" and body.get("icon_url"):
+            icon = favorites_mod.fetch_icon(body.get("icon_url"))
+        try:
+            with state.db() as db:
+                fav = favorites_mod.add(db, s.user_id, body.get("kind"),
+                                        body.get("key"), body.get("label"), icon)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        return {"favorite": fav}
+
+    @app.delete("/api/favorites/{fav_id}")
+    def favorites_delete(fav_id: int, s=Depends(current_session)) -> dict[str, Any]:
+        with state.db() as db:
+            removed = favorites_mod.remove(db, s.user_id, fav_id)
+        if not removed:
+            raise HTTPException(404, "no such favorite")
+        return {"ok": True}
 
     # ------------------------------------------------------- gesture wheels
     @app.get("/api/wheels")

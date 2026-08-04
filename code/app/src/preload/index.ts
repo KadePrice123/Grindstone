@@ -29,6 +29,13 @@ const grindstone = {
   setTabMeta: (title: string, icon: string, depth: number, address: string): void => {
     ipcRenderer.send('tab:meta', { title, icon, depth, address })
   },
+  /** Any view mutated the favorites store (main broadcasts from the API
+   *  proxy): the home grid, the omnibox star, and the picker all refetch. */
+  onFavoritesChanged: (cb: () => void): (() => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('favorites:changed', listener)
+    return () => ipcRenderer.removeListener('favorites:changed', listener)
+  },
   /** The lock screen calls this once sign-in has RESOLVED in its hands.
    *  Main then swaps this window into tab mode — doing it any earlier
    *  destroys the frame before it receives the reply. */
@@ -194,6 +201,9 @@ const grindstoneTabs = {
     ipcRenderer.on('omnibox:focus', listener)
     return () => ipcRenderer.removeListener('omnibox:focus', listener)
   },
+  /** The apps launcher (the Google-style grid): rendered in the overlay
+   *  view so it can drop over ANY tab, browser tabs included. */
+  launcherToggle: (): void => ipcRenderer.send('launcher:toggle'),
   minimize: (): void => ipcRenderer.send('win:minimize'),
   maximizeToggle: (): void => ipcRenderer.send('win:maximize'),
   closeWindow: (): void => ipcRenderer.send('win:close'),

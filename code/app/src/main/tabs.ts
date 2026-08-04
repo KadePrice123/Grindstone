@@ -71,7 +71,7 @@ export interface TabInfo {
  *  urls.ts PAGES — a data.gs tab must not offer "add DATA to chart". */
 const PAGE_NAMES = new Set([
   'home', 'accounts', 'data', 'settings', 'search', 'article', 'news', 'charts',
-  'backtest',
+  'help', 'backtest',
 ])
 
 /** What the gesture wheel sees of a tab. */
@@ -1052,6 +1052,49 @@ export class TabManager {
     }
     const w = this.wins.find((x) => x.id === winId)
     if (w && !this.locked) this.newTab(w, `symbol:${symbol.toUpperCase()}`)
+  }
+
+  /** A favorited destination, main-side (the wheel's link segments): a .gs
+   *  address routes in-app, an http(s) URL opens a browser tab. An existing
+   *  app tab with that exact address is focused instead, the same rule
+   *  openTicker follows. */
+  openAddress(winId: number, address: string): void {
+    const w = this.wins.find((x) => x.id === winId)
+    if (!w || this.locked || typeof address !== 'string') return
+    const text = address.trim()
+    if (!text) return
+    if (/^https?:\/\//i.test(text)) {
+      this.newBrowserTab(w, text)
+      return
+    }
+    const [head, qs = ''] = text.split('?')
+    if (!/\.gs$/i.test(head)) return
+    const existing = this.allTabs().find(
+      (t) => t.kind === 'app' && t.address === text.toLowerCase()
+    )
+    if (existing) {
+      this.activateTabGlobal(existing.id)
+      return
+    }
+    // The same address→route translation the renderer's gsRoute() makes.
+    // The vocabulary is tiny and PAGE_NAMES is already mirrored here — the
+    // gate holds both mirrors to the renderer's list.
+    const name = head.slice(0, -3).toLowerCase()
+    const q = new URLSearchParams(qs)
+    let route: string
+    if (!PAGE_NAMES.has(name)) route = `symbol:${name.toUpperCase()}`
+    else if (name === 'home') route = 'idle'
+    else if (name === 'search') route = `search:${q.get('q') ?? ''}`
+    else if (name === 'article') route = `article:${q.get('id') ?? ''}`
+    else if (name === 'help') route = q.get('s') ? `help:${q.get('s')}` : 'help'
+    else route = name
+    this.newTab(w, route)
+  }
+
+  /** The window whose CHROME view this sender is — for chrome-originated
+   *  ipc handled outside this class (the launcher toggle). */
+  winIdFromSender(wc: Electron.WebContents): number | null {
+    return this.winFromSender(wc)?.id ?? null
   }
 
   focusOmnibox(winId: number): void {
