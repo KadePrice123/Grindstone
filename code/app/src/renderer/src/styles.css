@@ -293,17 +293,27 @@ input {
   min-width: 26px;
   font-size: 13px;
 }
+/* The address bar's flex slot. The star sits INSIDE the field at its right
+   edge (Chrome-style): narrow windows squeeze the text, never the star. */
+.addr-wrap {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-left: 4px;
+}
 .addr {
   flex: 1;
+  min-width: 0;
   height: 24px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  padding: 0 12px;
+  padding: 0 30px 0 12px; /* right side clears the star */
   font-size: 12px;
   outline: none;
-  margin-left: 4px;
   -webkit-app-region: no-drag;
 }
 .addr:focus {
@@ -315,6 +325,58 @@ input {
 }
 .addr.gs:not(:focus) {
   font-weight: 600;
+}
+.addr-star {
+  position: absolute;
+  right: 3px;
+  width: 22px;
+  height: 20px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  -webkit-app-region: no-drag;
+}
+.addr-star:hover {
+  color: var(--text);
+}
+.addr-star.on {
+  color: var(--accent);
+}
+.addr-star.on:hover {
+  filter: brightness(1.2);
+}
+/* A refused star (the 48 cap, a key the store rejects): the reason rides in
+   the button's title — silence read as a broken control. */
+.addr-star.err {
+  color: var(--loss);
+  font-weight: 700;
+}
+/* The apps-launcher button: .strip-btn's look at navbar scale, pinned so
+   the address bar shrinks before it ever wraps. */
+.apps-btn {
+  flex-shrink: 0;
+  height: 24px;
+  min-width: 26px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  -webkit-app-region: no-drag;
+}
+.apps-btn:hover {
+  background: #1d2125;
+  color: var(--text);
 }
 
 /* ---------- tab strip (chrome mode) ---------- */

@@ -1,7 +1,11 @@
 /**
  * The Chrome-style chrome, in two rows:
  *   [△ home] [tabs…] [+] [drag] [win btns]
- *   [← → ⟳] [address]
+ *   [← → ⟳] [address ★] [⋮⋮⋮ apps]
+ *
+ * The star (end of the address bar, Chrome-style) adds/removes the current
+ * location from favorites. No optimistic state: a mutation makes main
+ * broadcast favorites:changed to every view, and the refetch is the truth.
  *
  * Back lives in the nav row ONLY. It used to sit in the tab row as well, and
  * once the nav row became permanent that was two identical arrows stacked on
@@ -12,6 +16,8 @@
  * grab reads immediately; main does the cross-window hit-testing.
  */
 import { useEffect, useRef, useState } from 'react'
+import { api, ApiError } from '../api'
+import { favoriteIdentity, favoriteLabel, sameFavorite, type Favorite } from '../favorites'
 import { classify } from '../urls'
 import '../split.css'
 import { Logo } from './Logo'
@@ -42,6 +48,7 @@ interface StripState {
   canGoForward: boolean
   activeKind: 'app' | 'browser' | null
   activeUrl: string
+  activeFavicon: string
   loading: boolean
   draggingId: number | null
   split: { aId: number; bId: number; ratio: number } | null
@@ -67,6 +74,7 @@ declare global {
       goto: (kind: 'url' | 'route', value: string) => void
       home: () => void
       onFocusOmnibox: (cb: () => void) => () => void
+      launcherToggle: () => void
       minimize: () => void
       maximizeToggle: () => void
       closeWindow: () => void
@@ -112,6 +120,7 @@ export function TabStrip() {
     canGoForward: false,
     activeKind: null,
     activeUrl: '',
+    activeFavicon: '',
     loading: false,
     draggingId: null,
     split: null,
@@ -120,6 +129,7 @@ export function TabStrip() {
   const [dragDx, setDragDx] = useState(0)
   const [addr, setAddr] = useState('')
   const [editing, setEditing] = useState(false)
+  const [favorites, setFavorites] = useState<Favorite[]>([])
   const drag = useRef<{ id: number; startX: number; startY: number; live: boolean } | null>(null)
   const addrRef = useRef<HTMLInputElement>(null)
 
@@ -127,6 +137,24 @@ export function TabStrip() {
     window.grindstoneTabs.getState().then((s) => s && setState(s))
     const off = window.grindstoneTabs.onState(setState)
     return () => off()
+  }, [])
+
+  // The star's truth: fetched on mount and after ANY view mutates favorites
+  // (main broadcasts). A failed fetch leaves the last known list — the next
+  // broadcast retries, and POST is an idempotent upsert either way.
+  useEffect(() => {
+    let alive = true
+    const refetch = () => {
+      api<{ favorites: Favorite[] }>('GET', '/api/favorites')
+        .then((r) => alive && setFavorites(r.favorites))
+        .catch(() => {})
+    }
+    refetch()
+    const off = window.grindstone.onFavoritesChanged(refetch)
+    return () => {
+      alive = false
+      off()
+    }
   }, [])
 
   // The gesture wheel's Search tool lands here: focus the bar, ready to type.
@@ -179,6 +207,50 @@ export function TabStrip() {
     else window.grindstoneTabs.goto('route', `search:${dest.query}`)
   }
 
+  // What starring the current tab MEANS — null while a tab has no starrable
+  // identity yet (still loading), which hides the star instead of guessing.
+  const identity = favoriteIdentity(state.activeKind, state.activeUrl)
+  const starred = identity ? favorites.find((f) => sameFavorite(f, identity)) : undefined
+  /** A refused star used to do NOTHING — at 48 favorites the button was
+   *  simply dead. The reason the backend gives is shown on the control
+   *  itself; it clears on the next successful toggle or tab change. */
+  const [starErr, setStarErr] = useState('')
+  useEffect(() => setStarErr(''), [state.activeId, state.activeUrl])
+
+  const toggleStar = () => {
+    if (!identity) return
+    setStarErr('')
+    if (starred) {
+      api('DELETE', `/api/favorites/${starred.id}`).catch((e) =>
+        setStarErr(e instanceof ApiError ? e.message : 'could not remove this favorite')
+      )
+      return
+    }
+    const title = state.tabs.find((t) => t.id === state.activeId)?.title ?? ''
+    // A site's favicon often lands a beat after the page does. Guessing the
+    // conventional path costs nothing (fetch_icon degrades to '' on a miss)
+    // and is the difference between a real tab image and a letter tile.
+    let iconUrl: string | undefined
+    if (identity.kind === 'web') {
+      iconUrl = state.activeFavicon || undefined
+      if (!iconUrl) {
+        try {
+          iconUrl = `${new URL(identity.key).origin}/favicon.ico`
+        } catch {
+          iconUrl = undefined
+        }
+      }
+    }
+    api('POST', '/api/favorites', {
+      kind: identity.kind,
+      key: identity.key,
+      label: favoriteLabel(identity, title),
+      icon_url: iconUrl,
+    }).catch((e) =>
+      setStarErr(e instanceof ApiError ? e.message : 'could not save this favorite')
+    )
+  }
+
   const navBar =
     state.activeKind !== null ? (
       <div className="navbar">
@@ -205,32 +277,68 @@ export function TabStrip() {
         >
           {state.loading ? '×' : '⟳'}
         </button>
-        <input
-          ref={addrRef}
-          className={state.activeKind === 'browser' ? 'addr' : 'addr gs'}
-          value={addr}
-          spellCheck={false}
-          placeholder="Search, or type an address — google.com, accounts.gs, SPY"
-          onChange={(e) => {
-            setEditing(true)
-            setAddr(e.target.value)
-          }}
-          onFocus={(e) => {
-            setEditing(true)
-            e.currentTarget.select()
-          }}
-          onBlur={() => setEditing(false)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              submitAddress()
-              ;(e.target as HTMLInputElement).blur()
-            } else if (e.key === 'Escape') {
-              setAddr(state.activeUrl)
-              setEditing(false)
-              ;(e.target as HTMLInputElement).blur()
-            }
-          }}
-        />
+        <div className="addr-wrap">
+          <input
+            ref={addrRef}
+            className={state.activeKind === 'browser' ? 'addr' : 'addr gs'}
+            value={addr}
+            spellCheck={false}
+            placeholder="Search, or type an address — google.com, accounts.gs, SPY"
+            onChange={(e) => {
+              setEditing(true)
+              setAddr(e.target.value)
+            }}
+            onFocus={(e) => {
+              setEditing(true)
+              e.currentTarget.select()
+            }}
+            onBlur={() => setEditing(false)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                submitAddress()
+                ;(e.target as HTMLInputElement).blur()
+              } else if (e.key === 'Escape') {
+                setAddr(state.activeUrl)
+                setEditing(false)
+                ;(e.target as HTMLInputElement).blur()
+              }
+            }}
+          />
+          {identity && (
+            <button
+              className={`addr-star${starred ? ' on' : ''}${starErr ? ' err' : ''}`}
+              title={
+                starErr
+                  ? `Not saved — ${starErr}`
+                  : starred
+                    ? 'Remove from favorites'
+                    : 'Add to favorites'
+              }
+              onClick={toggleStar}
+            >
+              {starErr ? '!' : starred ? '★' : '☆'}
+            </button>
+          )}
+        </div>
+        <button
+          className="apps-btn"
+          title="Apps"
+          onClick={() => window.grindstoneTabs.launcherToggle()}
+        >
+          {/* 3x3 dot grid, inline rather than icons.tsx: its Icon wrapper is
+              stroke-only (fill none), which would render these dots as rings */}
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-label="Apps">
+            <circle cx="5" cy="5" r="2" />
+            <circle cx="12" cy="5" r="2" />
+            <circle cx="19" cy="5" r="2" />
+            <circle cx="5" cy="12" r="2" />
+            <circle cx="12" cy="12" r="2" />
+            <circle cx="19" cy="12" r="2" />
+            <circle cx="5" cy="19" r="2" />
+            <circle cx="12" cy="19" r="2" />
+            <circle cx="19" cy="19" r="2" />
+          </svg>
+        </button>
       </div>
     ) : null
 

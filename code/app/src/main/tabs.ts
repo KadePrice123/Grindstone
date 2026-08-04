@@ -93,6 +93,9 @@ interface Tab {
   url?: string
   /** For app tabs: the .gs address of the page currently shown. */
   address?: string
+  /** For browser tabs: the page's favicon URL. Main never fetches its bytes —
+   *  the backend downloads it at star time (POST /api/favorites icon_url). */
+  favicon?: string
 }
 
 interface Win {
@@ -123,6 +126,9 @@ type StripState = {
   canGoForward: boolean
   activeKind: 'app' | 'browser' | null
   activeUrl: string
+  /** The active BROWSER tab's favicon URL ('' otherwise) — what the star
+   *  submits as icon_url when favoriting a web page. */
+  activeFavicon: string
   loading: boolean
   draggingId: number | null
   split: { aId: number; bId: number; ratio: number } | null
@@ -418,6 +424,20 @@ export class TabManager {
       const home = this.wins.find((x) => x.tabs.some((t) => t.id === tab.id))
       if (home) this.pushStrip(home)
     }
+    // A new document invalidates the old page's icon; the new page's own
+    // arrives via page-favicon-updated — or never, and the tab honestly has
+    // none. Registered before sync's did-navigate so the strip push that
+    // follows never ships a stale icon. Over-long entries (data: URIs) are
+    // dropped, not truncated — the backend fetches this URL at star time and
+    // a cut URL fetches nothing.
+    wc.on('did-navigate', () => {
+      tab.favicon = undefined
+    })
+    wc.on('page-favicon-updated', (_e, favicons) => {
+      const first = favicons[0]
+      tab.favicon = first && first.length <= 500 ? first : undefined
+      sync()
+    })
     wc.on('page-title-updated', sync)
     wc.on('did-navigate', sync)
     wc.on('did-navigate-in-page', sync)
@@ -605,6 +625,7 @@ export class TabManager {
           ? (this.shippableUrl(active.url) ?? '')
           : (active.address ?? 'home.gs')
         : '',
+      activeFavicon: active?.kind === 'browser' ? (active.favicon ?? '') : '',
       loading: active?.kind === 'browser' ? active.view.webContents.isLoading() : false,
       draggingId: this.drag?.tabId ?? null,
       // A split survives while hidden, but never report a pair with a dead

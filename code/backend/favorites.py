@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import socket
 import sqlite3
 from typing import Any
 
@@ -38,6 +39,7 @@ MAX_LABEL = 24
 MAX_ICON_BYTES = 64 * 1024
 MAX_ICON_CHARS = 128 * 1024
 ICON_TIMEOUT = 5.0
+MAX_REDIRECTS = 3
 
 
 def _fail(msg: str) -> None:
@@ -96,7 +98,14 @@ def add(db: sqlite3.Connection, user_id: int, kind: Any, key: Any,
         (user_id, clean["kind"], clean["key"]),
     ).fetchone()
     if existing is not None:
-        return dict(existing)  # idempotent star
+        # Idempotent star — except that an icon we did not have before is an
+        # upgrade: the favicon often lands a beat AFTER the user clicked, so
+        # a re-star (or a later capture) is how an empty tile gets its image.
+        if clean["icon"] and not existing["icon"]:
+            db.execute("UPDATE favorites SET icon=? WHERE id=?",
+                       (clean["icon"], existing["id"]))
+            return {**dict(existing), "icon": clean["icon"]}
+        return dict(existing)
     count = db.execute(
         "SELECT COUNT(*) FROM favorites WHERE user_id=?", (user_id,)
     ).fetchone()[0]
@@ -123,52 +132,94 @@ def remove(db: sqlite3.Connection, user_id: int, fav_id: int) -> bool:
 
 # ------------------------------------------------------------- icon capture
 
+def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
 def _blocked_host(host: str) -> bool:
-    """The sidecar holds credentials, so it must not be steerable into
-    fetching from itself or the local network. Literal-IP and name checks are
-    the honest level for a desktop app fetching favicons — DNS-rebinding
-    defenses would be theater here."""
-    h = host.lower().rstrip(".")
-    if h in ("localhost",) or h.endswith(".local") or h.endswith(".internal"):
+    """The sidecar holds credentials and sits inside the LAN, so it must not
+    be steerable into fetching from itself or the local network.
+
+    Names are RESOLVED, not just string-matched: a name that has always
+    pointed at loopback (localtest.me and friends) is the ordinary case, not
+    exotic — an earlier version only pattern-matched 'localhost'/.local and
+    let it straight through. Unresolvable fails CLOSED: no icon is a letter
+    tile, which is the documented degradation anyway.
+
+    This is not a DNS-rebinding defense — that TOCTOU is out of scope for a
+    desktop app fetching favicons — but every address a name actually
+    answers with is checked.
+    """
+    h = host.lower().rstrip(".").strip("[]")
+    if not h or h == "localhost" or h.endswith((".local", ".internal", ".localhost")):
         return True
     try:
-        ip = ipaddress.ip_address(h)
+        return _blocked_ip(ipaddress.ip_address(h))
     except ValueError:
-        return False
-    return (ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast)
+        pass  # a name: resolve it
+    try:
+        infos = socket.getaddrinfo(h, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return True
+    if not infos:
+        return True
+    for info in infos:
+        try:
+            if _blocked_ip(ipaddress.ip_address(info[4][0])):
+                return True
+        except ValueError:
+            return True
+    return False
 
 
 def fetch_icon(url: Any) -> str:
     """Download a favicon and return it as a data: URI, or '' on any failure —
-    a missing tab image degrades to a letter tile, it never blocks the star."""
+    a missing tab image degrades to a letter tile, it never blocks the star.
+
+    Redirects are followed MANUALLY so every hop is checked. With
+    follow_redirects=True the host guard governed only the first hop, and a
+    page could point its <link rel=icon> at an attacker host that answered
+    302 http://127.0.0.1:.../ — the credentialed sidecar would issue it.
+    """
     if not isinstance(url, str) or not url.startswith(("http://", "https://")):
         return ""
     try:
-        parsed = httpx.URL(url)
-        if _blocked_host(parsed.host or ""):
-            return ""
-        with httpx.Client(timeout=ICON_TIMEOUT, follow_redirects=True) as client:
-            with client.stream("GET", url) as resp:
-                if resp.status_code != 200:
+        target = httpx.URL(url)
+        with httpx.Client(timeout=httpx.Timeout(ICON_TIMEOUT, connect=2.0),
+                          follow_redirects=False) as client:
+            for _hop in range(MAX_REDIRECTS + 1):
+                if target.scheme not in ("http", "https"):
                     return ""
-                ctype = resp.headers.get("content-type", "").split(";")[0].strip()
-                # Lenient on purpose: .ico is frequently served as
-                # octet-stream. What we must reject is an HTML 404 body.
-                if ctype.startswith(("text/", "application/json")):
+                if _blocked_host(target.host or ""):
                     return ""
-                chunks: list[bytes] = []
-                size = 0
-                for chunk in resp.iter_bytes():
-                    size += len(chunk)
-                    if size > MAX_ICON_BYTES:
-                        return ""  # oversized: not a favicon
-                    chunks.append(chunk)
-        data = b"".join(chunks)
-        if not data:
-            return ""
-        if not ctype.startswith("image/"):
-            ctype = "image/x-icon"
-        return f"data:{ctype};base64,{base64.b64encode(data).decode('ascii')}"
+                with client.stream("GET", target) as resp:
+                    if resp.is_redirect:
+                        loc = resp.headers.get("location")
+                        if not loc:
+                            return ""
+                        target = target.join(loc)  # resolves relative hops
+                        continue
+                    if resp.status_code != 200:
+                        return ""
+                    ctype = resp.headers.get("content-type", "").split(";")[0].strip()
+                    # Lenient on purpose: .ico is frequently served as
+                    # octet-stream. What we must reject is an HTML 404 body.
+                    if ctype.startswith(("text/", "application/json")):
+                        return ""
+                    chunks: list[bytes] = []
+                    size = 0
+                    for chunk in resp.iter_bytes():
+                        size += len(chunk)
+                        if size > MAX_ICON_BYTES:
+                            return ""  # oversized: not a favicon
+                        chunks.append(chunk)
+                data = b"".join(chunks)
+                if not data:
+                    return ""
+                if not ctype.startswith("image/"):
+                    ctype = "image/x-icon"
+                return f"data:{ctype};base64,{base64.b64encode(data).decode('ascii')}"
+        return ""  # too many redirects
     except Exception:  # noqa: BLE001 — any network failure degrades to no icon
         return ""

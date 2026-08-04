@@ -17,6 +17,11 @@
  * bridge, third-party pages via the minimal browser preload — because during
  * a hold the ORIGIN view has mouse capture and the overlay may never hear a
  * thing. Main is the single state machine; the overlay is the face.
+ *
+ * The APPS LAUNCHER (the chrome's apps button) rides the SAME overlay view:
+ * main pushes a launcher payload instead of a wheel and the overlay renders
+ * a top-right panel over any tab, browser tabs included. Wheel and launcher
+ * are mutually exclusive — there is one overlay.
  */
 import { WebContentsView, ipcMain, webContents } from 'electron'
 import path from 'node:path'
@@ -34,7 +39,9 @@ const CLICK_MOVE_THRESHOLD = 10 // px of travel that turns a click into a hold
 const EDGE_MARGIN = 12
 
 interface Segment {
-  type: 'wheel' | 'nav' | 'tool' | 'ticker' | 'chart' | 'placeholder' | 'empty' | 'tab' | 'page'
+  type:
+    | 'wheel' | 'nav' | 'tool' | 'ticker' | 'chart' | 'placeholder' | 'empty'
+    | 'tab' | 'page' | 'link'
   label: string
   // one of, depending on type:
   wheel?: string
@@ -43,6 +50,7 @@ interface Segment {
   ticker?: string
   tabId?: number
   dir?: number // page: -1 back / +1 forward
+  address?: string // link: a favorited .gs address or http(s) URL
   icon?: string
   symbol?: string // the target wheel's symbol, for wheel segments
   disabled?: boolean
@@ -59,6 +67,23 @@ interface WheelDef {
 interface WheelDoc {
   config: { ticker_display: 'percent' | 'price'; ticker_colors: boolean; locked: string | null }
   wheels: WheelDef[]
+}
+
+/** A favorites row as /api/favorites returns it (backend/favorites.py). */
+interface FavoriteRow {
+  id: number
+  kind: 'symbol' | 'page' | 'web'
+  key: string
+  label: string
+  icon: string
+  pos: number
+}
+
+/** A provider-app row as /api/pages returns it — the launcher's registry. */
+interface LauncherPage {
+  key: string
+  title: string
+  ready: boolean
 }
 
 /** What sat under the spawning right-click. Charts declare themselves (and
@@ -120,7 +145,8 @@ interface Session {
   start: { x: number; y: number }
   moved: boolean
   wheelId: string
-  tabPage: number
+  /** Current page of the shown dynamic wheel (tabs and favorites paginate). */
+  dynPage: number
   /** Last hold-mode pointer position, window coords — the release acts on
    *  segmentAt(center, THIS), never on renderer-reported hover. */
   lastPointer: { x: number; y: number }
@@ -128,6 +154,10 @@ interface Session {
    *  dynamic chart wheels are built from it for the LIFE of the session —
    *  navigating wheels never re-reads the page. */
   ctx: WheelCtx | null
+  /** The starred pages, fetched once at spawn (null = the fetch failed).
+   *  One snapshot per session, the same rule quotes follow — the Favorites
+   *  wheel must not reshuffle while it is open. */
+  favorites: FavoriteRow[] | null
   /** The tab the 'down' came from, and that view's webContents id: chart
    *  actions go back THERE, never to whatever is active by the time the
    *  user releases. Null when the down came from chrome or the overlay. */
@@ -147,18 +177,33 @@ export class WheelManager {
    *  pending, interacting with nothing. */
   private spawnSeq = 0
   private releaseDuringSpawn = false
+  /** The apps launcher, when open. Never live alongside a wheel session —
+   *  they share the one overlay view. */
+  private launcherSession: {
+    winId: number
+    pages: LauncherPage[]
+    detachListeners: () => void
+  } | null = null
+  /** openLauncher() awaits the registry fetch; a re-toggle in that window
+   *  must supersede the stale open, not race it. */
+  private launcherSeq = 0
 
   constructor(tabs: TabManager) {
     this.tabs = tabs
     tabs.onWindowGone = (winId) => {
       if (this.session?.winId === winId) this.despawn()
+      if (this.launcherSession?.winId === winId) this.closeLauncher()
     }
     // REVIEW 2026-08-02: an auto-lock (renderer 401, sidecar crash) swapped
     // the window to the sign-in form UNDER a still-live wheel overlay — in
     // hold mode every input path to close it was gated off, leaving the
-    // form unclickable. Lock kills the wheel, unconditionally.
+    // form unclickable. Lock kills the wheel (and the launcher, which sits
+    // on the same overlay), unconditionally.
     tabs.onLockChanged = (locked) => {
-      if (locked) this.despawn()
+      if (locked) {
+        this.despawn()
+        this.closeLauncher()
+      }
     }
     this.registerIpc()
   }
@@ -197,8 +242,17 @@ export class WheelManager {
     return res.status === 200 && res.body ? res.body : null
   }
 
+  private async loadFavorites(): Promise<FavoriteRow[] | null> {
+    const res = await mainRequest<{ favorites: FavoriteRow[] }>('GET', '/api/favorites')
+    const favs = res.body?.favorites
+    return res.status === 200 && Array.isArray(favs) ? favs : null
+  }
+
   /** Resolve a wheel id into renderable segments (dynamic wheels included). */
-  private materialize(doc: WheelDoc, wheelId: string, tabPage: number, ctx: WheelCtx | null): {
+  private materialize(
+    doc: WheelDoc, wheelId: string, dynPage: number,
+    ctx: WheelCtx | null, favorites: FavoriteRow[] | null
+  ): {
     def: WheelDef
     segments: Segment[]
     pages: number
@@ -215,6 +269,9 @@ export class WheelManager {
       }, ctx))
       return { def, segments, pages: 1 }
     }
+    if (def.dynamic === 'favorites') {
+      return { def, ...this.favoriteSegments(doc, favorites, dynPage) }
+    }
     if (def.dynamic !== 'tabs') {
       return { def, segments: this.chartSegments(def.dynamic, doc, ctx), pages: 1 }
     }
@@ -229,7 +286,7 @@ export class WheelManager {
       return { def, segments: all.map(tabSeg), pages: 1 }
     }
     const pages = Math.ceil(all.length / 6)
-    const page = ((tabPage % pages) + pages) % pages
+    const page = ((dynPage % pages) + pages) % pages
     const slice = all.slice(page * 6, page * 6 + 6).map(tabSeg)
     const segments: Segment[] = [
       ...slice.slice(0, 2),
@@ -239,6 +296,64 @@ export class WheelManager {
       ...slice.slice(5),
     ]
     return { def, segments, pages }
+  }
+
+  /** The Favorites wheel, from the session's starred-pages snapshot. Symbol
+   *  favorites become TICKER segments, so the whole quote pipeline — price/%
+   *  display, day-direction colors, frozen-while-open — applies unchanged;
+   *  page/web favorites become link segments. Paginates past 8 the way the
+   *  tabs wheel does, with the Main nav on every page. */
+  private favoriteSegments(
+    doc: WheelDoc, favs: FavoriteRow[] | null, favPage: number
+  ): { segments: Segment[]; pages: number } {
+    const mainNav: Segment = {
+      type: 'wheel', wheel: 'main', label: 'Main',
+      symbol: doc.wheels.find((w) => w.id === 'main')?.symbol,
+    }
+    if (favs === null) {
+      // The favorites fetch failed while the wheels doc loaded — say so
+      // rather than passing the outage off as "no favorites".
+      return {
+        segments: [
+          { type: 'placeholder', label: 'Favorites unavailable', disabled: true },
+          mainNav,
+        ],
+        pages: 1,
+      }
+    }
+    if (favs.length === 0) {
+      return {
+        segments: [
+          { type: 'placeholder', label: 'No favorites yet — star a page', disabled: true },
+          mainNav,
+        ],
+        pages: 1,
+      }
+    }
+    const favSeg = (f: FavoriteRow): Segment => f.kind === 'symbol'
+      ? { type: 'ticker', ticker: f.key, label: f.key }
+      : {
+          type: 'link', address: f.key, label: f.label.slice(0, 14),
+          // Only web favorites carry a captured tab image; page glyphs are
+          // the renderer's own.
+          ...(f.kind === 'web' && f.icon ? { icon: f.icon } : {}),
+        }
+    const all = favs.map(favSeg)
+    if (all.length <= 8) {
+      return { segments: [...all, mainNav], pages: 1 }
+    }
+    const pages = Math.ceil(all.length / 6)
+    const page = ((favPage % pages) + pages) % pages
+    const slice = all.slice(page * 6, page * 6 + 6)
+    const segments: Segment[] = [
+      ...slice.slice(0, 2),
+      { type: 'page', dir: +1, label: `Favorites ${((page + 1) % pages) + 1}/${pages}` }, // E
+      ...slice.slice(2, 5),
+      { type: 'page', dir: -1, label: `Favorites ${((page - 1 + pages) % pages) + 1}/${pages}` }, // W
+      ...slice.slice(5),
+      mainNav,
+    ]
+    return { segments, pages }
   }
 
   /** Decorate STATIC-wheel chart segments whose meaning depends on live
@@ -381,14 +496,18 @@ export class WheelManager {
   ): Promise<void> {
     const seq = ++this.spawnSeq
     this.releaseDuringSpawn = false
-    const doc = await this.loadDoc()
+    // Favorites ride along with the doc fetch (both loopback GETs) so the
+    // Favorites wheel materializes synchronously mid-session, like tabs.
+    const [doc, favorites] = await Promise.all([this.loadDoc(), this.loadFavorites()])
     if (seq !== this.spawnSeq) return // a newer press superseded this spawn
     if (!doc) {
       log('wheel: no config (backend down or locked) — not spawning')
       return
     }
-    // A dead session from a race (window closed mid-await) must not leak.
+    // A dead session from a race (window closed mid-await) must not leak;
+    // an open launcher yields the overlay the same way.
     if (this.session) this.despawn()
+    this.closeLauncher()
 
     const view = this.ensureOverlay(this.preloadPath)
     if (!this.tabs.attachOverlay(winId, view)) return
@@ -400,7 +519,7 @@ export class WheelManager {
       ctx?.context === 'chart' && doc.wheels.some((w) => w.id === 'chart')
         ? 'chart'
         : doc.config.locked ?? 'main'
-    const { def, segments } = this.materialize(doc, wheelId, 0, ctx)
+    const { def, segments } = this.materialize(doc, wheelId, 0, ctx, favorites)
     const center = this.clamp(winId, x, y)
 
     const win = this.tabs.baseWindow(winId)
@@ -415,9 +534,10 @@ export class WheelManager {
       start: { x, y },
       moved: false,
       wheelId: def.id,
-      tabPage: 0,
+      dynPage: 0,
       lastPointer: { x, y },
       ctx,
+      favorites,
       originTabId,
       originWcId,
       doc,
@@ -446,12 +566,12 @@ export class WheelManager {
     }
   }
 
-  private switchWheel(wheelId: string, tabPage = 0): void {
+  private switchWheel(wheelId: string, dynPage = 0): void {
     const s = this.session
     if (!s) return
-    const { def, segments } = this.materialize(s.doc, wheelId, tabPage, s.ctx)
+    const { def, segments } = this.materialize(s.doc, wheelId, dynPage, s.ctx, s.favorites)
     s.wheelId = def.id
-    s.tabPage = tabPage
+    s.dynPage = dynPage
     s.segments = segments
     this.push('wheel:update', {
       wheel: { id: def.id, name: def.name, symbol: def.symbol, segments },
@@ -475,6 +595,76 @@ export class WheelManager {
     }
   }
 
+  // ---------------------------------------------------------- the launcher
+  /** Open the apps launcher in a window: the same overlay attach/ready-replay
+   *  machinery a wheel spawn uses, pushing a launcher payload instead of a
+   *  wheel. The payload rides the wheel channels ('wheel:spawn'/'despawn') —
+   *  the overlay's preload surface is fixed, and a parallel channel pair
+   *  would duplicate the exact same lifecycle. */
+  private async openLauncher(winId: number): Promise<void> {
+    const seq = ++this.launcherSeq
+    const res = await mainRequest<{ pages: LauncherPage[] }>('GET', '/api/pages')
+    if (seq !== this.launcherSeq) return // a newer toggle superseded this open
+    const pages = res.body?.pages
+    if (res.status !== 200 || !Array.isArray(pages)) {
+      log('launcher: no page registry (backend down or locked) — not opening')
+      return
+    }
+    // One overlay: whatever else holds it lets go first.
+    if (this.session) this.despawn()
+    this.closeLauncher()
+
+    const view = this.ensureOverlay(this.preloadPath)
+    if (!this.tabs.attachOverlay(winId, view)) return
+    const win = this.tabs.baseWindow(winId)
+    const onBlurOrResize = () => this.closeLauncher()
+    win?.on('blur', onBlurOrResize)
+    win?.on('resize', onBlurOrResize)
+    this.launcherSession = {
+      winId,
+      pages,
+      detachListeners: () => {
+        win?.off('blur', onBlurOrResize)
+        win?.off('resize', onBlurOrResize)
+      },
+    }
+    this.pushLauncher()
+    view.webContents.focus() // Escape must close it, like a click-mode wheel
+  }
+
+  private pushLauncher(): void {
+    const l = this.launcherSession
+    if (!l) return
+    // `top` is where the chrome ends — the panel anchors just below the
+    // navbar's apps button, and only main knows the chrome heights.
+    this.push('wheel:spawn', {
+      launcher: { pages: l.pages, top: TABBAR_H + NAVBAR_H },
+    })
+  }
+
+  private closeLauncher(): void {
+    const l = this.launcherSession
+    if (!l) return
+    this.launcherSession = null
+    l.detachListeners()
+    this.push('wheel:despawn', null)
+    if (this.overlay) this.tabs.detachOverlay(l.winId, this.overlay)
+  }
+
+  /** A launcher tile pick, by index into the pages pushed to the overlay.
+   *  Ready is re-checked HERE (defense in depth): the overlay renders
+   *  not-ready tiles inert, but main is the authority on what opens. */
+  private launcherPick(index: number): void {
+    const l = this.launcherSession
+    if (!l) return
+    const page = l.pages[index]
+    if (!page || !page.ready) return
+    // Every registry key is a page address ('home' -> home.gs, which
+    // openAddress routes to idle the same way the omnibox does).
+    this.tabs.openAddress(l.winId, `${page.key}.gs`)
+    this.closeLauncher()
+  }
+
   /** Ticker segments show a price/% snapshot taken at spawn. Deliberately
    *  fetched ONCE — the spec forbids colors flashing while the wheel is up;
    *  close and reopen to refresh. */
@@ -485,9 +675,12 @@ export class WheelManager {
     const mySession = this.session
     const res = await mainRequest<{ quotes: Record<string, unknown> }>(
       'GET', `/api/quotes?symbols=${encodeURIComponent(syms.join(','))}`)
-    // Only deliver to the wheel that asked; a despawn/respawn in between
-    // must not paint stale numbers on a different wheel.
-    if (res.status === 200 && res.body && this.session === mySession) {
+    // Only deliver to the wheel that asked. Session identity is not enough:
+    // paging the Favorites wheel (>8 stars) switches segments WITHIN one
+    // session, so page 1's slower answer could paint page 2's symbols.
+    // switchWheel replaces s.segments, making it a free generation token.
+    if (res.status === 200 && res.body && this.session === mySession
+        && mySession?.segments === segments) {
       this.push('wheel:quotes', res.body.quotes)
     }
   }
@@ -504,7 +697,8 @@ export class WheelManager {
         this.switchWheel(seg.wheel ?? 'main')
         return 'stay'
       case 'page':
-        this.switchWheel('tabs', s.tabPage + (seg.dir ?? 1))
+        // Page navs paginate the wheel they sit on (tabs or favorites).
+        this.switchWheel(s.wheelId, s.dynPage + (seg.dir ?? 1))
         return 'stay'
       case 'nav':
         this.tabs.gotoRoute(s.winId, seg.route ?? 'idle')
@@ -514,6 +708,9 @@ export class WheelManager {
         return 'close'
       case 'ticker':
         if (seg.ticker) this.tabs.openTicker(s.winId, seg.ticker)
+        return 'close'
+      case 'link':
+        if (seg.address) this.tabs.openAddress(s.winId, seg.address)
         return 'close'
       case 'tab':
         if (seg.tabId !== undefined) this.tabs.activateTabGlobal(seg.tabId)
@@ -656,11 +853,34 @@ export class WheelManager {
         }
       }
     })
+    // The chrome's apps button. Toggle: an overlay already up in this window
+    // closes; otherwise the launcher opens here (closing whichever window's
+    // overlay held the view — there is only one).
+    ipcMain.on('launcher:toggle', (e) => {
+      if (this.tabs.isLocked || !isSignedIn()) return
+      const winId = this.tabs.winIdFromSender(e.sender)
+      if (winId === null) return
+      if (this.launcherSession?.winId === winId) {
+        this.closeLauncher()
+        return
+      }
+      if (this.session?.winId === winId) {
+        this.despawn()
+        return
+      }
+      void this.openLauncher(winId)
+    })
     ipcMain.on('wheelui:ready', (e) => {
       if (this.overlay?.webContents.id !== e.sender.id) return
       // The first spawn of an app run raced the overlay's page load and its
       // payload evaporated — replay the LIVE session state now that someone
-      // is listening. No session = nothing to replay.
+      // is listening (the launcher replays the same way). Nothing live =
+      // nothing to replay.
+      if (this.launcherSession) {
+        this.pushLauncher()
+        this.overlay?.webContents.focus()
+        return
+      }
       const s = this.session
       if (!s) return
       const def = s.doc.wheels.find((w) => w.id === s.wheelId)
@@ -680,6 +900,11 @@ export class WheelManager {
     })
     ipcMain.on('wheelui:act', (e, index: number) => {
       if (this.overlay?.webContents.id !== e.sender.id) return
+      // Launcher mode: the index picks a page tile, not a wheel segment.
+      if (this.launcherSession) {
+        this.launcherPick(typeof index === 'number' ? index : -1)
+        return
+      }
       if (!this.session || this.session.mode !== 'click') return
       if (this.act(typeof index === 'number' ? index : null) === 'close') this.despawn()
     })
@@ -689,7 +914,9 @@ export class WheelManager {
     })
     ipcMain.on('wheelui:close', (e) => {
       if (this.overlay?.webContents.id !== e.sender.id) return
+      // Outside-click and Escape, for whichever occupant the overlay has.
       this.despawn()
+      this.closeLauncher()
     })
     ipcMain.on('wheelui:move', (e, x: number, y: number) => {
       if (this.overlay?.webContents.id !== e.sender.id) return

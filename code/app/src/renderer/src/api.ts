@@ -32,6 +32,7 @@ declare global {
         }
       ) => void
       onChartAction: (cb: (a: { tool: string; symbol?: string }) => void) => () => void
+      onFavoritesChanged: (cb: () => void) => () => void
     }
     grindstoneSplit: {
       drag: (screenX: number) => void
@@ -140,6 +141,15 @@ export interface Quote {
   year_low?: number | null
   avg_volume?: number | null
   market_cap?: number | null
+}
+
+/** GET /api/quotes — the batch snapshot shape shared by the wheel's ticker
+ *  segments and the home grid's symbol tiles: fetched once per spawn/load,
+ *  never re-polled while shown (spec: numbers must not flash). */
+export interface QuoteSnap {
+  available: boolean
+  price: number | null
+  change_pct: number | null
 }
 
 export interface NewsItem {

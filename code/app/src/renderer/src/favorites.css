@@ -1,0 +1,77 @@
+/* The home grid of user favorites (Idle.tsx). Base .favorites/.fav-tile
+ * styles live in styles.css; this file adds what live favorites need:
+ * a wrapping centered grid (the count is no longer fixed at 6), the
+ * per-kind glyphs, the symbol quote line, and the empty state.
+ * Selectors ride under .center-stage so they outrank the styles.css
+ * bases regardless of bundle order. */
+
+.center-stage .favorites {
+  /* wraps at 4 tiles per row (4×108 + 3×14), rows stay centered */
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 14px;
+  max-width: 500px;
+}
+.center-stage .fav-tile {
+  width: 108px;
+}
+/* The short name. Labels run to 24 characters and a hostname has no spaces
+   to break on, so without this one spills across its neighbours. */
+.center-stage .fav-tile > span:last-child {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Ticker text as the glyph — sized to sit like the 26px page icons. */
+.fav-tile .fav-symbol {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 26px;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+/* Today's move under a ticker glyph; colors match the quote pages. */
+.fav-tile .fav-quote {
+  margin-top: -4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.fav-tile .fav-quote.up {
+  color: var(--gain);
+}
+.fav-tile .fav-quote.down {
+  color: var(--loss);
+}
+
+/* Web favorites: the captured tab image, or a letter when none exists. */
+.fav-tile .fav-favicon {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+.fav-tile .fav-letter {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  border: 1px solid var(--border);
+}
+
+.fav-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  max-width: 380px;
+  text-align: center;
+}

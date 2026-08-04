@@ -37,13 +37,27 @@ export function favoriteIdentity(
 ): FavoriteIdentity | null {
   const text = (url ?? '').trim()
   if (!kind || !text) return null
+  // Mirrors backend/favorites.py's caps. A star that cannot possibly succeed
+  // must not be offered — hiding it is the same honest signal a still-loading
+  // tab already gets.
+  if (text.length > 300) return null
   if (kind === 'browser') {
     if (!/^https?:\/\//i.test(text)) return null
+    // Our OWN loopback origin: backtest reports are served on the sidecar
+    // port behind a SINGLE-USE key, so a favorite of one is dead the moment
+    // it is made — the port changes every launch and the key is spent.
+    if (/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/i.test(text)) return null
     return { kind: 'web', key: text }
   }
   const gs = asGs(text)
   if (!gs) return null
-  if (!isKnownPage(gs.page)) return { kind: 'symbol', key: gs.page.toUpperCase() }
+  if (!isKnownPage(gs.page)) {
+    const sym = gs.page.toUpperCase()
+    // The backend's symbol rule: 1-8 chars, alphanumeric plus dots. A
+    // hyphenated or overlong .gs name is not a ticker we can store.
+    if (!/^(?=.*[A-Z0-9])[A-Z0-9.]{1,8}$/.test(sym)) return null
+    return { kind: 'symbol', key: sym }
+  }
   return { kind: 'page', key: text.toLowerCase() }
 }
 

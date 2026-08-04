@@ -1040,11 +1040,12 @@ def _gesture_wheels():
     main = next(w for w in doc["wheels"] if w["id"] == "main")
     segs = main["segments"]
     assert len(segs) == 8, "the main wheel is 8 segments: 4 corners + 4 cardinal"
-    # N=AI wheel, E=tabs wheel, S=search tool, W=tickers wheel (spec)
+    # N=AI wheel, E=tabs wheel, S=search tool, W=Favorites wheel (v4: the
+    # hand-typed tickers wheel became the dynamic Favorites wheel)
     assert segs[0] == {"type": "wheel", "wheel": "ai", "label": "AI"}, segs[0]
     assert segs[2]["type"] == "wheel" and segs[2]["wheel"] == "tabs", segs[2]
     assert segs[4]["type"] == "tool" and segs[4]["tool"] == "search", segs[4]
-    assert segs[6]["type"] == "wheel" and segs[6]["wheel"] == "tickers", segs[6]
+    assert segs[6]["type"] == "wheel" and segs[6]["wheel"] == "favorites", segs[6]
     # between them: home, news, Charts, settings (v2: the SPY slot became the
     # multi-chart page, per Kade's 2026-08-02 spec change)
     others = {s.get("route") or s.get("ticker") for s in (segs[1], segs[3], segs[5], segs[7])}
@@ -1096,7 +1097,7 @@ def _gesture_wheels():
         except ValueError:
             pass
     bad = wheels.default_doc()
-    bad["wheels"] = [w for w in bad["wheels"] if w["id"] != "tickers"]
+    bad["wheels"] = [w for w in bad["wheels"] if w["id"] != "favorites"]
     try:
         wheels.validate(bad)
         raise AssertionError("deleting a built-in wheel was accepted")
@@ -1109,10 +1110,10 @@ def _gesture_wheels():
             db.execute("INSERT INTO users (username, pw_hash, kdf_salt, wrapped_dek)"
                        " VALUES ('u','h',x'00',x'00')")
             d1 = wheels.default_doc()
-            d1["config"]["locked"] = "tickers"
+            d1["config"]["locked"] = "favorites"
             stored = wheels.put(db, 1, d1)
-            assert stored["config"]["locked"] == "tickers"
-            assert wheels.get(db, 1)["config"]["locked"] == "tickers"
+            assert stored["config"]["locked"] == "favorites"
+            assert wheels.get(db, 1)["config"]["locked"] == "favorites"
             db.execute("UPDATE user_settings SET value='{oops' WHERE key=?",
                        (wheels.DOC_KEY,))
             assert wheels.get(db, 1)["config"]["locked"] is None, \
@@ -1415,6 +1416,178 @@ def _help_system():
 # ----------------------------------------------------- backtest engine checks
 
 @check("bt engine unit tests (120 known-answer tests from the tastytrade refs)")
+@check("favorites: store honesty, wheels v4, mirrored page lists")
+def _favorites_system():
+    import re as re_mod
+    import sqlite3
+
+    sys.path.insert(0, str(CODE))
+    from backend import favorites, wheels
+    from backend.db import _SCHEMA
+
+    # ---- the store: honest validation, idempotent star --------------------
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.executescript(_SCHEMA)
+    con.execute("INSERT INTO users (id, username, pw_hash, kdf_salt, wrapped_dek)"
+                " VALUES (1,'t','x',x'00',x'00')")
+    f1 = favorites.add(con, 1, "symbol", "spy", "SPY", "")
+    assert f1["key"] == "SPY", "symbols normalize upper"
+    assert favorites.add(con, 1, "symbol", "SPY", "other", "")["id"] == f1["id"], \
+        "starring twice must be idempotent, not a duplicate or an error"
+    fp = favorites.add(con, 1, "page", "Help.gs?s=drawing", "Help", "")
+    assert fp["key"] == "help.gs?s=drawing", "page address lowercases, query survives"
+    favorites.add(con, 1, "web", "https://example.com/", "Example", "")
+    assert [f["key"] for f in favorites.list_(con, 1)] == \
+        ["SPY", "help.gs?s=drawing", "https://example.com/"], "insertion order holds"
+    for bad in (("symbol", "WAYTOOLONG1", "x", ""), ("page", "nope", "x", ""),
+                ("web", "ftp://x", "x", ""), ("symbol", "SPY", "", ""),
+                ("web", "https://x.co/", "x", "javascript:alert(1)")):
+        try:
+            favorites.add(con, 1, *bad)
+            raise AssertionError(f"favorites accepted {bad}")
+        except ValueError:
+            pass
+    assert favorites.remove(con, 1, f1["id"]) and not favorites.remove(con, 1, f1["id"])
+    # A favicon that lands AFTER the star is an upgrade, not a no-op: sites
+    # commonly report theirs a beat late, and the tile would keep a letter
+    # for the life of the favorite.
+    late = favorites.add(con, 1, "web", "https://late.example/", "Late", "")
+    assert late["icon"] == ""
+    filled = favorites.add(con, 1, "web", "https://late.example/", "Late",
+                           "data:image/png;base64,AAAA")
+    assert filled["id"] == late["id"] and filled["icon"].startswith("data:image/"), \
+        "a re-star carrying an icon must fill an empty one"
+
+    # ---- icon capture guards: the sidecar holds credentials and sits inside
+    # the LAN, so favicon fetches must never be steerable at either ---------
+    for host in ("localhost", "127.0.0.1", "192.168.1.4", "10.0.0.9",
+                 "svc.internal", "0.0.0.0", "169.254.1.1", "[::1]", ""):
+        assert favorites._blocked_host(host), f"{host} must be blocked"
+    # A literal PUBLIC address stays allowed (no DNS — the gate is offline).
+    assert not favorites._blocked_host("93.184.216.34")
+    assert favorites.fetch_icon("file:///etc/passwd") == ""
+    assert favorites.fetch_icon("http://localhost:8000/icon.png") == ""
+
+    # REVIEW 2026-08-04: the guard used to string-match names and check only
+    # the FIRST hop. Both holes were real — 'localtest.me' is a public name
+    # that has always resolved to 127.0.0.1, and any attacker host could
+    # answer 302 http://127.0.0.1:… These two cases hold that line.
+    import http.server
+    import socket as socket_mod
+    import threading
+
+    def _resolves_to_loopback(name: str) -> bool:
+        try:
+            socket_mod.getaddrinfo(name, None)
+        except OSError:
+            return False
+        return True
+
+    if _resolves_to_loopback("localtest.me"):  # skipped offline, never faked
+        assert favorites._blocked_host("localtest.me"), \
+            "a NAME resolving to loopback must be blocked, not just the literal"
+
+    hits: list[str] = []
+
+    class _Redirector(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — stdlib's spelling
+            hits.append(self.path)
+            if self.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", "http://blocked.example/secret.png")
+                self.end_headers()
+            else:
+                body = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        def log_message(self, *a):  # keep the gate's output clean
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Redirector)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    real_blocked = favorites._blocked_host
+    # The server must live on loopback to be offline, so swap the policy for
+    # the duration: 'blocked.example' plays the private host. The REDIRECT
+    # HANDLING under test is entirely real.
+    favorites._blocked_host = lambda h: h == "blocked.example"
+    try:
+        assert favorites.fetch_icon(f"http://127.0.0.1:{port}/icon.png").startswith(
+            "data:image/png;base64,"), "a plain favicon must still be captured"
+        assert favorites.fetch_icon(f"http://127.0.0.1:{port}/redirect") == "", \
+            "a redirect to a blocked host must be refused, not followed"
+    finally:
+        favorites._blocked_host = real_blocked
+        srv.shutdown()
+        srv.server_close()
+    assert "/redirect" in hits, "the redirect case never reached the test server"
+
+    # ---- wheels v4: tickers wheel gone, Favorites dynamic, links validated -
+    doc = wheels.validate(wheels.default_doc())
+    ids = [w["id"] for w in doc["wheels"]]
+    assert "tickers" not in ids and "favorites" in ids, ids
+    fav_wheel = next(w for w in doc["wheels"] if w["id"] == "favorites")
+    assert fav_wheel.get("dynamic") == "favorites", "Favorites builds from live stars"
+    d2 = wheels.default_doc()
+    d2["wheels"][0]["segments"][1] = {"type": "link",
+                                      "address": "help.gs?s=drawing", "label": "Help"}
+    assert wheels.validate(d2)["wheels"][0]["segments"][1]["address"] == "help.gs?s=drawing"
+    for addr in ("javascript:x", "notanaddress", "x" * 301):
+        d2["wheels"][0]["segments"][1] = {"type": "link", "address": addr, "label": "x"}
+        try:
+            wheels.validate(d2)
+            raise AssertionError(f"wheels accepted link address {addr!r}")
+        except ValueError:
+            pass
+
+    # ---- the API surface + the one broadcast chokepoint -------------------
+    app_py = (CODE / "backend/app.py").read_text(encoding="utf-8")
+    for frag in ('"/api/favorites"', '"/api/pages"', "fetch_icon"):
+        assert frag in app_py, f"app.py missing {frag}"
+    api_ts = (CODE / "app/src/main/api.ts").read_text(encoding="utf-8")
+    assert "favorites:changed" in api_ts and "/api/favorites" in api_ts, \
+        "the api proxy must broadcast favorites mutations to every view"
+
+    # ---- the platform-page list has TWO mirrors that must agree with
+    # urls.ts (this drift actually happened: 'help' was missing from tabs.ts
+    # and a help.gs tab counted as ticker HELP in symbolTabs) ---------------
+    urls_ts = (CODE / "app/src/renderer/src/urls.ts").read_text(encoding="utf-8")
+    m = re_mod.search(r"const PAGES = \[(.*?)\]", urls_ts, re_mod.S)
+    renderer_pages = set(re_mod.findall(r"'([a-z]+)'", m.group(1)))
+    tabs_ts = (CODE / "app/src/main/tabs.ts").read_text(encoding="utf-8")
+    m = re_mod.search(r"const PAGE_NAMES = new Set\(\[(.*?)\]\)", tabs_ts, re_mod.S)
+    main_pages = set(re_mod.findall(r"'([a-z]+)'", m.group(1)))
+    assert renderer_pages == main_pages, \
+        f"urls.ts PAGES != tabs.ts PAGE_NAMES, diff: {renderer_pages ^ main_pages}"
+
+    # ---- the built surfaces consume the store (string-level; the e2e is
+    # the functional proof of each) -----------------------------------------
+    idle = (CODE / "app/src/renderer/src/pages/Idle.tsx").read_text(encoding="utf-8")
+    assert "/api/favorites" in idle and "onFavoritesChanged" in idle, \
+        "the home grid must render the live store and follow the broadcast"
+    assert "const FAVORITES" not in idle, \
+        "the hardcoded app tiles are gone — provider apps live in the launcher"
+    strip = (CODE / "app/src/renderer/src/components/TabStrip.tsx").read_text(
+        encoding="utf-8")
+    for frag in ("addr-star", "apps-btn", "favoriteIdentity", "launcherToggle"):
+        assert frag in strip, f"TabStrip.tsx missing {frag}"
+    tabs_src = tabs_ts  # already read above
+    assert "page-favicon-updated" in tabs_src and "activeFavicon" in tabs_src, \
+        "the shell must capture the tab image the star submits"
+    wheel_ts = (CODE / "app/src/main/wheel.ts").read_text(encoding="utf-8")
+    for frag in ("favorites", "openAddress", "launcher:toggle", "/api/pages"):
+        assert frag in wheel_ts, f"wheel.ts missing {frag}"
+    panel = (CODE / "app/src/renderer/src/components/GesturesPanel.tsx").read_text(
+        encoding="utf-8")
+    assert "favoriteEntry" in panel and "submitTicker" not in panel, \
+        "the picker offers favorites, not a free-typed ticker"
+
+
 def _bt_engine():
     # The vendored engine ships its own suite: fees, buying power, profit
     # definition, selection ties, sandboxing — every number read off the real

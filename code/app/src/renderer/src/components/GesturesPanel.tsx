@@ -15,7 +15,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
-import { CatalogEntry, CATEGORIES, searchCatalog, tickerEntry } from '../wheelCatalog'
+import type { Favorite } from '../favorites'
+import { CatalogEntry, CATEGORIES, favoriteEntry, searchCatalog } from '../wheelCatalog'
 import { Quote, WheelConfig, WheelFace, WheelRender, WheelSegment } from './WheelFace'
 import '../gestures.css'
 
@@ -30,6 +31,10 @@ const DYNAMIC_NOTE: Record<string, string> = {
   tabs:
     'The Tabs wheel builds itself from your open tabs — more than eight and ' +
     'its east/west segments page through them.',
+  favorites:
+    'The Favorites wheel builds itself from your starred pages — ticker ' +
+    'favorites keep the quote display and day-direction colors, pages and ' +
+    'sites just open. More than eight and it pages through them, like Tabs.',
   'chart-add':
     'Builds itself when spawned over a chart: every open ticker tab not ' +
     'already on that chart, ready to add.',
@@ -56,8 +61,29 @@ function SegmentPicker({
 }) {
   const [query, setQuery] = useState('')
   const [cat, setCat] = useState<string | null>(null)
-  const [ticker, setTicker] = useState('')
-  const [tickerOpen, setTickerOpen] = useState(false)
+  const [favs, setFavs] = useState<Favorite[] | null>(null)
+
+  // Favorites are live, like the go-to-wheel entries below: fetched when the
+  // picker opens, refreshed whenever a star toggles anywhere in the app.
+  useEffect(() => {
+    let live = true
+    const load = () =>
+      api<{ favorites: Favorite[] }>('GET', '/api/favorites')
+        .then((r) => {
+          if (live) setFavs(r.favorites)
+        })
+        .catch(() => {
+          // offline blip: no rows beats a dead picker — the panel itself
+          // already surfaces API errors when saving
+          if (live) setFavs([])
+        })
+    load()
+    const off = window.grindstone.onFavoritesChanged(load)
+    return () => {
+      live = false
+      off()
+    }
+  }, [])
 
   // Go-to-wheel entries come from the LIVE document, not the static catalog —
   // custom wheels are offered the moment they exist.
@@ -75,16 +101,16 @@ function SegmentPicker({
         (cat === null || cat === 'Wheels') &&
         (!q || e.label.toLowerCase().includes(q) || e.keywords.includes(q))
     )
-  const entries = [...searchCatalog(query, cat), ...wheelEntries]
-  const showTickerRow = cat === null || cat === 'Tickers'
-
-  const submitTicker = () => {
-    const sym = ticker.trim().toUpperCase()
-    // Must contain at least one alphanumeric: '.' alone passed this gate,
-    // sailed through optimistically, and 422'd out of the backend instead
-    // of being refused at the door (REVIEW 2026-08-02).
-    if (/^(?=.*[A-Z0-9])[A-Z0-9.]{1,8}$/.test(sym)) onPick(tickerEntry(sym))
-  }
+  // Anything you have starred can sit on a wheel: a symbol favorite becomes
+  // a ticker segment (same quote/color rules), a page or site a link segment.
+  const favEntries: CatalogEntry[] = (favs ?? [])
+    .map(favoriteEntry)
+    .filter(
+      (e) =>
+        (cat === null || cat === 'Favorites') &&
+        (!q || e.label.toLowerCase().includes(q) || e.keywords.includes(q))
+    )
+  const entries = [...searchCatalog(query, cat), ...wheelEntries, ...favEntries]
 
   return (
     <>
@@ -123,33 +149,16 @@ function SegmentPicker({
             <span className="gp-entry-cat">{e.category}</span>
           </button>
         ))}
-        {showTickerRow ? (
-          tickerOpen ? (
-            <div className="gp-ticker-row">
-              <input
-                className="field"
-                placeholder="SPY"
-                value={ticker}
-                maxLength={8}
-                autoFocus
-                onChange={(e) => setTicker(e.target.value.toUpperCase())}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') submitTicker()
-                }}
-              />
-              <button className="btn" onClick={submitTicker}>
-                Set
-              </button>
+        {entries.length === 0 ? (
+          cat === 'Favorites' && (favs === null || favs.length === 0) ? (
+            <div className="gp-empty">
+              {favs === null
+                ? 'Loading favorites…'
+                : 'No favorites yet — star pages with the ★ at the end of the address bar.'}
             </div>
           ) : (
-            <button className="gp-entry" onClick={() => setTickerOpen(true)}>
-              <span>Ticker…</span>
-              <span className="gp-entry-cat">Tickers</span>
-            </button>
+            <div className="gp-empty">Nothing matches</div>
           )
-        ) : null}
-        {entries.length === 0 && !showTickerRow ? (
-          <div className="gp-empty">Nothing matches</div>
         ) : null}
       </div>
     </>
@@ -498,7 +507,10 @@ export function GesturesPanel() {
       <div className="setting-row" style={{ marginTop: 14 }}>
         <div className="setting-text">
           <div>Ticker segments show</div>
-          <div className="subtle">Right in the wheel: today’s move, or the live price.</div>
+          <div className="subtle">
+            On the Favorites wheel and any wheel you put a ticker favorite on:
+            today’s move, or the live price.
+          </div>
         </div>
         <div className="setting-control">
           <select

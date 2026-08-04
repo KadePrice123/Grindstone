@@ -238,14 +238,19 @@ Sign out, About).
     the default (locked ?? Main). Tabs → the native split menu, never the
     wheel. Chart segments act on the exact chart that was right-clicked,
     not whatever is focused when the action fires.
-  - **Defaults**: *Main* (8: AI wheel N, Tabs wheel E, Tickers wheel W,
-    Search S; home/news/SPY/settings between), *AI* (placeholder until the AI
-    milestone, honestly dimmed), *Tabs* (dynamic — built from open tabs at
-    spawn; >8 tabs paginate E/W), *Tickers* (SPY QQQ GLD USO VIX + Main).
+  - **Defaults**: *Main* (8: AI wheel N, Tabs wheel E, Favorites wheel W,
+    Search S; home/news/Charts/settings between), *AI* (placeholder until the
+    AI milestone, honestly dimmed), *Tabs* (dynamic — built from open tabs at
+    spawn; >8 tabs paginate E/W), *Favorites* (dynamic — built from the
+    user's starred pages at spawn, wheels doc v4 2026-08-04; replaced the
+    hand-typed Tickers wheel: symbol favorites become ticker segments,
+    page/web favorites become link segments carrying their address and, for
+    websites, the captured tab image).
   - **Ticker segments** show the symbol plus %-change or price
     (configurable) and can tint by day direction — green bullish, red
     bearish — using a snapshot taken at spawn (`/api/quotes`), never
     re-polled while open, so colors cannot flash. Reopen to refresh.
+    Symbol favorites inherit exactly these rules.
   - Architecture: one transparent overlay `WebContentsView` per app;
     right-button events forwarded from app views via the bridge and from
     browser tabs via a minimal no-contextBridge preload (isTrusted-gated,
@@ -264,9 +269,24 @@ Sign out, About).
   (external websites — e.g., a news article's source, or any URL typed into the
   omnibox). Navigation controls appear only on browser tabs. This same
   mechanism hosts Open WebUI.
-- **FR-SHELL-7 Favorites.** Any page can be favorited; favorites appear on the
-  idle page as tiles with the page's logo. Default set on first run:
-  **Accounts**, **APIs**, **AI**, **Positions** (§4.9).
+- **FR-SHELL-7 Favorites & the apps launcher.** *(Delivered 2026-08-04,
+  Kade's spec.)* Any page can be favorited via the **star at the end of the
+  address bar** (☆/★ toggles the current page). Favorites are the home
+  grid: each tile shows the site's **captured tab image** (favicon,
+  downloaded by the backend at star time and stored as a data URI) for web
+  pages, the page's glyph for platform pages, or the ticker symbol for
+  symbol pages — with a short name at the bottom derived from what the page
+  actually is. Symbol tiles carry a live %-change line (green/red by day
+  direction). The store is `/api/favorites` (kinds symbol|page|web, keyed by
+  address, idempotent star, 48 max); every mutation broadcasts
+  `favorites:changed` so the grid, the star, the wheel, and the picker never
+  disagree. The system/provider apps moved off the home grid into a
+  **normally-collapsed apps launcher** (Google-style ⣿ button right of the
+  address bar): a scrollable panel of every provider app from `/api/pages`
+  (the search registry — one source of truth), unbuilt ones honestly dimmed.
+  It renders in the overlay view so it drops over any tab, browser tabs
+  included. The wheel's segment picker offers favorites instead of a
+  free-typed ticker (see FR-SHELL-4 defaults).
 
 ### 4.4a Help (delivered 2026-08-02)
 

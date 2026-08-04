@@ -18,6 +18,7 @@ export const HELP_SECTIONS = [
   'tabs',
   'split-view',
   'wheels',
+  'favorites',
   'charts',
   'drawing',
   'measuring',
@@ -87,6 +88,28 @@ function MeasureSvg() {
       <circle cx="120" cy="18" r="3" className="hl-x" />
       <rect x="52" y="28" width="52" height="18" rx="3" className="hl-chip" />
       <text x="78" y="40" className="hl-t sm">+$12 · 9 bars</text>
+    </svg>
+  )
+}
+
+function FavSvg() {
+  return (
+    <svg viewBox="0 0 150 98" className="hl-fig" aria-label="Favorites diagram">
+      {/* the address bar, star at its end */}
+      <rect x="2" y="2" width="146" height="22" rx="5" className="hl-frame" />
+      <text x="12" y="17" className="hl-t sm" textAnchor="start">spy.gs</text>
+      <text x="135" y="18" className="hl-t">★</text>
+      {/* the home grid the star feeds: ticker · page · website */}
+      <rect x="7" y="34" width="41" height="58" rx="5" className="hl-pane" />
+      <rect x="54" y="34" width="41" height="58" rx="5" className="hl-pane" />
+      <rect x="101" y="34" width="41" height="58" rx="5" className="hl-pane" />
+      <text x="27.5" y="56" className="hl-t">SPY</text>
+      <text x="27.5" y="70" className="hl-t sm">+1.24%</text>
+      <text x="27.5" y="85" className="hl-t sm">SPY</text>
+      <rect x="68" y="46" width="13" height="13" rx="2" className="hl-btn" />
+      <text x="74.5" y="85" className="hl-t sm">Data</text>
+      <circle cx="121.5" cy="52.5" r="7" className="hl-btn" />
+      <text x="121.5" y="85" className="hl-t sm">Site</text>
     </svg>
   )
 }
@@ -210,6 +233,38 @@ const SECTIONS: Sec[] = [
             wheel; a tab opens the tab menu; everywhere else spawns your default wheel.</li>
           <li>Edit wheels in <code>settings.gs</code> → <em>Gesture wheels</em>: click a
             segment on the preview, then pick its meaning from the searchable catalog.</li>
+        </ul>
+      </>
+    ),
+  },
+  {
+    id: 'favorites',
+    title: 'Favorites & apps',
+    fig: FavSvg,
+    body: (
+      <>
+        <ul>
+          <li>The <strong>☆</strong> at the end of the address bar stars whatever you
+            are on — a platform page, a ticker, a website. It shows <strong>★</strong> when
+            the current page is already a favorite; click again to remove it.</li>
+          <li><strong>Home is your favorites grid.</strong> Each tile carries its
+            identity — a website its captured tab image, a platform page its glyph,
+            a ticker its symbol — with the short name underneath. Ticker tiles add
+            today’s move (green up, red down); <em>—</em> means no quote source is
+            available right now.</li>
+          <li>Provider and system apps moved off the home page into the
+            <strong> Apps</strong> launcher — the 3×3-dot button right of the address
+            bar. It holds every platform app; the ones announced but not built yet
+            are dimmed.</li>
+          <li>The <strong>Favorites wheel</strong> (Main wheel → <em>Favorites</em>)
+            builds itself from your stars: ticker favorites keep the price/percent
+            display and day-direction colors — frozen while the wheel is open,
+            re-open to refresh — pages and sites simply open. More than eight and it
+            pages through them, like Tabs.</li>
+          <li>In <code>settings.gs</code> → <em>Gesture wheels</em>, the segment
+            picker’s <em>Favorites</em> category offers everything you have
+            starred — it replaced the free-typed ticker slot, so a wheel segment can
+            only point at something that exists.</li>
         </ul>
       </>
     ),

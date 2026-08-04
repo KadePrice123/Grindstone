@@ -9,6 +9,7 @@
  * generates those from the user's live wheels document.
  */
 import type { WheelSegment } from './components/WheelFace'
+import type { Favorite } from './favorites'
 
 export interface CatalogEntry {
   /** Stable id, used for search/dedup; not persisted. */
@@ -29,7 +30,7 @@ export const CATEGORIES = [
   'Chart · indicators',
   'Chart · view',
   'Tools',
-  'Tickers',
+  'Favorites',
   'Other',
 ] as const
 
@@ -130,10 +131,34 @@ export const CATALOG: CatalogEntry[] = [
     keywords: 'blank none reserved', segment: { type: 'placeholder', label: '—' } },
 ]
 
-/** Ticker entries are typed, not listed — the picker offers a ticker input
- *  that produces this. */
+/** Ticker segments are built, not listed — every symbol favorite offers one
+ *  through favoriteEntry(). */
 export function tickerEntry(symbol: string): WheelSegment {
   return { type: 'ticker', ticker: symbol.toUpperCase(), label: '' }
+}
+
+/** A favorited page/site as a wheel segment. Identity is embedded (the
+ *  address, not a favorites-row id), so un-starring later never leaves a
+ *  dangling segment — like a bookmark copied onto a toolbar. */
+export function linkEntry(address: string, label: string, icon?: string): WheelSegment {
+  // 20 = the backend's segment-label cap; favorite labels run to 24.
+  return { type: 'link', address, label: label.slice(0, 20), ...(icon ? { icon } : {}) }
+}
+
+/** One picker entry per favorite — fetched live when the picker opens, the
+ *  same way go-to-wheel entries come from the live wheels document. */
+export function favoriteEntry(fav: Favorite): CatalogEntry {
+  return {
+    id: `fav:${fav.kind}:${fav.key}`,
+    category: 'Favorites',
+    label: fav.kind === 'symbol' ? fav.key : fav.label,
+    keywords:
+      `favorite starred ${fav.kind} ${fav.key.toLowerCase()} ${fav.label.toLowerCase()}`,
+    segment:
+      fav.kind === 'symbol'
+        ? tickerEntry(fav.key)
+        : linkEntry(fav.key, fav.label, fav.icon || undefined),
+  }
 }
 
 export function searchCatalog(query: string, category: string | null): CatalogEntry[] {

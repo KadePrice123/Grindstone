@@ -495,6 +495,172 @@ try {
   const finalUrl = (await chromeA.eval('window.grindstoneTabs.getState()')).activeUrl
   check(/\.gs/.test(finalUrl ?? ''), 'addressing: the bar reports a .gs address', finalUrl)
 
+  // ------------------------------------------------------------- favorites
+  // The star at the end of the address bar is the only way favorites are
+  // born, so this drives it — for all three kinds (ticker page, platform
+  // page, live website) — and then checks every surface that consumes the
+  // store: the home grid, the wheel (below), and the launcher.
+  const starState = async () =>
+    JSON.parse(
+      await chromeA.eval(`JSON.stringify({
+        present: !!document.querySelector('.addr-star'),
+        on: !!document.querySelector('.addr-star.on')
+      })`)
+    )
+  const clickStar = () =>
+    chromeA.eval(`(document.querySelector('.addr-star')?.click(), 'ok')`)
+  const waitStar = (on, why) =>
+    waitFor(async () => {
+      const s = await starState()
+      return s.present && s.on === on ? s : null
+    }, why, 8000).catch(() => null)
+
+  const starPage = async (addr, wantTitle) => {
+    await chromeA.eval(`(window.grindstoneTabs.activate(${appTab.id}), 'ok')`)
+    await sleep(300)
+    await chromeA.eval(typeAddress(addr))
+    await waitFor(async () => {
+      const s = await chromeA.eval('window.grindstoneTabs.getState()')
+      const t = s.tabs.find((x) => x.id === appTab.id)
+      return t && t.title === wantTitle ? s : null
+    }, `${addr} to load before starring`, 8000)
+    await waitStar(false, `${addr}: an unstarred page shows the hollow star`)
+    await clickStar()
+    return waitStar(true, `${addr}: the star to fill after clicking`)
+  }
+
+  check(!!(await starPage('spy.gs', 'SPY')), 'star: a ticker page stars from the address bar')
+  check(!!(await starPage('backtest.gs', 'Backtest')), 'star: a platform page stars too')
+
+  // The web kind: the example.com tab the browsing block opened. Its icon
+  // may honestly be empty (example.com serves no favicon) — the tile falls
+  // back to a letter, which is exactly the degradation under test.
+  await chromeA.eval(`(window.grindstoneTabs.activate(${browserTab.id}), 'ok')`)
+  await sleep(400)
+  const webStar = await waitStar(false, 'the browser tab to offer the star')
+  await clickStar()
+  const webStarred = await waitStar(true, 'the website star to fill')
+  check(!!webStar && !!webStarred, 'star: a live website stars from the same control')
+
+  const favList = JSON.parse(
+    await spy.eval(
+      `window.grindstone.request('GET','/api/favorites')
+        .then(r => JSON.stringify(r.body?.favorites ?? []))`
+    )
+  )
+  check(
+    favList.length === 3 &&
+      new Set(favList.map((f) => f.kind)).size === 3 &&
+      favList.some((f) => f.key === 'SPY'),
+    'favorites: the store holds all three kinds',
+    JSON.stringify(favList.map((f) => `${f.kind}:${f.key}`))
+  )
+
+  // The home grid IS the favorites now — the hardcoded app tiles moved to
+  // the launcher. Symbol tiles carry a live day-change line.
+  await chromeA.eval(`(window.grindstoneTabs.activate(${appTab.id}), 'ok')`)
+  await sleep(300)
+  await chromeA.eval(typeAddress('home.gs'))
+  const grid = await waitFor(
+    async () => {
+      const s = await spy.eval(`JSON.stringify({
+        tiles: document.querySelectorAll('.fav-tile').length,
+        text: [...document.querySelectorAll('.fav-tile')].map(t => t.textContent).join('|')
+      })`)
+      const g = JSON.parse(s)
+      return g.tiles === 3 ? g : null
+    },
+    'the home grid to show the three favorites',
+    10000
+  ).catch(() => null)
+  check(
+    !!grid && /SPY/.test(grid.text) && /Backtest/i.test(grid.text),
+    'home: the grid shows the starred pages, not hardcoded apps',
+    grid ? grid.text.slice(0, 120) : 'no grid'
+  )
+
+  // Un-star round trip: the star giveth and the star taketh away.
+  await chromeA.eval(typeAddress('spy.gs'))
+  await waitStar(true, 'spy.gs to come back starred')
+  await clickStar()
+  const unstarred = await waitStar(false, 'the star to hollow after removal')
+  const nAfterRemove = JSON.parse(
+    await spy.eval(
+      `window.grindstone.request('GET','/api/favorites')
+        .then(r => JSON.stringify((r.body?.favorites ?? []).length))`
+    )
+  )
+  check(!!unstarred && nAfterRemove === 2, 'star: clicking again removes the favorite', `${nAfterRemove} left`)
+  await clickStar() // SPY goes back in — the wheel checks below expect it
+  await waitStar(true, 'SPY re-starred for the wheel checks')
+
+  // ---------------------------------------------------------- the launcher
+  // The provider apps live in a collapsed Google-style panel now. It renders
+  // in the OVERLAY view (so it can drop over any tab) — and this click is
+  // that view's very first attach in this run, which proves the launcher's
+  // ready-handshake replay works cold.
+  await chromeA.eval(`(document.querySelector('.apps-btn')?.click(), 'ok')`)
+  const launcherTarget = await waitFor(
+    async () => (await targets()).find((t) => t.url.includes('mode=wheel')),
+    'the overlay view to exist for the launcher'
+  )
+  const launcherUi = await connect(launcherTarget)
+  const panel = await waitFor(
+    async () => {
+      const s = await launcherUi.eval(`JSON.stringify({
+        up: !!document.querySelector('.launcher-panel'),
+        tiles: document.querySelectorAll('.launcher-tile').length,
+        dead: document.querySelectorAll('.launcher-tile.dead').length,
+        titles: [...document.querySelectorAll('.launcher-title')].map(t => t.textContent)
+      })`)
+      const p = JSON.parse(s)
+      return p.up ? p : null
+    },
+    'the apps panel to open',
+    8000
+  ).catch(() => null)
+  check(
+    !!panel && panel.tiles >= 8 && panel.dead >= 1 && panel.titles.includes('Backtest'),
+    'launcher: the apps button opens the full provider registry, unbuilt apps dimmed',
+    JSON.stringify(panel)
+  )
+  if (panel) {
+    const idx = panel.titles.indexOf('Backtest')
+    // Real tiles are buttons with onClick — .click() is the honest dispatch.
+    await launcherUi.eval(
+      `(document.querySelectorAll('.launcher-tile')[${idx}].click(), 'ok')`
+    )
+    const landed = await waitFor(
+      async () => {
+        const gone = await launcherUi.eval(`document.querySelector('.launcher-panel') === null`)
+        if (!gone) return null
+        const s = await chromeA.eval('window.grindstoneTabs.getState()')
+        return /backtest\.gs/.test(s.activeUrl ?? '') ? s.activeUrl : null
+      },
+      'the Backtest tile to open backtest.gs and close the panel',
+      8000
+    ).catch(() => null)
+    check(!!landed, 'launcher: picking an app opens its page and collapses the panel', landed)
+  }
+  // Escape closes a reopened panel. The reopen must be CONFIRMED before the
+  // Escape — otherwise a panel that never opened makes this pass vacuously.
+  await chromeA.eval(`(document.querySelector('.apps-btn')?.click(), 'ok')`)
+  const reopened = await waitFor(
+    async () => ((await launcherUi.eval(`!!document.querySelector('.launcher-panel')`)) ? 'up' : null),
+    'the panel to reopen',
+    8000
+  ).catch(() => null)
+  await launcherUi.eval(
+    `(document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true})), 'ok')`
+  )
+  const escClosed = await waitFor(
+    async () => ((await launcherUi.eval(`document.querySelector('.launcher-panel') === null`)) ? 'ok' : null),
+    'Escape to collapse the panel',
+    8000
+  ).catch(() => null)
+  check(reopened === 'up' && escClosed === 'ok', 'launcher: Escape collapses the reopened panel',
+    `reopened=${reopened} escClosed=${escClosed}`)
+
   // -------------------------------------------------------- gesture wheels
   // Driven through the same wheel:evt channel real input uses, from a real
   // content view — main's state machine, the overlay renderer, and the
@@ -552,9 +718,11 @@ try {
   ).catch(() => null)
   check(!!afterCharts, 'wheel: the Charts segment opens the multi-chart page and closes the wheel')
 
-  // HOLD mode: press, drag due WEST (segment 6 = Tickers wheel nav),
+  // HOLD mode: press, drag due WEST (segment 6 = Favorites wheel nav),
   // release → switches wheel and STAYS OPEN in click mode (the spec's
-  // "after a wheel nav while holding, enter left-click mode").
+  // "after a wheel nav while holding, enter left-click mode"). The wheel is
+  // DYNAMIC: 3 starred favorites + the Main nav = 4 segments, and the
+  // symbol favorite renders as a ticker segment, page/web as links.
   await sendWheel(spy, 'down', 420, 320)
   await sleep(350)
   for (const dx of [40, 90, 150]) await sendWheel(spy, 'move', 420 - dx, 320)
@@ -565,19 +733,21 @@ try {
         `JSON.stringify({
            id: document.querySelector('.wheel-face')?.dataset.wheel ?? null,
            mode: document.querySelector('.wheel-face')?.dataset.mode ?? null,
-           segs: document.querySelectorAll('.wf-seg').length
+           segs: document.querySelectorAll('.wf-seg').length,
+           text: [...document.querySelectorAll('.wf-seg')].map(t => t.textContent).join('|')
          })`
       )
       const st = JSON.parse(s)
-      return st.id === 'tickers' && st.mode === 'click' ? st : null
+      return st.id === 'favorites' && st.mode === 'click' ? st : null
     },
-    'hold-drag west to switch to the Tickers wheel and stay open',
+    'hold-drag west to switch to the Favorites wheel and stay open',
     8000
   ).catch(() => null)
   check(
-    !!holdState && holdState.segs === 6,
+    !!holdState && holdState.segs === 4 &&
+      /SPY/.test(holdState.text) && /Backtest/i.test(holdState.text),
     'wheel: hold-drag onto a wheel-nav switches wheels and stays open',
-    JSON.stringify(holdState)
+    JSON.stringify(holdState).slice(0, 200)
   )
 
   // The hub locks THIS wheel as the default; a fresh spawn opens it first.
@@ -590,12 +760,12 @@ try {
       const r = await spy.eval(
         `window.grindstone.request('GET','/api/wheels').then(r => r.body?.config?.locked ?? null)`
       )
-      return r === 'tickers' ? r : null
+      return r === 'favorites' ? r : null
     },
     'the lock to persist',
     8000
   ).catch(() => null)
-  check(lockedCfg === 'tickers', 'wheel: the center hub locks the shown wheel as default')
+  check(lockedCfg === 'favorites', 'wheel: the center hub locks the shown wheel as default')
 
   // Close (left click outside), respawn: the locked wheel comes up first.
   await wheelUi.eval(
@@ -611,12 +781,12 @@ try {
       const id = await wheelUi.eval(
         `document.querySelector('.wheel-face')?.dataset.wheel ?? null`
       )
-      return id === 'tickers' ? id : null
+      return id === 'favorites' ? id : null
     },
     'the locked wheel to spawn first',
     8000
   ).catch(() => null)
-  check(respawn === 'tickers', 'wheel: a locked wheel is the new default on spawn')
+  check(respawn === 'favorites', 'wheel: a locked wheel is the new default on spawn')
 
   // Unlock reverts to the true default; clean up for whatever runs next.
   await wheelUi.eval(
@@ -1169,6 +1339,40 @@ try {
   ).catch(() => null)
   check(helpOpen === 'ok', 'help: help.gs?s=drawing lands on the drawing section')
   void helpHit
+
+  // The new feature indexes like every other: searching its words surfaces
+  // its manual section, and the deep link lands scrolled to it.
+  const favHelp = await waitFor(
+    async () => {
+      const s = await spy.eval(
+        `window.grindstone.request('GET','/api/search?q=favorites')
+          .then(r => JSON.stringify((r.body?.results ?? [])
+            .filter(x => x.page === 'help' && x.section === 'favorites').slice(0, 1)))`
+      )
+      const rows = JSON.parse(s ?? '[]')
+      return rows.length ? rows : null
+    },
+    'searching "favorites" to surface the manual section',
+    10000
+  ).catch(() => null)
+  check(!!favHelp, 'help: searching "favorites" surfaces the Favorites & apps section',
+    JSON.stringify(favHelp))
+  await chromeA.eval(typeAddress('help.gs?s=favorites'))
+  const favHelpOpen = await waitFor(
+    async () => {
+      for (const t of (await targets()).filter((x) => x.url.includes('mode=content'))) {
+        const c = await connect(t)
+        const cur = await c.eval(
+          `document.querySelector('.help-page')?.getAttribute('data-help-current') ?? null`
+        )
+        if (cur === 'favorites') return 'ok'
+      }
+      return null
+    },
+    'help.gs?s=favorites to open scrolled to the section',
+    10000
+  ).catch(() => null)
+  check(favHelpOpen === 'ok', 'help: help.gs?s=favorites lands on the section')
 } catch (err) {
   console.log('FAIL  harness error —', err.message)
   failures += 1

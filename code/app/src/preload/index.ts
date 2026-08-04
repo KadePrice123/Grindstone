@@ -166,6 +166,8 @@ export interface StripState {
   canGoForward: boolean
   activeKind: 'app' | 'browser' | null
   activeUrl: string
+  /** The active BROWSER tab's favicon URL ('' otherwise) — the star's icon_url. */
+  activeFavicon: string
   loading: boolean
   draggingId: number | null
   /** Chrome-style split view: the paired tabs and the divider position. */

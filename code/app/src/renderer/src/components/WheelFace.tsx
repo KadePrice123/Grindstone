@@ -12,7 +12,9 @@ import {
 } from '../../../shared/wheelGeometry'
 
 export interface WheelSegment {
-  type: 'wheel' | 'nav' | 'tool' | 'ticker' | 'chart' | 'placeholder' | 'empty' | 'tab' | 'page'
+  type:
+    | 'wheel' | 'nav' | 'tool' | 'ticker' | 'chart' | 'placeholder' | 'empty'
+    | 'tab' | 'page' | 'link'
   label: string
   wheel?: string
   route?: string
@@ -20,6 +22,9 @@ export interface WheelSegment {
   ticker?: string
   tabId?: number
   dir?: number
+  /** link: a favorited .gs address or http(s) URL. */
+  address?: string
+  /** link: the captured tab image (a data: URI) — web favorites only. */
   icon?: string
   symbol?: string
   disabled?: boolean
@@ -57,6 +62,8 @@ function glyph(seg: WheelSegment): string {
       return seg.tool === 'search' ? '🔍' : '✦'
     case 'ticker':
       return '' // the ticker text IS the identity
+    case 'link':
+      return '' // the short name IS the identity; web icons render as <image>
     case 'chart': {
       const t = seg.tool ?? ''
       if (t.startsWith('ind:')) return '∿'
@@ -199,6 +206,22 @@ export function WheelFace({
                     {seg.label}
                   </text>
                 ) : null}
+              </>
+            ) : seg.type === 'link' && seg.icon ? (
+              // A web favorite: the captured tab image above the short name
+              // (data: URIs render fine in SVG). Page links are label-only.
+              <>
+                <image
+                  className="wf-link-icon"
+                  href={seg.icon}
+                  x={anchor.x - 10}
+                  y={anchor.y - 22}
+                  width={20}
+                  height={20}
+                />
+                <text className="wf-label" x={anchor.x} y={anchor.y + 12}>
+                  {seg.label}
+                </text>
               </>
             ) : (
               <text className="wf-label" x={anchor.x} y={anchor.y + (g ? 12 : 4)}>

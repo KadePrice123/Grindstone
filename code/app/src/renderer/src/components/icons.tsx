@@ -130,3 +130,43 @@ export const BacktestIcon = () => (
     <rect x="13" y="9" width="2" height="4" rx="0.5" />
   </Icon>
 )
+
+export const HomeIcon = () => (
+  <Icon label="Home">
+    {/* the Grindstone triangle, same geometry as the Logo mark */}
+    <path d="M12 4.5 L19.5 17.5 H4.5 Z" />
+    <path d="M12 15 L9.2 10.2 H14.8 Z" />
+  </Icon>
+)
+
+export const AppsIcon = () => (
+  <Icon label="Apps">
+    {/* 3×3 launcher grid; stroke-drawn dots keep the set's line weight */}
+    {[5.5, 12, 18.5].map((y) =>
+      [5.5, 12, 18.5].map((x) => <circle key={`${x},${y}`} cx={x} cy={y} r="1.4" />)
+    )}
+  </Icon>
+)
+
+/** The page registry's keys (GET /api/pages, urls.ts PAGES) -> glyphs, shared
+ *  by the favorite tiles and the apps launcher. Look up via pageIcon() so
+ *  unmapped or future pages fall back to the generic page glyph. */
+export const PAGE_ICONS: Record<string, () => React.JSX.Element> = {
+  home: HomeIcon,
+  accounts: AccountsIcon,
+  apis: ApisIcon,
+  ai: AiIcon,
+  positions: PositionsIcon,
+  data: DataIcon,
+  backtest: BacktestIcon,
+  news: NewsMiniIcon,
+  charts: ChartMiniIcon,
+  settings: SettingsIcon,
+  search: SearchMiniIcon,
+  article: PageMiniIcon,
+  help: PageMiniIcon,
+}
+
+export function pageIcon(key: string): () => React.JSX.Element {
+  return PAGE_ICONS[key] ?? PageMiniIcon
+}
