@@ -1412,6 +1412,168 @@ def _help_system():
     assert "help:" in app_tsx, "the help route cannot carry a section"
 
 
+# ----------------------------------------------------- backtest engine checks
+
+@check("bt engine unit tests (120 known-answer tests from the tastytrade refs)")
+def _bt_engine():
+    # The vendored engine ships its own suite: fees, buying power, profit
+    # definition, selection ties, sandboxing — every number read off the real
+    # reference exports. A subprocess so numpy never enters THIS process.
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "backend/bt/tests", "-q",
+         "--no-header", "-p", "no:cacheprovider"],
+        cwd=CODE, capture_output=True, text=True, timeout=120,
+    )
+    assert r.returncode == 0, f"engine tests failed:\n{(r.stdout or r.stderr)[-1500:]}"
+    assert " passed" in r.stdout, f"pytest produced no pass line:\n{r.stdout[-300:]}"
+
+
+@check("backtests api: seeding, validation surface, honest refusals, report key")
+def _backtests_api():
+    import os
+    import tempfile
+    sys.path.insert(0, str(CODE))
+    from fastapi.testclient import TestClient
+    from backend.app import State, create_app
+
+    with tempfile.TemporaryDirectory() as td:
+        old = os.environ.get("GRINDSTONE_DATA_DIR")
+        os.environ["GRINDSTONE_DATA_DIR"] = td
+        try:
+            state = State("boot", db_path=Path(td) / "app.db",
+                          market_path=Path(td) / "market.db")
+            app = create_app(state)
+
+            # The GIL contract (requirements.txt): the sidecar process must
+            # never import numpy — the engine's heavy half loads only in the
+            # runner subprocess. This is the tripwire.
+            assert "numpy" not in sys.modules, \
+                "backend import chain pulled numpy into the sidecar process"
+
+            c = TestClient(app, base_url="http://127.0.0.1",
+                           headers={"X-App-Token": "boot"})
+            r = c.post("/api/auth/setup",
+                       json={"username": "bt", "password": "fixture-pw-123"})
+            c.headers["Authorization"] = f"Bearer {r.json()['token']}"
+
+            # Seeding: 7 bundled presets, exactly 3 flagged as calibration
+            # references, present from the first GET.
+            presets = c.get("/api/backtests/presets").json()
+            assert len(presets) == 7, f"seeded {len(presets)} presets, wanted 7"
+            assert sum(p["calibration"] for p in presets) == 3
+
+            # Validation carries the engine's own message quality: an unknown
+            # key names itself; an unknown rule variable is named too.
+            good = presets[0]["spec"]
+            r = c.post("/api/backtests/validate", json={"spec": good}).json()
+            assert r["ok"] and "describe" in r
+            r = c.post("/api/backtests/validate",
+                       json={"spec": dict(good, bogus=1)}).json()
+            assert not r["ok"] and "bogus" in r["error"]
+            bad = json.loads(json.dumps(good))
+            bad["entry"] = {"when": "vixx > 5"}
+            r = c.post("/api/backtests/validate", json={"spec": bad}).json()
+            assert not r["ok"] and "vixx" in r["error"]
+
+            # Built-in presets are read-only references.
+            r = c.patch(f"/api/backtests/presets/{presets[0]['id']}",
+                        json={"name": "x"})
+            assert r.status_code == 409, "built-in preset was editable"
+
+            # No chain DB in this temp world: starting a run must refuse with
+            # the honest message, not fail 60s later.
+            r = c.post("/api/backtests/runs", json={"kind": "run", "spec": good})
+            assert r.status_code == 422 and "chain database" in r.json()["detail"]
+
+            # The report route is the ONE token-exempt door; without a valid
+            # single-use key it must refuse, and a key must die on first use.
+            # Garbage keys (incl. non-ASCII) must 403, never 500 — this route
+            # is reachable without any token.
+            assert c.get("/api/backtests/report/1").status_code == 403
+            assert c.get("/api/backtests/report/1", params={"k": "käße"}).status_code == 403
+            mgr = state.backtests
+            key = mgr.mint_report_key(1, "report.html")
+            assert mgr.consume_report_key(1, key) == "report.html"
+            assert mgr.consume_report_key(1, key) is None, "report key reusable"
+            assert mgr.consume_report_key(1, "wrong-key") is None
+
+            # Cancel and delete are separate verbs: a Cancel racing a finished
+            # run must 409, never fall through to deleting the results
+            # (review 2026-08-03). And the runs list must carry `calib`, or
+            # the Verify-engine scorecard silently never renders.
+            mcon = __import__("backend.marketdb", fromlist=["connect_market"]) \
+                .connect_market(Path(td) / "market.db")
+            with mcon:
+                mcon.execute(
+                    "INSERT INTO backtest_runs (id, user_id, name, kind, status,"
+                    " calib, report_files) VALUES (77, 1, 'cal', 'calibration',"
+                    " 'done', '[{\"reference\": \"put\"}]', '[\"put.html\"]')")
+            mcon.close()
+            assert c.post("/api/backtests/runs/77/cancel").status_code == 409, \
+                "cancelling a finished run must refuse, not delete"
+            rows = c.get("/api/backtests/runs").json()
+            assert rows and rows[0]["calib"] == [{"reference": "put"}], \
+                "runs list dropped `calib` — the scorecard cannot render"
+            assert c.delete("/api/backtests/runs/77").status_code == 200
+            assert c.get("/api/backtests/runs").json() == []
+
+            # Bad dates are refused before a run row exists.
+            r = c.post("/api/backtests/runs",
+                       json={"kind": "run", "spec": good, "start": "not-a-date"})
+            assert r.status_code == 422 and "ISO date" in r.json()["detail"]
+        finally:
+            if old is None:
+                os.environ.pop("GRINDSTONE_DATA_DIR", None)
+            else:
+                os.environ["GRINDSTONE_DATA_DIR"] = old
+
+
+@check("backtest page: registered in every seam that must agree")
+def _backtest_page():
+    rend = CODE / "app" / "src" / "renderer" / "src"
+    urls_src = (rend / "urls.ts").read_text(encoding="utf-8")
+    assert "'backtest'" in urls_src, "urls.ts PAGES: backtest.gs would become a ticker"
+    assert "backtest: 'backtest'" in urls_src, "urls.ts PAGE_ROUTES missing backtest"
+    app_tsx = (rend / "App.tsx").read_text(encoding="utf-8")
+    assert "'backtest'" in app_tsx, \
+        "App.tsx parseRoute: the backtest route dead-ends to idle"
+    content = (rend / "modes" / "ContentApp.tsx").read_text(encoding="utf-8")
+    assert "BacktestPage" in content and "case 'backtest':" in content, \
+        "ContentApp never mounts BacktestPage"
+    tabs_src = (CODE / "app" / "src" / "main" / "tabs.ts").read_text(encoding="utf-8")
+    assert "'backtest'" in tabs_src, \
+        "main tabs.ts PAGE_NAMES: the wheel would misread backtest.gs as a ticker"
+    assert "backtest:openReport" in tabs_src, "report-open IPC not wired in main"
+    strip = (rend / "components" / "TabStrip.tsx").read_text(encoding="utf-8")
+    assert "case 'backtest':" in strip, "tab strip has no backtest icon case"
+    preload = (CODE / "app" / "src" / "preload" / "index.ts").read_text(encoding="utf-8")
+    assert "openBacktestReport" in preload, "preload bridge misses openBacktestReport"
+    main_api = (CODE / "app" / "src" / "main" / "api.ts").read_text(encoding="utf-8")
+    assert "/api/backtests/report/" in main_api and "report_key" in main_api, \
+        "main/api.ts cannot build a report URL"
+    assert "endsWith('/report-key')" in main_api, \
+        "the proxy no longer walls off report-key minting from renderers"
+    assert "shippableUrl" in tabs_src, \
+        "tab URLs ship to renderers without stripping the report key/port"
+
+    sys.path.insert(0, str(CODE))
+    from backend import search as search_mod
+    entry = next((p for p in search_mod.PAGES if p["key"] == "backtest"), None)
+    assert entry is not None and entry["ready"], "search registry misses backtest"
+
+    # The report middleware exemption is deliberate and must stay EXACTLY one
+    # route wide: a GET on the report prefix, nothing else.
+    app_py = (CODE / "backend" / "app.py").read_text(encoding="utf-8")
+    assert app_py.count("startswith(\"/api/backtests/report/\")") == 1, \
+        "the token-middleware exemption changed shape — re-review it"
+
+    from backend import marketdb
+    assert marketdb.SCHEMA_VERSION >= 3 and "backtest_runs" in marketdb._SCHEMA, \
+        "backtest_runs will never exist on already-migrated market.db files"
+    from backend import db as app_db
+    assert "backtest_presets" in app_db._SCHEMA, "backtest_presets missing from app.db"
+
+
 @check("frontend: sources present; typecheck when toolchain available")
 def _frontend():
     app_dir = CODE / "app"

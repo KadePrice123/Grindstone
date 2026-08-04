@@ -9,7 +9,7 @@ import { SettingsIcon } from '../components/icons'
 
 interface SettingSpec {
   key: string
-  kind: 'bool' | 'float' | 'choice' | 'json'
+  kind: 'bool' | 'float' | 'choice' | 'json' | 'path'
   label: string
   help: string
   default: unknown
@@ -105,6 +105,26 @@ export function SettingsPage() {
                         </option>
                       ))}
                     </select>
+                  ) : s.kind === 'path' ? (
+                    <input
+                      className="field"
+                      style={{ minWidth: 280 }}
+                      // Keyed on the stored value: a failed save reloads the
+                      // truth, and the remount discards the rejected text
+                      // instead of displaying it as if it stuck.
+                      key={`${s.key}:${String(value ?? '')}`}
+                      defaultValue={String(value ?? '')}
+                      placeholder="auto"
+                      spellCheck={false}
+                      // Commit on blur/Enter, not per keystroke — a path is
+                      // typed in one go and half a path is never valid.
+                      onBlur={(e) => {
+                        if (e.target.value !== String(value ?? '')) save(s.key, e.target.value)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                      }}
+                    />
                   ) : (
                     <div className="slider-wrap">
                       <input

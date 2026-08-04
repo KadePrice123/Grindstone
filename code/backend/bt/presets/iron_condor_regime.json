@@ -1,0 +1,77 @@
+{
+  "name": "iron_condor_regime",
+  "underlying": "SPY",
+  "capital": 100000,
+  "start": "2013-01-02",
+  "end": "2026-04-17",
+  "legs": [
+    {
+      "name": "short_put",
+      "action": "sell",
+      "right": "put",
+      "dte": 45,
+      "delta": 0.16
+    },
+    {
+      "name": "long_put",
+      "action": "buy",
+      "right": "put",
+      "width": 10,
+      "anchor": "short_put"
+    },
+    {
+      "name": "short_call",
+      "action": "sell",
+      "right": "call",
+      "dte": 45,
+      "delta": 0.16
+    },
+    {
+      "name": "long_call",
+      "action": "buy",
+      "right": "call",
+      "width": 10,
+      "anchor": "short_call"
+    }
+  ],
+  "entry": {
+    "frequency": "daily",
+    "max_active": 4,
+    "min_days_between": 5,
+    "when": "vix_rank > 25 and vix < 40 and ret_5d > -6 and above_sma_200\n"
+  },
+  "sizing": {
+    "mode": "bp_fraction",
+    "fraction": 0.08,
+    "max_contracts": 20
+  },
+  "exits": {
+    "rules": [
+      {
+        "when": "pnl_pct >= 0.50",
+        "reason": "take profit",
+        "priority": 10
+      },
+      {
+        "when": "pnl_pct <= -2.00",
+        "reason": "stop loss",
+        "priority": 10
+      },
+      {
+        "when": "abs(short_delta) >= 0.45",
+        "reason": "delta breach",
+        "priority": 8
+      },
+      {
+        "when": "dte <= 21",
+        "reason": "dte limit",
+        "priority": 5
+      },
+      {
+        "when": "vix_chg > 8 and pnl_pct < 0",
+        "reason": "vol shock",
+        "priority": 7
+      }
+    ]
+  }
+}

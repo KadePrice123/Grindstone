@@ -35,6 +35,10 @@ PAGES = [
      "ready": True},
     {"key": "charts", "title": "Charts", "words": ["charts", "chart", "compare",
      "multichart"], "ready": True},
+    # Words stay tight on purpose: ready:True pages pin hard in ranking, and
+    # a loose word list would hijack ticker queries (BT is a real ticker).
+    {"key": "backtest", "title": "Backtest", "words": ["backtest", "backtests",
+     "backtesting", "strategy", "calibration"], "ready": True},
     {"key": "settings", "title": "Settings",
      "words": ["settings", "setting", "preferences", "theme", "web"], "ready": True},
     {"key": "help", "title": "Help", "words": ["help", "guide", "manual", "docs",
@@ -69,6 +73,9 @@ HELP_TOPICS = [
                "overlay"]},
     {"section": "data", "title": "Data recording",
      "words": ["record", "recording", "jobs", "retention", "storage", "chain"]},
+    {"section": "backtest-help", "title": "Backtesting",
+     "words": ["backtest", "backtesting", "preset", "presets", "sweep", "verify",
+               "calibrate", "calibration", "condor", "spread", "delta", "dte"]},
     {"section": "settings-help", "title": "Settings explained",
      "words": ["configure", "boost", "engine", "theme", "depth"]},
     {"section": "troubleshooting", "title": "Troubleshooting",

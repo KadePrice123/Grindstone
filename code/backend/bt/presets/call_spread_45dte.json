@@ -1,0 +1,31 @@
+{
+  "name": "call_spread_45dte",
+  "underlying": "SPY",
+  "capital": 517,
+  "start": "2013-01-02",
+  "end": "2026-07-29",
+  "legs": [
+    {
+      "name": "long_call",
+      "action": "buy",
+      "right": "call",
+      "dte": 45,
+      "delta": 0.3
+    },
+    {
+      "name": "short_call",
+      "action": "sell",
+      "right": "call",
+      "dte": 45,
+      "delta": 0.15
+    }
+  ],
+  "entry": {
+    "frequency": "daily",
+    "max_active": 1
+  },
+  "exits": {
+    "dte": 21,
+    "take_profit": 0.5
+  }
+}

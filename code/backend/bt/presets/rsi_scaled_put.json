@@ -1,0 +1,64 @@
+{
+  "name": "rsi_scaled_put",
+  "underlying": "SPY",
+  "capital": 100000,
+  "start": "2013-01-02",
+  "end": "2026-04-17",
+  "legs": [
+    {
+      "name": "short_put",
+      "action": "sell",
+      "right": "put",
+      "dte": 7,
+      "delta": 0.2
+    }
+  ],
+  "params": {
+    "rsi_gate": 70,
+    "vix_ceiling": 45,
+    "oversold": 30
+  },
+  "entry": {
+    "frequency": "daily",
+    "max_active": "3 if vix >= 30 else (2 if vix >= 22 else 1)",
+    "when": "rsi_14 < rsi_gate and above_sma_200 and vix < vix_ceiling"
+  },
+  "sizing": {
+    "mode": "fixed",
+    "contracts": 2,
+    "scale": [
+      {
+        "when": "rsi(2) <= 5 and vix >= 30",
+        "factor": 4,
+        "label": "capitulation"
+      },
+      {
+        "when": "rsi(2) <= 10",
+        "factor": 3,
+        "label": "deeply oversold"
+      },
+      {
+        "when": "rsi(14) <= oversold",
+        "factor": 2,
+        "label": "oversold"
+      },
+      {
+        "when": "vix >= 28",
+        "factor": 2,
+        "label": "rich premium"
+      },
+      {
+        "when": "rsi_14 >= 65",
+        "contracts": 1,
+        "label": "extended"
+      }
+    ],
+    "max_contracts": 8,
+    "min_contracts": 1
+  },
+  "exits": {
+    "take_profit": 0.5,
+    "stop_loss": 3.0,
+    "vix_above": 40
+  }
+}

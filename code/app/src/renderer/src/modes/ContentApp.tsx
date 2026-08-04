@@ -12,6 +12,7 @@ import { Logo } from '../components/Logo'
 import { UserChip } from '../components/UserChip'
 import { Accounts } from '../pages/Accounts'
 import { ArticlePage } from '../pages/ArticlePage'
+import { BacktestPage } from '../pages/BacktestPage'
 import { DataPage } from '../pages/DataPage'
 import { ChartsPage } from '../pages/ChartsPage'
 import { HelpPage } from '../pages/HelpPage'
@@ -37,6 +38,8 @@ function meta(route: Route): { title: string; icon: string } {
       return { title: 'News', icon: 'news' }
     case 'charts':
       return { title: 'Charts', icon: 'chart' }
+    case 'backtest':
+      return { title: 'Backtest', icon: 'backtest' }
     case 'help':
       return { title: 'Help', icon: 'page' }
     case 'article':
@@ -115,6 +118,8 @@ export function ContentApp({ initial }: { initial: Route }) {
         return <NewsPage onNavigate={navigate} />
       case 'charts':
         return <ChartsPage />
+      case 'backtest':
+        return <BacktestPage />
       case 'help':
         return <HelpPage section={route.section} />
       case 'article':

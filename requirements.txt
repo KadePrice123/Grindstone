@@ -12,3 +12,9 @@ RapidFuzz==3.14.5
 # and the OHLC series, so nothing was lost by dropping the pair.
 ddgs==9.14.4
 trafilatura>=2.2,<3.0
+# Backtest engine (backend/bt/, vendored 2026-08-03). numpy is imported ONLY
+# by the runner subprocess (backend/bt_runner.py) and the engine's own tests —
+# never by the sidecar process (see backend/bt/__init__.py for why). pytest
+# runs the engine's unit suite inside the verification gate.
+numpy>=2.0,<3.0
+pytest>=8.0,<9.0

@@ -45,6 +45,17 @@ CREATE TABLE IF NOT EXISTS secrets (
     hint       TEXT NOT NULL DEFAULT '',
     UNIQUE (account_id, field)
 );
+CREATE TABLE IF NOT EXISTS backtest_presets (
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    spec        TEXT NOT NULL,
+    builtin     INTEGER NOT NULL DEFAULT 0,
+    calibration INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (user_id, name)
+);
 """
 
 

@@ -55,6 +55,19 @@ SPEC: dict[str, dict[str, Any]] = {
                 "source has for the ticker; a number caps it (faster on "
                 "intraday timeframes).",
     },
+    "backtest_options_db": {
+        "kind": "path", "default": "",
+        "label": "Backtest options database",
+        "help": "Full path to spy_options.db (multi-GB, never ships with the "
+                "app). Empty = look beside the project folder, the workspace "
+                "layout this machine already uses.",
+    },
+    "backtest_bars_db": {
+        "kind": "path", "default": "",
+        "label": "Backtest bars database",
+        "help": "Full path to spy_bars.db. Empty = look beside the project "
+                "folder.",
+    },
     # Hidden state blobs: not rendered by the generic settings page (their
     # owning UI edits them), but stored/validated through the same door.
     "multi_chart": {
@@ -74,6 +87,10 @@ def _coerce(key: str, value: Any) -> Any:
         return max(spec["min"], min(spec["max"], v))
     if spec["kind"] == "choice":
         return value if value in spec["choices"] else spec["default"]
+    if spec["kind"] == "path":
+        # A filesystem path typed by the user; bounded, never validated here —
+        # existence is the backtest status endpoint's job, honestly reported.
+        return str(value)[:1024] if isinstance(value, str) else spec["default"]
     if spec["kind"] == "json":
         # An object, bounded — this is UI state, not a data store.
         if not isinstance(value, dict) or len(json.dumps(value)) > 8192:

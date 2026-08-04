@@ -1,0 +1,31 @@
+{
+  "name": "put_spread_45dte",
+  "underlying": "SPY",
+  "capital": 4400,
+  "start": "2013-01-02",
+  "end": "2026-07-29",
+  "legs": [
+    {
+      "name": "short_put",
+      "action": "sell",
+      "right": "put",
+      "dte": 45,
+      "delta": 0.3
+    },
+    {
+      "name": "long_put",
+      "action": "buy",
+      "right": "put",
+      "dte": 45,
+      "delta": 0.15
+    }
+  ],
+  "entry": {
+    "frequency": "daily",
+    "max_active": 1
+  },
+  "exits": {
+    "dte": 21,
+    "take_profit": 0.5
+  }
+}

@@ -14,6 +14,7 @@ declare global {
       setTabMeta: (title: string, icon: string, depth: number, address: string) => void
       openTab: (route: string) => void
       openUrl: (url: string) => void
+      openBacktestReport: (runId: number, file?: string) => void
       onNav: (cb: (what: 'back' | 'home') => void) => () => void
       onRoute: (cb: (route: string) => void) => () => void
       wheelEvt: (
@@ -77,9 +78,16 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
     onAuthExpired?.()
   }
   if (res.status >= 400) {
+    const raw = (res.body as { detail?: unknown } | null)?.detail
+    // FastAPI validation errors carry detail as a list of objects; String()
+    // would render '[object Object]'.
     const detail =
-      (res.body as { detail?: string } | null)?.detail ?? `request failed (${res.status})`
-    throw new ApiError(res.status, String(detail))
+      typeof raw === 'string'
+        ? raw
+        : raw != null
+          ? JSON.stringify(raw).slice(0, 300)
+          : `request failed (${res.status})`
+    throw new ApiError(res.status, detail)
   }
   return res.body
 }
@@ -170,6 +178,76 @@ export interface DataUsage {
   chain: { underlying: string; n: number; snapshots: number; oldest: string; newest: string }[]
   news: { count: number; newest: string | null; oldest: string | null }
   db_bytes: number
+}
+
+export interface BacktestPreset {
+  id: number
+  name: string
+  spec: Record<string, unknown>
+  builtin: number
+  calibration: number
+  created_at: string
+  updated_at: string
+}
+
+export interface BacktestProgress {
+  phase?: string
+  i?: number
+  n?: number
+  pct?: number
+}
+
+export interface BacktestSummary {
+  cagr_pct?: number
+  total_return_pct?: number
+  final_net_liq?: number
+  max_drawdown_pct?: number
+  sharpe?: number
+  sortino?: number
+  win_rate_pct?: number
+  profit_factor?: number
+  trades?: number
+  avg_dit?: number
+  total_fees?: number
+  references?: number
+  [k: string]: unknown
+}
+
+export interface BacktestCalibLayer {
+  [metric: string]: number | string
+}
+
+export interface BacktestCalibRef {
+  reference: string
+  preset: string
+  summary: BacktestSummary
+  layers: Record<string, BacktestCalibLayer>
+  report: string
+}
+
+export interface BacktestRun {
+  id: number
+  preset_id: number | null
+  name: string
+  kind: 'run' | 'calibration'
+  status: 'running' | 'done' | 'error' | 'cancelled'
+  started_at: string
+  finished_at: string
+  error: string
+  summary: BacktestSummary
+  report_files: string[]
+  progress?: BacktestProgress
+  calib?: BacktestCalibRef[] | null
+  spec?: Record<string, unknown> | null
+}
+
+export interface BacktestStatus {
+  options_db: { path: string; present: boolean; size_mb: number }
+  bars_db: { path: string; present: boolean }
+  vix_csv: { present: boolean }
+  calibration: { references: string[]; mapped: string[] }
+  can_run: boolean
+  active: { id: number; progress: BacktestProgress } | null
 }
 
 export interface TestResult {

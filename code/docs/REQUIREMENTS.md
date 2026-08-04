@@ -940,8 +940,21 @@ to Releases.
   Developer decision, §12).
 - AI-initiated order **submission** (drafts only — a design decision, not a gap).
 - Fidelity order entry (impossible without an official API — revisit if one ships).
-- Backtesting engine (the workspace's research tooling already covers this;
-  revisit as a page type later).
+- ~~Backtesting engine (the workspace's research tooling already covers this;
+  revisit as a page type later).~~ **Revisited and delivered early
+  (2026-08-03)**: the workspace's calibrated SPY options backtester is now
+  vendored at `backend/bt/` (sole home — the standalone copy is retired) and
+  shipped as `backtest.gs`. Strategy specs are per-user DB presets; runs
+  execute in a killable subprocess (the sidecar never imports numpy — the
+  yfinance lesson, §7); reports open in a hardened browser tab through the one
+  deliberate token-middleware exemption (single-use 60s key, minted by
+  Electron main, the only holder of port + tokens). The three tastytrade
+  reference exports ship in-repo (`backend/bt/calibration/`) so a modified
+  engine can always be re-verified against the exact trades it is known to
+  have made from the exact data ("Verify engine"); the engine's 120
+  known-answer tests run inside the gate. The multi-GB chain databases stay
+  external (Settings-pathed, honestly reported when absent). Parameter sweeps
+  remain future work.
 
 ## 12. Open decisions for Kade
 

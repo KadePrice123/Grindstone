@@ -14,6 +14,7 @@
  */
 import { BaseWindow, Menu, WebContentsView, ipcMain, session, shell } from 'electron'
 import path from 'node:path'
+import { backtestReportUrl } from './api'
 import { log } from './log'
 
 /** Untrusted third-party pages live in their own session: no preload, no
@@ -70,6 +71,7 @@ export interface TabInfo {
  *  urls.ts PAGES — a data.gs tab must not offer "add DATA to chart". */
 const PAGE_NAMES = new Set([
   'home', 'accounts', 'data', 'settings', 'search', 'article', 'news', 'charts',
+  'backtest',
 ])
 
 /** What the gesture wheel sees of a tab. */
@@ -566,11 +568,23 @@ export class TabManager {
   }
 
   // -------------------------------------------------------------- strip io
+  /** Backtest-report URLs carry a live single-use key and the sidecar port in
+   *  their query string. Renderers must never see either (the whole point of
+   *  minting in main), so the ONE choke point where tab URLs leave this
+   *  process strips the query from report URLs before shipping. */
+  private shippableUrl(url: string | undefined): string | undefined {
+    if (url && /^http:\/\/127\.0\.0\.1:\d+\/api\/backtests\/report\//.test(url)) {
+      return url.split('?')[0]
+    }
+    return url
+  }
+
   private stripState(w: Win): StripState {
     const active = w.tabs.find((t) => t.id === w.activeId)
     return {
       tabs: w.tabs.map((t) => ({
-        id: t.id, title: t.title, icon: t.icon, kind: t.kind, url: t.url,
+        id: t.id, title: t.title, icon: t.icon, kind: t.kind,
+        url: this.shippableUrl(t.url),
       })),
       activeId: w.activeId,
       maximized: w.win.isMaximized(),
@@ -588,7 +602,7 @@ export class TabManager {
       // for platform pages.
       activeUrl: active
         ? active.kind === 'browser'
-          ? (active.url ?? '')
+          ? (this.shippableUrl(active.url) ?? '')
           : (active.address ?? 'home.gs')
         : '',
       loading: active?.kind === 'browser' ? active.view.webContents.isLoading() : false,
@@ -710,6 +724,15 @@ export class TabManager {
       if (w && !this.locked && typeof url === 'string') {
         this.newBrowserTab(w, url.slice(0, 2000))
       }
+    })
+    // the backtest page asks for a run's report: main mints the single-use
+    // key and builds the URL itself — no port, no key in any renderer
+    ipcMain.on('backtest:openReport', async (e, runId: unknown, file?: unknown) => {
+      const w = this.winFromContent(e.sender)
+      if (!w || this.locked || typeof runId !== 'number') return
+      const url = await backtestReportUrl(
+        runId, typeof file === 'string' ? file.slice(0, 200) : undefined)
+      if (url && !w.win.isDestroyed()) this.newBrowserTab(w, url)
     })
 
     // navigation: Back works for both tab kinds; Home returns to the idle page

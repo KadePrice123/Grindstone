@@ -23,6 +23,7 @@ export const HELP_SECTIONS = [
   'measuring',
   'multi-charts',
   'data',
+  'backtest-help',
   'settings-help',
   'troubleshooting',
 ] as const
@@ -315,6 +316,37 @@ const SECTIONS: Sec[] = [
           <li>Recorded bars serve your charts when they cover the request — labeled
             <em> your recorded data</em>.</li>
           <li>The page shows per-job status and total store size.</li>
+        </ul>
+      </>
+    ),
+  },
+  {
+    id: 'backtest-help',
+    title: 'Backtesting',
+    body: (
+      <>
+        <p><code>backtest.gs</code> runs the SPY options backtest engine against recorded
+          chain data. Every number it shows is <em>model-derived from end-of-day
+          snapshots</em> — labeled estimated, never broker truth.</p>
+        <ul>
+          <li><strong>Presets</strong>: strategy specs (legs, entry, exits, sizing, costs)
+            saved by name. The seeded built-ins include the three calibration references;
+            built-ins are read-only — <em>Duplicate</em> one to make it yours. The editor
+            validates as you type and names exactly what it does not recognize.</li>
+          <li><strong>Run</strong>: pick a preset (or edit a spec inline), optionally narrow
+            the date window, and <em>Run backtest</em>. Runs execute in their own process —
+            60–110 seconds for the full 13 years — and <em>Cancel</em> stops them cold.
+            One run at a time.</li>
+          <li><strong>Report</strong>: each finished run opens a full report in a browser
+            tab — equity curve, drawdown, monthly heatmap, P/L distribution and the
+            complete trade log with CSV export.</li>
+          <li><strong>Verify engine</strong>: replays the three tastytrade reference
+            backtests shipped with the app against the same data and compares fills,
+            trades and the equity curve layer by layer. If you change engine code, this
+            is how you prove it still makes the trades it is known to have made.</li>
+          <li><strong>Data</strong>: the chain database (<code>spy_options.db</code>,
+            multi-GB) does not ship with the app; the page says honestly whether it is
+            present, and Settings holds its path.</li>
         </ul>
       </>
     ),

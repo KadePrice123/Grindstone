@@ -16,17 +16,20 @@ from __future__ import annotations
 
 import datetime as dt
 import hmac
+import json
 import sqlite3
 import threading
 import time
 from contextlib import AbstractContextManager
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from . import backtests as backtests_mod
 from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
 from . import settings as settings_mod
@@ -55,6 +58,7 @@ class State:
         self.market_path = market_path
         self.universe = Universe()
         self.recorder = None  # set by main.py; tests may leave it None
+        self.backtests = None  # BacktestManager, created by create_app
         self._refresh_thread: threading.Thread | None = None
         self._refresh_lock = threading.Lock()
         self._live_news_last: dict[str, float] = {}
@@ -158,10 +162,38 @@ class JobPatch(BaseModel):
     retention_days: int | None = None
 
 
+class PresetIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    spec: dict[str, Any]
+
+
+class PresetPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    spec: dict[str, Any] | None = None
+
+
+class SpecIn(BaseModel):
+    spec: dict[str, Any]
+
+
+class RunIn(BaseModel):
+    kind: str = "run"                      # 'run' | 'calibration'
+    preset_id: int | None = None           # spec comes from a saved preset...
+    spec: dict[str, Any] | None = None     # ...or inline from the editor
+    name: str = Field(default="", max_length=64)
+    start: str | None = None               # ISO dates narrowing the window
+    end: str | None = None
+
+
 # ------------------------------------------------------------------ factory
 def create_app(state: State) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+
+    if state.backtests is None:
+        # Boot-time (single-threaded) so requests never race to create it; it
+        # also marks any run orphaned by the previous process as errored.
+        state.backtests = backtests_mod.BacktestManager(state.market_path)
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):
@@ -173,6 +205,15 @@ def create_app(state: State) -> FastAPI:
 
     @app.middleware("http")
     async def require_app_token(request: Request, call_next):
+        # THE one deliberate exemption (2026-08-03): backtest report pages
+        # open in a hardened browser tab, which cannot send custom headers.
+        # The route guards itself with a single-use 60s key minted over the
+        # authed API and carried in the query string — Electron main is the
+        # only holder of both the key and the port, so the exposure is one
+        # GET of one HTML file on loopback, once.
+        if (request.method == "GET"
+                and request.url.path.startswith("/api/backtests/report/")):
+            return await call_next(request)
         supplied = request.headers.get("x-app-token", "")
         if not hmac.compare_digest(supplied, state.boot_token):
             return JSONResponse({"detail": "missing or bad app token"}, status_code=401)
@@ -774,5 +815,285 @@ def create_app(state: State) -> FastAPI:
             return recorder_mod.Recorder(con, lambda _uid: None).usage()
         finally:
             con.close()
+
+    # ----------------------------------------------------------- backtests
+    def _bt_paths(user_id: int) -> dict[str, str]:
+        with state.db() as db:
+            return backtests_mod.engine_paths(settings_mod.get_all(db, user_id))
+
+    @app.get("/api/backtests/status")
+    def bt_status(s=Depends(current_session)) -> dict[str, Any]:
+        with state.db() as db:
+            status = backtests_mod.data_status(settings_mod.get_all(db, s.user_id))
+        status["active"] = state.backtests.active()
+        return status
+
+    @app.get("/api/backtests/vocab")
+    def bt_vocab(s=Depends(current_session)) -> dict[str, Any]:
+        return backtests_mod.vocab()
+
+    @app.post("/api/backtests/validate")
+    def bt_validate(body: SpecIn, s=Depends(current_session)) -> dict[str, Any]:
+        try:
+            return backtests_mod.validate_spec(body.spec)
+        except (backtests_mod.RuleError, ValueError) as exc:
+            # SpecError subclasses ValueError; both carry the engine's own
+            # error text (unknown keys/variables plus what IS available).
+            return {"ok": False, "error": str(exc)}
+
+    @app.get("/api/backtests/presets")
+    def bt_presets(s=Depends(current_session)) -> list[dict[str, Any]]:
+        with state.db() as db:
+            backtests_mod.seed_presets(db, s.user_id)
+            rows = db.execute(
+                "SELECT id, name, spec, builtin, calibration, created_at, updated_at"
+                " FROM backtest_presets WHERE user_id=? ORDER BY builtin DESC, id",
+                (s.user_id,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["spec"] = json.loads(d["spec"])
+            out.append(d)
+        return out
+
+    @app.post("/api/backtests/presets")
+    def bt_preset_create(body: PresetIn, s=Depends(current_session)) -> dict[str, Any]:
+        try:
+            backtests_mod.validate_spec(body.spec)
+        except (backtests_mod.RuleError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from None
+        with state.db() as db:
+            try:
+                cur = db.execute(
+                    "INSERT INTO backtest_presets (user_id, name, spec) VALUES (?,?,?)",
+                    (s.user_id, body.name, json.dumps(body.spec)),
+                )
+            except sqlite3.IntegrityError:
+                raise HTTPException(409, f"a preset named {body.name!r} exists") from None
+            return {"id": cur.lastrowid, "ok": True}
+
+    @app.patch("/api/backtests/presets/{preset_id}")
+    def bt_preset_patch(preset_id: int, body: PresetPatch,
+                        s=Depends(current_session)) -> dict[str, Any]:
+        if body.spec is not None:
+            try:
+                backtests_mod.validate_spec(body.spec)
+            except (backtests_mod.RuleError, ValueError) as exc:
+                raise HTTPException(422, str(exc)) from None
+        with state.db() as db:
+            row = db.execute(
+                "SELECT builtin FROM backtest_presets WHERE id=? AND user_id=?",
+                (preset_id, s.user_id),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, "no such preset")
+            if row["builtin"]:
+                raise HTTPException(409, "built-in preset — duplicate it to edit")
+            sets, vals = [], []
+            if body.name is not None:
+                sets.append("name=?"); vals.append(body.name)
+            if body.spec is not None:
+                sets.append("spec=?"); vals.append(json.dumps(body.spec))
+            if not sets:
+                raise HTTPException(422, "nothing to change")
+            sets.append("updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+            try:
+                db.execute(
+                    f"UPDATE backtest_presets SET {', '.join(sets)}"
+                    " WHERE id=? AND user_id=?", (*vals, preset_id, s.user_id))
+            except sqlite3.IntegrityError:
+                raise HTTPException(409, f"a preset named {body.name!r} exists") from None
+        return {"ok": True}
+
+    @app.delete("/api/backtests/presets/{preset_id}")
+    def bt_preset_delete(preset_id: int, s=Depends(current_session)) -> dict[str, Any]:
+        with state.db() as db:
+            row = db.execute(
+                "SELECT builtin FROM backtest_presets WHERE id=? AND user_id=?",
+                (preset_id, s.user_id),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, "no such preset")
+            if row["builtin"]:
+                raise HTTPException(409, "built-in preset — it stays as the reference")
+            db.execute("DELETE FROM backtest_presets WHERE id=? AND user_id=?",
+                       (preset_id, s.user_id))
+        return {"ok": True}
+
+    @app.post("/api/backtests/runs")
+    def bt_run_start(body: RunIn, s=Depends(current_session)) -> dict[str, Any]:
+        if body.kind not in ("run", "calibration"):
+            raise HTTPException(422, f"unknown kind {body.kind!r}")
+        paths = _bt_paths(s.user_id)
+        spec = None
+        name = body.name
+        for label, value in (("start", body.start), ("end", body.end)):
+            if value is not None:
+                try:
+                    dt.date.fromisoformat(value)
+                except ValueError:
+                    raise HTTPException(
+                        422, f"{label} must be an ISO date (YYYY-MM-DD), got {value!r}"
+                    ) from None
+        if body.kind == "run":
+            if body.preset_id is not None:
+                with state.db() as db:
+                    row = db.execute(
+                        "SELECT name, spec FROM backtest_presets WHERE id=? AND user_id=?",
+                        (body.preset_id, s.user_id),
+                    ).fetchone()
+                if row is None:
+                    raise HTTPException(404, "no such preset")
+                spec = json.loads(row["spec"])
+                name = name or row["name"]
+            elif body.spec is not None:
+                spec = body.spec
+            else:
+                raise HTTPException(422, "give a preset_id or an inline spec")
+            try:
+                v = backtests_mod.validate_spec(spec)
+            except (backtests_mod.RuleError, ValueError) as exc:
+                raise HTTPException(422, str(exc)) from None
+            name = name or v["name"]
+        else:
+            name = name or "engine calibration"
+            if not backtests_mod.data_status()["calibration"]["references"]:
+                raise HTTPException(422, "no calibration references found")
+        if not Path(paths["options_db"]).is_file():
+            raise HTTPException(
+                422, f"chain database not found at {paths['options_db']} — "
+                     "set its path in Settings (labeled estimated data, "
+                     "backtests need the recorded chains)")
+        try:
+            return state.backtests.start(
+                s.user_id, body.kind, spec, name,
+                body.preset_id if body.kind == "run" else None,
+                body.start, body.end, paths)
+        except backtests_mod.RunActive:
+            raise HTTPException(409, "a backtest is already running") from None
+        except backtests_mod.RunnerUnavailable:
+            raise HTTPException(
+                501, "backtests are not available in the packaged build yet"
+            ) from None
+        except RuntimeError as exc:
+            raise HTTPException(500, str(exc)) from None
+
+    @app.get("/api/backtests/runs")
+    def bt_runs(s=Depends(current_session)) -> list[dict[str, Any]]:
+        con = state.market()
+        try:
+            # calib is IN the list on purpose: the Verify-engine scorecard
+            # renders from here, and omitting it silently blanked that card
+            # (review 2026-08-03). trades/daily stay detail-only — those are
+            # the bulky columns.
+            rows = con.execute(
+                "SELECT id, preset_id, name, kind, status, started_at,"
+                " finished_at, error, summary, calib, report_files"
+                " FROM backtest_runs"
+                " WHERE user_id=? ORDER BY id DESC LIMIT 100", (s.user_id,)
+            ).fetchall()
+        finally:
+            con.close()
+        active = state.backtests.active()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["summary"] = json.loads(d["summary"])
+            d["calib"] = json.loads(d["calib"])
+            d["report_files"] = json.loads(d["report_files"])
+            if active and active["id"] == d["id"]:
+                d["progress"] = active["progress"]
+            out.append(d)
+        return out
+
+    @app.get("/api/backtests/runs/{run_id}")
+    def bt_run_get(run_id: int, s=Depends(current_session)) -> dict[str, Any]:
+        con = state.market()
+        try:
+            row = con.execute(
+                "SELECT id, preset_id, name, kind, status, started_at, finished_at,"
+                " error, summary, calib, report_files, spec FROM backtest_runs"
+                " WHERE id=? AND user_id=?", (run_id, s.user_id)
+            ).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            raise HTTPException(404, "no such run")
+        d = dict(row)
+        for k in ("summary", "calib", "report_files"):
+            d[k] = json.loads(d[k])
+        d["spec"] = json.loads(d["spec"]) if d["spec"] else None
+        active = state.backtests.active()
+        if active and active["id"] == run_id:
+            d["progress"] = active["progress"]
+        return d
+
+    @app.get("/api/backtests/runs/{run_id}/result")
+    def bt_run_result(run_id: int, s=Depends(current_session)) -> dict[str, Any]:
+        con = state.market()
+        try:
+            row = con.execute(
+                "SELECT trades, daily FROM backtest_runs WHERE id=? AND user_id=?",
+                (run_id, s.user_id),
+            ).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            raise HTTPException(404, "no such run")
+        return {"trades": json.loads(row["trades"]), "daily": json.loads(row["daily"])}
+
+    @app.post("/api/backtests/runs/{run_id}/cancel")
+    def bt_run_cancel(run_id: int, s=Depends(current_session)) -> dict[str, Any]:
+        # Cancel and delete are SEPARATE verbs on purpose: one endpoint doing
+        # cancel-else-delete meant a Cancel click racing a finishing run
+        # silently destroyed its results (review 2026-08-03).
+        if not state.backtests.cancel(run_id):
+            raise HTTPException(409, "run is not active — it already finished")
+        return {"ok": True, "cancelled": True}
+
+    @app.delete("/api/backtests/runs/{run_id}")
+    def bt_run_delete(run_id: int, s=Depends(current_session)) -> dict[str, Any]:
+        if state.backtests.is_active(run_id):
+            raise HTTPException(409, "run is active — cancel it first")
+        if not state.backtests.delete_run(run_id, s.user_id):
+            raise HTTPException(404, "no such run")
+        return {"ok": True}
+
+    @app.post("/api/backtests/runs/{run_id}/report-key")
+    def bt_report_key(run_id: int, body: dict[str, Any] | None = None,
+                      s=Depends(current_session)) -> dict[str, Any]:
+        con = state.market()
+        try:
+            row = con.execute(
+                "SELECT report_files FROM backtest_runs WHERE id=? AND user_id=?",
+                (run_id, s.user_id),
+            ).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            raise HTTPException(404, "no such run")
+        files = json.loads(row["report_files"])
+        if not files:
+            raise HTTPException(404, "run has no report")
+        wanted = (body or {}).get("file") or files[0]
+        if wanted not in files:  # whitelist — never a path from the client
+            raise HTTPException(404, "no such report file")
+        # 'report_key', never 'token': the IPC proxy scrubs token-shaped keys
+        # from every response body before the renderer sees it.
+        return {"report_key": state.backtests.mint_report_key(run_id, wanted)}
+
+    @app.get("/api/backtests/report/{run_id}")
+    def bt_report(run_id: int, k: str = "") -> FileResponse:
+        # No session dependency and no app token (middleware exemption): the
+        # single-use key IS the whole authorization, by design minted seconds
+        # earlier by Electron main over the authed API.
+        filename = state.backtests.consume_report_key(run_id, k) if k else None
+        if filename is None:
+            raise HTTPException(403, "report key missing, expired, or used")
+        path = Path(backtests_mod.engine_paths()["out_root"]) / str(run_id) / filename
+        if not path.is_file():
+            raise HTTPException(404, "report file is gone")
+        return FileResponse(path, media_type="text/html")
 
     return app

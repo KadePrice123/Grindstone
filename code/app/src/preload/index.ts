@@ -43,6 +43,12 @@ const grindstone = {
   openUrl: (url: string): void => {
     ipcRenderer.send('tab:openUrl', url)
   },
+  /** Open a backtest run's HTML report in a browser tab. Main mints the
+   *  single-use report key and builds the URL — the renderer never holds
+   *  the sidecar port or anything key-shaped. */
+  openBacktestReport: (runId: number, file?: string): void => {
+    ipcRenderer.send('backtest:openReport', runId, file)
+  },
   /** Chrome's Back/Home buttons reach the active content page through main. */
   onNav: (cb: (what: 'back' | 'home') => void): (() => void) => {
     const back = () => cb('back')

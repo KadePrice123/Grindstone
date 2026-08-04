@@ -74,6 +74,24 @@ CREATE TABLE IF NOT EXISTS rec_chain (
     volume     REAL, open_interest REAL,
     PRIMARY KEY (underlying, ts, occ_symbol)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id           INTEGER PRIMARY KEY,
+    user_id      INTEGER NOT NULL,
+    preset_id    INTEGER,
+    name         TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL CHECK (kind IN ('run','calibration')),
+    spec         TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'running'
+                 CHECK (status IN ('running','done','error','cancelled')),
+    started_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    finished_at  TEXT NOT NULL DEFAULT '',
+    error        TEXT NOT NULL DEFAULT '',
+    summary      TEXT NOT NULL DEFAULT '{}',
+    trades       TEXT NOT NULL DEFAULT '[]',
+    daily        TEXT NOT NULL DEFAULT '[]',
+    calib        TEXT NOT NULL DEFAULT 'null',
+    report_files TEXT NOT NULL DEFAULT '[]'
+);
 """
 
 
@@ -81,13 +99,15 @@ def market_path() -> Path:
     return data_dir() / "market.db"
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Additive migrations, applied in order for databases created before the
 # current SCHEMA_VERSION. Keep them idempotent-safe: the guard is
 # user_version, not try/except.
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: ("ALTER TABLE news ADD COLUMN content TEXT NOT NULL DEFAULT ''",),
+    # 3: backtest_runs — a new table, created by the _SCHEMA executescript
+    # that runs on any version mismatch; no ALTERs needed.
 }
 
 

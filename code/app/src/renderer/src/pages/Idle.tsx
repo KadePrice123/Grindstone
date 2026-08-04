@@ -1,7 +1,7 @@
 import { api, SearchResult } from '../api'
 import { Logo } from '../components/Logo'
 import { Omnibox } from '../components/Omnibox'
-import { AccountsIcon, AiIcon, ApisIcon, DataIcon, PositionsIcon } from '../components/icons'
+import { AccountsIcon, AiIcon, ApisIcon, BacktestIcon, DataIcon, PositionsIcon } from '../components/icons'
 import { classify, pageRoute } from '../urls'
 import { parseRoute, type Route } from '../App'
 
@@ -16,6 +16,7 @@ const FAVORITES: {
   { key: 'ai', label: 'AI', icon: AiIcon },
   { key: 'positions', label: 'Positions', icon: PositionsIcon },
   { key: 'data', label: 'Data', icon: DataIcon, route: { name: 'data' } },
+  { key: 'backtest', label: 'Backtest', icon: BacktestIcon, route: { name: 'backtest' } },
 ]
 
 export function Idle({

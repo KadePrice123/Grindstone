@@ -1,0 +1,44 @@
+{
+  "name": "calendar_put",
+  "underlying": "SPY",
+  "capital": 25000,
+  "start": "2015-01-02",
+  "end": "2026-04-17",
+  "legs": [
+    {
+      "name": "front",
+      "action": "sell",
+      "right": "put",
+      "dte": 30,
+      "delta": 0.3
+    },
+    {
+      "name": "back",
+      "action": "buy",
+      "right": "put",
+      "dte": 60,
+      "strike_of": "front"
+    }
+  ],
+  "entry": {
+    "frequency": "weekly",
+    "max_active": 2,
+    "when": "vix < 22"
+  },
+  "exits": {
+    "rules": [
+      {
+        "when": "dit >= 14",
+        "reason": "time exit"
+      },
+      {
+        "when": "pnl_pct >= 0.35",
+        "reason": "take profit"
+      },
+      {
+        "when": "dte <= 3",
+        "reason": "front week"
+      }
+    ]
+  }
+}

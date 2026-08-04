@@ -19,7 +19,8 @@
     "news": "assets/branding/icons/news.svg",
     "browser": "assets/branding/icons/browser.svg",
     "settings": "assets/branding/icons/settings.svg",
-    "trade": "assets/branding/icons/trade.svg"
+    "trade": "assets/branding/icons/trade.svg",
+    "backtest": "assets/branding/icons/backtest.svg"
   },
   "theme": {
     "accent": "#D98324",

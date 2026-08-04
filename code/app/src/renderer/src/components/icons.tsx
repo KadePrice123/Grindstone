@@ -118,3 +118,15 @@ export const DataIcon = () => (
     <path d="M5 12 C5 13.5 8.1 14.8 12 14.8 C15.9 14.8 19 13.5 19 12" />
   </Icon>
 )
+
+export const BacktestIcon = () => (
+  <Icon label="Backtest">
+    {/* replay arrow around candles: running history again */}
+    <path d="M4.5 12 A7.5 7.5 0 1 1 8 18.2" />
+    <path d="M4.5 8.5 V12 H8" />
+    <path d="M10 13.5 V9.5" />
+    <rect x="9" y="9.5" width="2" height="3" rx="0.5" />
+    <path d="M14 14.5 V8" />
+    <rect x="13" y="9" width="2" height="4" rx="0.5" />
+  </Icon>
+)

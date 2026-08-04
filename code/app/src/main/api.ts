@@ -145,6 +145,28 @@ export async function mainRequest<T = unknown>(
   }
 }
 
+/**
+ * Build the one-shot URL for a backtest report tab. The report route is the
+ * single header-exempt door in the backend (browser tabs cannot send
+ * X-App-Token); its guard is a 60s single-use key minted here, over the
+ * authed API, by the only process that holds the tokens and the port.
+ */
+export async function backtestReportUrl(
+  runId: number,
+  file?: string
+): Promise<string | null> {
+  const state = sidecarRef?.current
+  if (!state) return null
+  const res = await mainRequest<{ report_key?: string }>(
+    'POST',
+    `/api/backtests/runs/${runId}/report-key`,
+    file ? { file } : {}
+  )
+  const key = res.body?.report_key
+  if (res.status !== 200 || !key) return null
+  return `http://127.0.0.1:${state.port}/api/backtests/report/${runId}?k=${encodeURIComponent(key)}`
+}
+
 function frameIsOurs(frame: WebFrameMain | null): boolean {
   if (!frame) return false
   const devUrl = process.env['ELECTRON_RENDERER_URL']
@@ -207,6 +229,12 @@ export function registerApiBridge(
     const route = url.pathname.replace(/\/+$/, '')
     if (!route.startsWith('/api/')) {
       return { status: 400, body: { detail: 'bad path' } }
+    }
+    // Report keys are minted by MAIN only (backtestReportUrl): the field name
+    // survives scrub() by design, so the route itself must be walled off from
+    // renderers — otherwise any content view could mint (or burn) keys.
+    if (route.endsWith('/report-key')) {
+      return { status: 403, body: { detail: 'main-process only' } }
     }
 
     const state = sidecar.current

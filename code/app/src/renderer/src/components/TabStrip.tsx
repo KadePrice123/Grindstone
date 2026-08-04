@@ -17,6 +17,7 @@ import '../split.css'
 import { Logo } from './Logo'
 import {
   AccountsIcon,
+  BacktestIcon,
   BrowserMiniIcon,
   ChartMiniIcon,
   DataIcon,
@@ -82,6 +83,8 @@ function TabIcon({ icon }: { icon: string }) {
       return <AccountsIcon />
     case 'data':
       return <DataIcon />
+    case 'backtest':
+      return <BacktestIcon />
     case 'chart':
       return <ChartMiniIcon />
     case 'news':

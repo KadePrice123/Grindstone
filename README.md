@@ -121,5 +121,14 @@ M1 (spine) + search/data (early M4 slice) — the app boots and *works*:
   at chosen intervals with retention pruning; verified live with a 13,897-
   contract SPY chain snapshot including greeks.
 - Yahoo Finance keyless fallback (delayed, labeled) for users with no data API.
+- Backtesting (`backtest.gs`, 2026-08-03): the workspace's calibrated SPY
+  options backtest engine, vendored at `code/backend/bt/` with its 120
+  known-answer tests in the gate. Strategy presets in the DB (seeded with the
+  three tastytrade calibration references + four showcase strategies), runs in
+  a killable subprocess with live progress, full HTML reports in a tab, and a
+  "Verify engine" flow that replays the shipped reference exports against the
+  exact data — the regression harness for anyone modifying engine code. Needs
+  `spy_options.db` / `spy_bars.db` (multi-GB, not in git; path set in
+  Settings) — without them the page says so and everything else still works.
 Roadmap: REQUIREMENTS.md §10. Alpaca paper key verified working (in
 `env/alpaca.env`).

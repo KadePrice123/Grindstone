@@ -20,7 +20,7 @@ const TLD =
 
 /** Platform pages that are addressable by name. */
 const PAGES = ['home', 'accounts', 'data', 'settings', 'search', 'article', 'news',
-  'charts', 'help'] as const
+  'charts', 'help', 'backtest'] as const
 
 /**
  * Bare words that are addresses in their own right. A browser bar navigates
@@ -39,6 +39,7 @@ const PAGE_ROUTES: Record<string, string> = {
   news: 'news',
   charts: 'charts',
   help: 'help',
+  backtest: 'backtest',
 }
 
 const BARE: Record<string, string> = {
@@ -52,6 +53,8 @@ const BARE: Record<string, string> = {
   guide: 'help',
   manual: 'help',
   docs: 'help',
+  backtests: 'backtest',
+  backtesting: 'backtest',
 }
 
 /** The route key for a page from the backend's registry, or null if that

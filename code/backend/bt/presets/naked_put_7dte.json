@@ -1,0 +1,25 @@
+{
+  "name": "naked_put_7dte",
+  "underlying": "SPY",
+  "capital": 14980,
+  "start": "2013-01-02",
+  "end": "2026-07-29",
+  "legs": [
+    {
+      "name": "short_put",
+      "action": "sell",
+      "right": "put",
+      "dte": 7,
+      "delta": 0.2
+    }
+  ],
+  "entry": {
+    "frequency": "daily",
+    "max_active": 1
+  },
+  "exits": {
+    "take_profit": 0.5,
+    "stop_loss": 3.0,
+    "vix_above": 25
+  }
+}
