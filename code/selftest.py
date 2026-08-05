@@ -2858,6 +2858,115 @@ console.log(JSON.stringify(out))
     assert len(results) >= 16, f"the probe lost assertions: only {len(results)} ran"
 
 
+@check("options: leg-window filtering is exact, and no-creds is a designed state")
+def _options_chain():
+    """The chart's leg objects filter contracts by an acceptance window
+    (expiration ± DTE, strike ± $). The window bounds ride to the provider as
+    query params AND are re-applied to the parsed rows by a pure function —
+    the guard against a provider ignoring a param, and the thing this check
+    can exercise offline. The claims:
+
+      - Every bound is INCLUSIVE: a strike exactly on the zone's edge is
+        inside it, which is what the drawn rectangle says.
+      - A window reaching into the past is clamped to today and SAYS so —
+        expired contracts are absent from the snapshot, and 'no contracts
+        exist' and 'your window is yesterday' need different user reactions.
+      - No creds is available=False with a reason, HTTP 200. The e2e profile
+        has no key, so this state is rendered UI, not an error path.
+      - Malformed parameters are 422, never a fetch.
+    """
+    import datetime as _dt
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from fastapi.testclient import TestClient
+
+    from backend import options as options_mod
+    from backend.app import State, create_app
+
+    today = _dt.date.today()
+    d = lambda n: (today + _dt.timedelta(days=n)).isoformat()  # noqa: E731
+
+    rows = [
+        {"occ_symbol": "SPY..C1", "expiration": d(10), "strike": 560.0, "right": "C"},
+        {"occ_symbol": "SPY..P1", "expiration": d(10), "strike": 560.0, "right": "P"},
+        {"occ_symbol": "SPY..P2", "expiration": d(13), "strike": 555.0, "right": "P"},
+        {"occ_symbol": "SPY..P3", "expiration": d(17), "strike": 550.0, "right": "P"},
+        {"occ_symbol": "SPY..P4", "expiration": d(30), "strike": 560.0, "right": "P"},
+        {"occ_symbol": "bad-exp", "expiration": "garbage", "strike": 560.0, "right": "P"},
+        {"occ_symbol": "bad-strike", "expiration": d(10), "strike": None, "right": "P"},
+    ]
+    F = options_mod.filter_contracts
+
+    got = F(rows, _dt.date.fromisoformat(d(10)), _dt.date.fromisoformat(d(17)),
+            550.0, 560.0, "P")
+    # Window midpoint is 555, so P2 (555, distance 0) leads; P1 and P3 tie at
+    # distance 5 and the SOONER expiration wins. Order is the sort's claim.
+    assert [r["occ_symbol"] for r in got] == ["SPY..P2", "SPY..P1", "SPY..P3"], got
+    # INCLUSIVE bounds, all four edges: every one of those rows sits ON an edge
+    # (exp 10 and 17, strike 550 and 560), so an exclusive comparison anywhere
+    # drops a row this assertion names.
+    assert F(rows, _dt.date.fromisoformat(d(10)), _dt.date.fromisoformat(d(10)),
+             560.0, 560.0, "P")[0]["occ_symbol"] == "SPY..P1"
+    assert F(rows, _dt.date.fromisoformat(d(1)), _dt.date.fromisoformat(d(60)),
+             0.0, 1000.0, None).__len__() == 5, "right=None must keep both rights"
+    assert all(r["right"] == "C" for r in
+               F(rows, _dt.date.fromisoformat(d(1)), _dt.date.fromisoformat(d(60)),
+                 0.0, 1000.0, "C"))
+    # Sort: nearest the window's strike midpoint first, sooner expiry on ties.
+    wide = F(rows, _dt.date.fromisoformat(d(1)), _dt.date.fromisoformat(d(60)),
+             550.0, 570.0, "P")
+    assert wide[0]["strike"] == 560.0 and wide[0]["expiration"] == d(10), wide[0]
+    assert wide[1]["strike"] == 560.0 and wide[1]["expiration"] == d(30), wide[1]
+
+    # ---- the service policy, offline --------------------------------------
+    none_creds = options_mod.fetch(None, "spy", d(5), d(15), 500.0, 600.0, None)
+    assert none_creds["available"] is False and "key" in none_creds["reason"], none_creds
+    assert none_creds["underlying"] == "SPY", "symbol must upper-case"
+
+    past = options_mod.fetch(None, "SPY", d(-30), d(-10), 500.0, 600.0, None)
+    assert past["available"] is True and past["total"] == 0, past
+    assert "past" in past.get("reason", ""), \
+        "an all-past window must say WHY it is empty"
+
+    for name, args in {
+        "bad date": ("nope", d(5), 500.0, 600.0, None),
+        "inverted dates": (d(15), d(5), 500.0, 600.0, None),
+        "inverted strikes": (d(5), d(15), 600.0, 500.0, None),
+        "bad right": (d(5), d(15), 500.0, 600.0, "X"),
+    }.items():
+        try:
+            options_mod.fetch(None, "SPY", *args)
+            raise AssertionError(f"{name}: accepted")
+        except ValueError:
+            pass
+
+    # ---- the route ---------------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        state = State("boot-token-for-tests", db_path=Path(tmp) / "app.db")
+        client = TestClient(create_app(state), base_url="http://127.0.0.1")
+        B = {"X-App-Token": "boot-token-for-tests"}
+        token = client.post("/api/auth/setup", headers=B,
+                            json={"username": "t", "password": "longenough1"}).json()["token"]
+        A = {**B, "Authorization": f"Bearer {token}"}
+        q = {"exp_from": d(5), "exp_to": d(15),
+             "strike_from": 500, "strike_to": 600}
+
+        assert client.get("/api/symbols/SPY/options", headers=B,
+                          params=q).status_code == 401
+        r = client.get("/api/symbols/SPY/options", headers=A, params=q)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["available"] is False and body["contracts"] == [], body
+        assert client.get("/api/symbols/SPY/options", headers=A,
+                          params={**q, "exp_to": "junk"}).status_code == 422
+        assert client.get("/api/symbols/SPY/options", headers=A,
+                          params={**q, "right": "x"}).status_code == 422
+        # Bounds are REQUIRED: the unfiltered chain is ~10k rows.
+        assert client.get("/api/symbols/SPY/options", headers=A).status_code == 422, \
+            "boundless chain request was accepted — that is a 10k-row payload"
+
+
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")
 def _chart_constraints():
     """Stage 2 of the sketch-constraint work: `lock`, and nothing that needs a

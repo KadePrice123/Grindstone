@@ -31,6 +31,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import backtests as backtests_mod
 from . import chartobjects as chartobjects_mod
+from . import options as options_mod
 from . import favorites as favorites_mod
 from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
@@ -629,6 +630,23 @@ def create_app(state: State) -> FastAPI:
         for sym in syms:
             out.setdefault(sym, {"available": False, "price": None, "change_pct": None})
         return {"quotes": out}
+
+    @app.get("/api/symbols/{symbol}/options")
+    def symbol_options(symbol: str, exp_from: str, exp_to: str,
+                       strike_from: float, strike_to: float, right: str = "",
+                       s=Depends(current_session)) -> dict[str, Any]:
+        """Contracts inside one leg's acceptance window — FILTERING only, no
+        order surface. Bounds are required because the unfiltered chain is
+        ~10k rows: a caller that wants to browse widens the window, it does
+        not omit it. No creds / provider failure is available=False with the
+        reason, never a 500 — the panel renders that state."""
+        try:
+            return options_mod.fetch(
+                state.creds_for(s.user_id), symbol,
+                exp_from, exp_to, strike_from, strike_to,
+                right.upper() if right else None)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
 
     @app.get("/api/symbols/{symbol}/bars")
     def symbol_bars(symbol: str, timeframe: str = "1Day", limit: int = 0,

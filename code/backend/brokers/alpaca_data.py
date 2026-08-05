@@ -231,14 +231,35 @@ class AlpacaData:
         return parse_bars(symbol, j)
 
     def chain_snapshot(self, underlying: str, feed: str = "indicative",
-                       limit: int = 1000) -> list[dict[str, Any]]:
+                       limit: int = 1000, *,
+                       exp_gte: str | None = None, exp_lte: str | None = None,
+                       strike_gte: float | None = None, strike_lte: float | None = None,
+                       right: str | None = None) -> list[dict[str, Any]]:
         # Greeks + impliedVolatility ARE served on the free indicative feed
         # (live-verified), but are legitimately absent for 0DTE/zero-bid
         # contracts — parse_chain_snapshot keeps them optional.
+        #
+        # The filters ride to the SERVER (expiration_date_gte/lte,
+        # strike_price_gte/lte, type): a leg's acceptance window is a few
+        # hundred contracts, one page, instead of the ~10k-row full chain the
+        # recorder pulls. Callers must still filter the PARSED rows —
+        # options.filter_contracts — both as a guard against a provider
+        # ignoring a param and because that pure function is the one the gate
+        # can test offline.
         out: list[dict[str, Any]] = []
         token: str | None = None
         for _ in range(30):  # SPY carries >10k contracts; 30 pages = 30k cap
             params: dict[str, Any] = {"feed": feed, "limit": limit}
+            if exp_gte:
+                params["expiration_date_gte"] = exp_gte
+            if exp_lte:
+                params["expiration_date_lte"] = exp_lte
+            if strike_gte is not None:
+                params["strike_price_gte"] = strike_gte
+            if strike_lte is not None:
+                params["strike_price_lte"] = strike_lte
+            if right in ("C", "P"):
+                params["type"] = "call" if right == "C" else "put"
             if token:
                 params["page_token"] = token
             j = self._get(DATA_URL + f"/v1beta1/options/snapshots/{underlying}", params)
