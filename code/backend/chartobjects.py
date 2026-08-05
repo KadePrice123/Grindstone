@@ -73,6 +73,14 @@ def _time(v: Any, what: str) -> int:
     f = float(v)
     if not math.isfinite(f) or f != int(f):
         _fail(f"{what} must be whole seconds, got {v!r}")
+    # Epoch 0 is 1970 and no market data reaches it, so a non-positive time is
+    # never a real bar — it is a placeholder that escaped. moveDimension used to
+    # write `{axis:'time', at: 0}` before it knew the coordinate and then return
+    # early over the right-hand whitespace, leaving a dimension pinned to 1970:
+    # unprojectable, invisible, and once persistence landed, saved. That bug is
+    # fixed in the engine; this is the door it should never have got through.
+    if f <= 0:
+        _fail(f"{what} must be a real bar time, got {v!r}")
     return int(f)
 
 

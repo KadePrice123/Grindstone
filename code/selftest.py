@@ -2365,7 +2365,8 @@ def _chart_time():
         f"The installers pin v22.20; update node or rerun the installer.")
 
     probe = r"""
-import { TF_MINUTES, slopePerHour, ChartDraw } from './src/renderer/src/components/ChartDraw.ts'
+import { TF_MINUTES, slopePerHour, ChartDraw, chartMinutePrefix, barIndexOf }
+  from './src/renderer/src/components/ChartDraw.ts'
 const out = []
 const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail })
 
@@ -2426,6 +2427,67 @@ ok('1Day is one session, not a calendar day', TF_MINUTES['1Day'] === 390, TF_MIN
 ok('every shipped timeframe has a duration',
    ['1Min', '5Min', '15Min', '1Hour', '1Day'].every((k) => TF_MINUTES[k] > 0), '')
 
+// ---- the prefix sum that replaced the per-step loop ------------------------
+// DIFFERENTIAL test against the original implementation, inlined here. That is
+// the only honest way to check a refactor whose whole claim is "same numbers":
+// re-deriving the expected values by hand would just be a second chance to make
+// the same mistake.
+const naiveMinutes = (times, per, ia, ib) => {
+  const lo = Math.min(ia, ib), hi = Math.max(ia, ib)
+  let mins = 0
+  for (let i = lo; i < hi; i++) {
+    const gap = (times[i + 1] - times[i]) / 60
+    mins += gap > 0 && gap < per ? gap : per
+  }
+  return ib >= ia ? mins : -mins
+}
+// Built to BEND. On clean regular bars the prefix sum is exactly i*per, so a
+// well-formed series cannot tell a correct implementation from one that ignores
+// the gaps entirely. This one carries a 2-minute step (shorter than its candle
+// -- a resampled or half-session artefact) and an overnight break.
+const odd = [0, 300, 600, 720, 1020, 1020 + 17 * 3600, 1020 + 17 * 3600 + 300]
+const P = chartMinutePrefix(odd, 5)
+let agree = true
+for (let a = 0; a < odd.length; a++)
+  for (let b = 0; b < odd.length; b++)
+    if (Math.abs(P[b] - P[a] - naiveMinutes(odd, 5, a, b)) > 1e-12) agree = false
+ok('the prefix sum agrees with the loop it replaced, both directions', agree, JSON.stringify(P))
+ok('a gap SHORTER than a candle costs its real length', P[3] - P[2] === 2, P[3] - P[2])
+ok('an overnight gap still costs exactly one candle', P[5] - P[4] === 5, P[5] - P[4])
+ok('the prefix starts at zero', P[0] === 0, P[0])
+// The property the solver will rest on: on clean bars, chart time is exactly
+// proportional to bar index, which is what makes a slope constraint linear.
+const clean = Array.from({ length: 9 }, (_, i) => i * 300)
+const Pc = chartMinutePrefix(clean, 5)
+ok('on clean bars chart time is exactly proportional to bar index',
+   Pc.every((v, i) => v === i * 5), JSON.stringify(Pc))
+
+// The prefix sum belongs to the CANDLE LENGTH as much as to the bar array, and
+// caching it on array identity alone is a live trap: setKey can change the
+// timeframe while a page hands back the same array, leaving 1Hour minutes
+// describing a 5Min chart. Hourly bars discriminate, because reading them as
+// 5Min makes every 60-minute gap cost one 5-minute candle instead.
+const shared = mk(T0, 60, 5)
+const s2 = stub('X|1Hour', shared)
+const asHour = ChartDraw.prototype.chartMinutes.call(s2, sec(shared[0]), sec(shared[4]))
+s2.key = 'X|5Min' // SAME array, different candle length
+const asFive = ChartDraw.prototype.chartMinutes.call(s2, sec(shared[0]), sec(shared[4]))
+ok('the prefix sum follows a timeframe change on the same bar array',
+   asHour === 240 && asFive === 20, `${asHour} then ${asFive}`)
+
+// ---- barIndexOf reports instead of clamping --------------------------------
+// nearestBarTime pins to the first/last bar and never says so. Fine for the
+// handle it places; wrong for anything a constraint must satisfy.
+ok('an index inside the lattice resolves', barIndexOf(3.4, 10).i === 3, JSON.stringify(barIndexOf(3.4, 10)))
+const over = barIndexOf(128, 119)
+ok('running off the end REPORTS, it does not clamp',
+   over.side === 'after' && over.byBars === 10, JSON.stringify(over))
+const under = barIndexOf(-4, 119)
+ok('running off the start reports too',
+   under.side === 'before' && under.byBars === 4, JSON.stringify(under))
+ok('an empty lattice is not silently index 0',
+   barIndexOf(0, 0).side === 'before', JSON.stringify(barIndexOf(0, 0)))
+
 console.log(JSON.stringify(out))
 """
     probe_path = app_dir / ".selftest-charttime.mjs"
@@ -2440,7 +2502,7 @@ console.log(JSON.stringify(out))
     bad = [x for x in results if not x["cond"]]
     assert not bad, "chart-time arithmetic is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad)
-    assert len(results) >= 11, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 22, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart objects persist: strict store, one vocabulary, engine round-trip")
@@ -2544,6 +2606,14 @@ def _chart_persistence():
             "duplicate id": {"drawings": [{"id": "x", "kind": "hline",
                                            "points": [{"time": 1, "price": 2}]}],
                              "pins": [{"id": "x", "time": 1}]},
+            # Epoch 0 is a placeholder that escaped, never a bar. moveDimension
+            # wrote exactly this and then returned early over the right-hand
+            # whitespace, persisting a dimension pinned to 1970.
+            "epoch-0 dimension": {"measures": [
+                {"id": "m", "a": {"kind": "candle", "time": 1700000000},
+                 "b": {"kind": "candle", "time": 1700086400},
+                 "place": {"axis": "time", "at": 0}}]},
+            "negative bar time": {"pins": [{"id": "p", "time": -5}]},
         }
         for name, doc in bad_docs.items():
             r = client.put("/api/chart-objects", headers=A, json={"key": KEY, "doc": doc})

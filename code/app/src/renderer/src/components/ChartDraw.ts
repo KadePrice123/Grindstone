@@ -380,6 +380,48 @@ export function slopePerHour(dPrice: number, chartMins: number): number | null {
   return (dPrice / chartMins) * 60
 }
 
+/** Cumulative chart minutes: `out[k]` is the chart time from bar 0 to bar k.
+ *
+ *  The same arithmetic chartMinutes() summed step by step, hoisted into a prefix
+ *  sum so a span is one subtraction instead of a walk — measureRows calls it per
+ *  measure per render, and NOTES records 8435-bar charts.
+ *
+ *  It is also the coordinate in which a SLOPE is linear, which bar index is not
+ *  and epoch seconds are not. On clean regular bars every step contributes one
+ *  candle (`gap === per` fails `gap < per`), so this is exactly proportional to
+ *  bar index; it bends only where a real gap is SHORTER than a candle — half
+ *  sessions, extended-hours feeds, resampled series. Pure and exported so the
+ *  gate can check it against the loop it replaced rather than trusting it. */
+export function chartMinutePrefix(times: number[], per: number): number[] {
+  const out = new Array<number>(times.length)
+  out[0] = 0
+  for (let i = 0; i + 1 < times.length; i++) {
+    const gap = (times[i + 1] - times[i]) / 60
+    out[i + 1] = out[i] + (gap > 0 && gap < per ? gap : per)
+  }
+  return out
+}
+
+/** Where a FRACTIONAL bar index lands on the loaded lattice, or which side it
+ *  fell off and by how much.
+ *
+ *  Never clamps silently, which is the whole reason it exists beside
+ *  nearestBarTime: that one pins to ts[0]/ts[last] and never says it did. For
+ *  the handle it places, clamping is fine. For anything a constraint has to
+ *  SATISFY it is not — running out of loaded history is a validity failure the
+ *  user has to be told about ("the end needs bar 128; the chart ends at 118"),
+ *  not something to paper over with a wrong answer that looks right. */
+export function barIndexOf(
+  i: number,
+  n: number
+): { i: number } | { side: 'before' | 'after'; byBars: number } {
+  if (n <= 0) return { side: 'before', byBars: 0 }
+  const r = Math.round(i)
+  if (r < 0) return { side: 'before', byBars: -r }
+  if (r > n - 1) return { side: 'after', byBars: r - (n - 1) }
+  return { i: r }
+}
+
 interface XY {
   x: number
   y: number
@@ -548,6 +590,9 @@ export class ChartDraw {
   private barsCacheSrc: Bar[] | null = null
   private barsCacheTimes: number[] = []
   private barsCacheMap = new Map<number, number>()
+  private barsCacheMins: number[] = []
+  /** The candle length barsCacheMins was built with; null = not built. */
+  private barsCachePer: number | null = null
 
   constructor(
     key: string,
@@ -824,8 +869,7 @@ export class ChartDraw {
       time: (this.nearestBarTime(p.time) ?? p.time) as UTCTimestamp,
       price: p.price,
     }))
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   /** Removes EVERY selected object, whatever kind. One doomed set sweeps all
@@ -840,8 +884,7 @@ export class ChartDraw {
     b.measures = b.measures.filter((m) => !doomed.has(m.id))
     b.pins = b.pins.filter((p) => !doomed.has(p.id))
     this.selected = []
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   /** Deselect everything without deleting (DrawEditor's × / page escape hatch). */
@@ -859,8 +902,7 @@ export class ChartDraw {
     b.drawings = []
     this.selected = []
     this.pendingPt = null
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   /** Kept for pre-v2 callers. */
@@ -880,8 +922,7 @@ export class ChartDraw {
     b.pins = []
     this.selected = this.selected.filter((id) => !gone.has(id))
     this.pendingAnchor = null
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   /** vis:draw — hide/show everything without deleting. Placement previews
@@ -994,8 +1035,9 @@ export class ChartDraw {
       // would draw the previous symbol's lines onto this one, or touch nodes
       // that destroy() already removed.
       if (this.destroyed || this.key !== key) return
-      this.render()
-      this.emit()
+      // Through commit(): restored objects ARE a change to what is drawn, and
+      // the solver will need to run once here to colour them.
+      this.commit()
     })
   }
 
@@ -1019,6 +1061,22 @@ export class ChartDraw {
     // this.key, not a captured one: setKey() flushes BEFORE it reassigns, so
     // in both call sites this is still the key the pending edits belong to.
     if (this.store) saveNow(this.store, this.key)
+  }
+
+  /** Mutate the bucket, then paint and persist ONCE.
+   *
+   *  Every method that CHANGES WHAT IS DRAWN ends here instead of calling
+   *  render() and emit() itself. Selection, tool and visibility changes
+   *  deliberately do NOT: they still render+emit, because they change how you
+   *  are looking at the chart rather than what is on it.
+   *
+   *  The distinction is worth the seam now because the constraint solver lands
+   *  here. A solve that moves twelve drawings must fire one render and one save,
+   *  not twelve of each — and it must not run at all when you merely click
+   *  something. */
+  private commit(): void {
+    this.render()
+    this.emit()
   }
 
   private emit(): void {
@@ -1087,15 +1145,36 @@ export class ChartDraw {
     return x === null || y === null ? null : { x, y }
   }
 
-  private barsIdx(): { bars: Bar[]; times: number[]; map: Map<number, number> } | null {
+  private barsIdx(): {
+    bars: Bar[]
+    times: number[]
+    map: Map<number, number>
+    /** Cumulative chart minutes, or [] when the timeframe is unknown. */
+    mins: number[]
+  } | null {
     const arr = this.barsOpt?.()
     if (!arr || arr.length === 0) return null
     if (arr !== this.barsCacheSrc) {
       this.barsCacheSrc = arr
       this.barsCacheTimes = arr.map((b) => Math.floor(new Date(b.ts).getTime() / 1000))
       this.barsCacheMap = new Map(this.barsCacheTimes.map((t, i) => [t, i]))
+      this.barsCachePer = null // the prefix sum belongs to these times
     }
-    return { bars: arr, times: this.barsCacheTimes, map: this.barsCacheMap }
+    // Keyed on the CANDLE LENGTH as well as array identity: the prefix sum is a
+    // function of both, and setKey can change the timeframe while a page hands
+    // back the same array. Rebuilding on identity alone would leave 1Day
+    // minutes describing a 5Min chart.
+    const per = this.barMinutes()
+    if (per !== null && this.barsCachePer !== per) {
+      this.barsCacheMins = chartMinutePrefix(this.barsCacheTimes, per)
+      this.barsCachePer = per
+    }
+    return {
+      bars: arr,
+      times: this.barsCacheTimes,
+      map: this.barsCacheMap,
+      mins: this.barsCachePer === null ? [] : this.barsCacheMins,
+    }
   }
 
   private barAt(time: number): Bar | null {
@@ -1147,14 +1226,11 @@ export class ChartDraw {
     const ia = idx.map.get(a)
     const ib = idx.map.get(b)
     if (ia === undefined || ib === undefined) return null
-    const lo = Math.min(ia, ib)
-    const hi = Math.max(ia, ib)
-    let mins = 0
-    for (let i = lo; i < hi; i++) {
-      const gap = (idx.times[i + 1] - idx.times[i]) / 60
-      mins += gap > 0 && gap < per ? gap : per
-    }
-    return ib >= ia ? mins : -mins
+    // One subtraction, not a walk. The difference is signed for free, which is
+    // what the old `ib >= ia ? mins : -mins` was doing by hand.
+    const c = idx.mins
+    if (c.length !== idx.times.length) return null
+    return c[ib] - c[ia]
   }
 
   private nearestBarTime(t: number): number | null {
@@ -1640,8 +1716,7 @@ export class ChartDraw {
       points: [this.pendingPt, pt],
     })
     this.pendingPt = null
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   private clickHline(x: number, y: number, time: UTCTimestamp | null): void {
@@ -1654,8 +1729,7 @@ export class ChartDraw {
       time ?? this.timeAtX(x) ?? (idx ? (idx.times[idx.times.length - 1] as UTCTimestamp) : null)
     if (t === null) return
     this.bucket().drawings.push({ id: mkId('dw'), kind: 'hline', points: [{ time: t, price }] })
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   private clickVline(y: number, time: UTCTimestamp | null): void {
@@ -1663,8 +1737,7 @@ export class ChartDraw {
     // Price is irrelevant to the line; it remembers where the handle sits.
     const price = this.priceAtY(y) ?? 0
     this.bucket().drawings.push({ id: mkId('dw'), kind: 'vline', points: [{ time, price }] })
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   /** Add/remove one id. Shared so selection behaves identically however the
@@ -1735,6 +1808,13 @@ export class ChartDraw {
     // Cursor minus the grab offset = where the dimension should sit now.
     const x = mx - this.dimDrag.grab.x
     const y = my - this.dimDrag.grab.y
+    // DECIDE the axis here, ASSIGN it only once the coordinate for it is known.
+    // The old code wrote `{axis, at: 0}` as a placeholder and then returned
+    // early whenever timeAtX came back null — which it does over the right-hand
+    // whitespace, where there is no bar under the cursor. That left the measure
+    // locked to epoch 0: unprojectable, invisible, and, since persistence
+    // landed, SAVED that way.
+    let axis: 'time' | 'price'
     if (!m.place) {
       const A = this.resolveAnchor(m.a)
       const B = this.resolveAnchor(m.b)
@@ -1745,11 +1825,13 @@ export class ChartDraw {
       // an axis. Beyond that, the DOMINANT direction wins: 2:1 rather than
       // bare comparison, so a diagonal drag does not flicker between the two.
       if (Math.hypot(ox, oy) < CLICK_SLOP_PX * 2) return
-      if (Math.abs(ox) >= Math.abs(oy) * 2) m.place = { axis: 'time', at: 0 as UTCTimestamp }
-      else if (Math.abs(oy) >= Math.abs(ox) * 2) m.place = { axis: 'price', at: 0 }
+      if (Math.abs(ox) >= Math.abs(oy) * 2) axis = 'time'
+      else if (Math.abs(oy) >= Math.abs(ox) * 2) axis = 'price'
       else return
+    } else {
+      axis = m.place.axis
     }
-    if (m.place.axis === 'time') {
+    if (axis === 'time') {
       const t = this.timeAtX(x)
       const snapped = t === null ? null : this.nearestBarTime(t)
       if (snapped === null) return
@@ -1777,7 +1859,9 @@ export class ChartDraw {
     this.dimDrag = null
     if (commit && wasLive) {
       this.justDragged = true // swallow the click the library fires on mouseup
-      this.emit()
+      // commit(), not a bare emit(): this is where the solver's quantization
+      // pass will land, and it has to be able to repaint what it moved.
+      this.commit()
     }
   }
 
@@ -1817,8 +1901,7 @@ export class ChartDraw {
     b.measures = b.measures.filter((m) => !doomed.has(m.id))
     b.pins = b.pins.filter((p) => !doomed.has(p.id))
     this.selected = this.selected.filter((id) => !doomed.has(id))
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   private clickTrim(x: number, y: number): void {
@@ -1842,8 +1925,7 @@ export class ChartDraw {
     b.drawings = b.drawings.filter((d) => !dead.has(d.id))
     b.drawings.push(...added)
     this.selected = this.selected.filter((id) => !dead.has(id))
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   private clickMeasure(x: number, y: number, time: UTCTimestamp | null): void {
@@ -1859,8 +1941,7 @@ export class ChartDraw {
       id: mkId('ms'), a, b: snap.anchor, place: this.defaultPlace(a, snap.anchor),
     })
     this.pendingAnchor = null
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   /** The axis a new measure is born locked to, or undefined for a free one.
@@ -1906,8 +1987,7 @@ export class ChartDraw {
     const at = b.pins.findIndex((p) => p.time === time)
     if (at >= 0) b.pins.splice(at, 1)
     else b.pins.push({ id: mkId('pin'), time })
-    this.render()
-    this.emit()
+    this.commit()
   }
 
   // ---- SVG / label primitives --------------------------------------------
