@@ -1,4 +1,4 @@
-# Pickup notes — installers tested on real clean machines (2026-08-05)
+# Pickup notes — installers, then chart dimensions (2026-08-05)
 
 Newest session first. Older sections are accurate history; where they quote a
 gate count it is stale — **the gate is 41/41** as of 2026-08-05.
@@ -29,6 +29,43 @@ Every open item, in one place. Details live in the dated sections below.
 | B5 | Sweeps — engine vendored and tested, no API/UI | medium |
 | B6 | Packaged build — runner needs its own entry point in the frozen exe (501 today) | medium |
 | B7 | Timezone edge — fixed-EST fallback mislabels one hour around DST | small |
+
+**Dimensions & constraints** — SolidWorks-style, in progress 2026-08-05
+
+Shipped so far: drag-to-move (`f70e1ad`), derived chart time so a slope reads
+the same on any timeframe (`118f8ba`), axis-locked draggable dimensions
+(`576bfc3`).
+
+The settled model, which everything below builds on — **do not relitigate**:
+a dimension has the same shape as the line tools that already exist. An hline
+is one price, a vline is one time; a dimension is **two prices at one time**
+(vertical, measures a price gap) or **two times at one price** (horizontal,
+measures a span). The single shared coordinate is also the drag handle, so no
+separate offset field exists. A diagonal is a **slope**, in $ or % per hour of
+**chart time**, where chart time is counted from candles — each step
+contributes `min(real gap, one candle)`, so an overnight break costs one candle
+rather than seventeen hours. **Nothing angular is ever stored.** Degrees are
+not an input unit and not a stored one: the price scale drifts with no user
+input at all (nothing pins `rightPriceScale`), so a stored degree would go
+false while you merely scroll sideways.
+
+| # | Item | Size |
+|---|---|---|
+| D1 | **Type a value to make a dimension a driving constraint** — the core of the ask. Each constraint is one scalar equation over an affine quantity, so it is closed-form, one pass; no iterative solver needed. Detect over-definition at CREATION on a speculative copy and refuse, naming the conflict, rather than at drag time days later | medium |
+| D2 | **Drag a constrained object and the set follows** — the other half of D1. Needs blocked-drag behaviour: clamp at the last feasible position, keep the ghost tracking the cursor, paint the blocking constraint red. Never let the driver move while a constraint sits violated | medium |
+| D3 | **Ctrl-select two entities + a hotkey mints a dimension** — ctrl-click already means "add to selection", so this needs no new picking code, just a hotkey that reads `selected` and requires exactly two | small |
+| D4 | **Value entry**: a real focused `<input>` in the PAGE's float layer (reusing DrawEditor's Field contract), not in-chip digit capture — the cheap path has no backspace, no paste, no minus sign, and collides with Backspace-deletes-the-selection | small |
+| D5 | **Diagonal/slope dimension form** — the unit and its arithmetic are already shipped and gate-proven; this is the dimension *kind* plus its entry | small |
+| D6 | **Configurable hotkeys** — chart-scoped for v1. Truly app-wide means routing through main's `before-input-event` (the pattern `main/tabs.ts` uses for F12), which is a shell change, not a chart change | medium |
+| D7 | **Persistence, and it gates D1** — nothing in the drawing engine survives a reload (`sessionStore` is a module-level Map; no drawing state reaches the backend). Two lines are cheap to redraw; a set of typed constraints is not, so constraints without persistence is arguably a worse deal than a plain measurement. Kade chose a small `chart_objects(key, doc, updated)` table — NOT the settings blob, which `_coerce` caps at 8192 bytes | medium |
+| D8 | Log scale is **deferred by decision**; amend REQUIREMENTS FR-CHART-1 so it is not a silent broken promise. Under log, Δ$ and Δbars stay correct but `parallel` becomes false and $/bar stops describing the drawn line | small |
+
+Refused by design, with reasons to give in the chip rather than silent no-ops:
+perpendicular distance between two non-parallel lines (its data-space magnitude
+is √(dollars² + bars²), not a quantity, and the lines cross so it is zero
+somewhere on screen), perpendicularity as a constraint, anything touching a
+circle (`ellipsePx` is this codebase's own in-tree proof the plane is not
+isotropic), and a dimension from a drawing to itself.
 
 **Platform and tooling** (found 2026-08-05, details in this section)
 
