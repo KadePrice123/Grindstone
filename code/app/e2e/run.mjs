@@ -1281,6 +1281,78 @@ try {
   ).catch(async () => `btn=${clearedBtn} count=${await attr('data-measure-count')}`)
   check(cleared === 'ok', 'tools: clear-measures wipes the annotations', String(cleared))
 
+  // ---- axis-locked dimensions --------------------------------------------
+  // Two h-lines measured against each other used to draw a DIAGONAL between
+  // wherever the two clicks landed, and print a time row describing only the
+  // clicks. Both are artefacts of where you clicked, not facts about the
+  // lines. It should be a vertical dimension: two prices at one time.
+  await toolBtn('Clear every drawing')
+  // Assert the clean slate rather than assuming it. toolBtn returns the STRING
+  // 'missing' for a title that matches nothing, so a mistyped button is a
+  // silent no-op: the trim block's drawings stay, placeOne never sees its
+  // expected count, retries three times, and the real cause surfaces as a
+  // baffling pile of nine drawings several checks later.
+  const swept = await waitFor(
+    async () => ((await attr('data-draw-count')) === '0' ? 'ok' : null),
+    'the chart to be swept before the dimension block', 6000
+  ).catch(async () => `count=${await attr('data-draw-count')}`)
+  check(swept === 'ok', 'tools: the dimension block starts from a clean chart', String(swept))
+
+  await toolBtn('Horizontal price line')
+  const h1 = await placeOne(0.35, 0.35, '1')
+  const h2 = await placeOne(0.35, 0.60, '2')
+  await toolBtn('Measure')
+  await sleep(150)
+  await chartClick(0.30, 0.35)
+  await sleep(300)
+  await chartClick(0.70, 0.60)
+  await sleep(400)
+  // cd-ax-time can ONLY come from renderMeasure seeing place.axis === 'time',
+  // so it tells "locked vertical" apart from "drew a diagonal". A selection
+  // count could not.
+  const locked = await chartView.eval(
+    `(() => { const c = document.querySelector('.cd-chip.cd-ax-time');
+       return c ? { rows: c.childElementCount, x: Math.round(c.getBoundingClientRect().x) } : null })()`
+  )
+  check(h1 && h2 && locked !== null,
+    'tools: two h-lines measure as a VERTICAL dimension, not a diagonal',
+    `h1=${h1} h2=${h2} locked=${JSON.stringify(locked)}`)
+  // One row: the two ends share a time, so a bar-count row would describe the
+  // dimension's own placement rather than anything measured.
+  check(locked !== null && locked.rows === 1,
+    'tools: a locked dimension prints only the question it answers',
+    `rows=${locked ? locked.rows : 'n/a'}`)
+
+  // Drag the dimension sideways: its TIME moves, the h-lines do not.
+  await toolBtn('Pointer')
+  await waitFor(async () => (await attr('data-draw-tool')) === 'pointer', 'pointer armed', 5000)
+  const chipAt = await chartView.eval(
+    `(() => { const c = document.querySelector('.cd-chip.cd-ax-time'); if (!c) return null;
+       const b = c.getBoundingClientRect();
+       const h = document.querySelector('[data-draw-tool]').getBoundingClientRect();
+       return { fx: (b.x + b.width / 2 - h.x) / h.width, fy: (b.y + b.height / 2 - h.y) / h.height,
+                x: Math.round(b.x) } })()`
+  )
+  if (chipAt) await chartDrag(chipAt.fx, chipAt.fy, chipAt.fx + 0.18, chipAt.fy)
+  const afterDim = await chartView.eval(
+    `(() => { const c = document.querySelector('.cd-chip.cd-ax-time');
+       return c ? Math.round(c.getBoundingClientRect().x) : null })()`
+  )
+  check(chipAt !== null && afterDim !== null && Math.abs(afterDim - chipAt.x) > 30,
+    'tools: dragging a dimension moves the dimension',
+    `before=${chipAt ? chipAt.x : 'n/a'} after=${afterDim}`)
+  // Still vertical, and the measured lines are untouched — a dimension drag
+  // moves the dimension, never what it measures.
+  const stillLocked = await chartView.eval(`document.querySelectorAll('.cd-chip.cd-ax-time').length`)
+  const intact = await attr('data-draw-count')
+  check(stillLocked === 1 && intact === '2',
+    'tools: the drag kept it vertical and left the measured lines alone',
+    `locked=${stillLocked} drawings=${intact}`)
+
+  await toolBtn('Clear all measurements')
+  await toolBtn('Clear every drawing')
+  await sleep(250)
+
   // Visibility toggle reflects into the wheel-context flags.
   await toolBtn('Hide drawings')
   const visFlag = await waitFor(

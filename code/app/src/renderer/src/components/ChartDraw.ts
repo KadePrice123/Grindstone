@@ -128,10 +128,38 @@ export type MeasureAnchor =
   | { kind: 'line'; drawingId: string; u: number; time: UTCTimestamp; price: number }
   | { kind: 'free'; time: UTCTimestamp; price: number }
 
+/** Where an axis-locked dimension sits, and which axis it is locked to.
+ *
+ *  This is the transpose of the line tools that already exist: an hline is one
+ *  PRICE (its time only places the handle), a vline is one TIME. A dimension is
+ *  the same shape — two prices at one time, or two times at one price:
+ *
+ *    axis 'time'   VERTICAL at that bar. Ends are the two anchors' PRICES, so
+ *                  it measures a price gap. Witness lines run horizontally.
+ *    axis 'price'  HORIZONTAL at that price. Ends are the two anchors' TIMES,
+ *                  so it measures a span. Witness lines run vertically.
+ *    absent        the free diagonal — exactly today's anchor-to-anchor line.
+ *
+ *  `at` is the SINGLE SHARED COORDINATE, and it is also the drag handle: the
+ *  AutoCAD witness offset needs no separate field because the shared coordinate
+ *  already is it. Storing a full Pt would duplicate a number the anchors own,
+ *  and that copy would be a lie the next time the measured line is dragged.
+ *
+ *  Nothing angular is stored anywhere, so this cannot rot under zoom, pan or
+ *  autoscale drift — a vertical line is a fixed time and a horizontal one a
+ *  fixed price, whatever the pixels are doing. */
+export type MeasurePlace =
+  | { axis: 'time'; at: UTCTimestamp }
+  | { axis: 'price'; at: number }
+
 export interface Measure {
   id: string
   a: MeasureAnchor
   b: MeasureAnchor
+  /** Absent = the free diagonal. Present = axis-locked, and `at` is where the
+   *  dimension line sits. Optional so every existing measure keeps working and
+   *  the freehand mode survives untouched. */
+  place?: MeasurePlace
 }
 
 /** A pinned inspect readout: the bar keeps its identity, OHLC resolves live. */
@@ -392,6 +420,19 @@ export class ChartDraw {
    *  in handleClick does not cover it (a 2px drag still moved something), so a
    *  real drag says so explicitly and the next click is swallowed. */
   private justDragged = false
+  /** Dragging a DIMENSION (the measure), not the things it measures.
+   *  `grab` is the cursor-minus-dimension offset captured at mousedown. It is
+   *  not optional polish: the chip handle sits ~25-30px ABOVE the dimension
+   *  line it belongs to, so driving `at` straight from the cursor would
+   *  teleport the dimension up to meet the pointer on the first live frame —
+   *  the same reason the drawing drag snapshots `orig` rather than tracking
+   *  raw coordinates. */
+  private dimDrag: {
+    id: string
+    from: XY
+    grab: XY
+    live: boolean
+  } | null = null
   private teardown: (() => void)[] = []
 
   // bars index cache, keyed by array identity — pages hand the same array
@@ -496,7 +537,24 @@ export class ChartDraw {
       // means "extend the selection", never "move it".
       if (e.button !== 0 || this.tool !== 'pointer' || this.downAdditive) return
       const hit = this.hitAny(at.x, at.y)
-      if (!hit || hit.kind !== 'drawing') return // measures/pins move in a later stage
+      // A pin's position IS its bar, so "dragging" one would mean re-pinning it
+      // somewhere else — deliberately not a gesture.
+      if (!hit || hit.kind === 'pin') return
+      if (hit.kind === 'measure') {
+        // Capture where the dimension line sits RIGHT NOW so the drag moves it
+        // by a delta instead of snapping it under the cursor.
+        const cur = this.dimAnchorPx(hit.measure)
+        this.dimDrag = {
+          id: hit.id,
+          from: at,
+          grab: cur ? { x: at.x - cur.x, y: at.y - cur.y } : { x: 0, y: 0 },
+          live: false,
+        }
+        try {
+          this.chart.applyOptions({ handleScroll: false, handleScale: false })
+        } catch { /* see below */ }
+        return
+      }
       // Grabbing something already selected moves the WHOLE selection - the
       // same rule clickDelete uses, so "what will this act on" has one answer.
       const b = this.bucket()
@@ -524,17 +582,19 @@ export class ChartDraw {
     // price scale) must still track and still commit, or the drawing sticks to
     // the cursor after the button is already up.
     const onDragMove = (e: MouseEvent) => {
-      if (!this.drag) return
+      const g = this.drag ?? this.dimDrag
+      if (!g) return
       const r = this.host.getBoundingClientRect()
       const x = e.clientX - r.left
       const y = e.clientY - r.top
-      const dx = x - this.drag.from.x
-      const dy = y - this.drag.from.y
-      if (!this.drag.live) {
+      const dx = x - g.from.x
+      const dy = y - g.from.y
+      if (!g.live) {
         if (Math.hypot(dx, dy) <= CLICK_SLOP_PX) return // still a click
-        this.drag.live = true
+        g.live = true
       }
-      this.moveDragged(dx, dy)
+      if (this.drag) this.moveDragged(dx, dy)
+      else this.moveDimension(x, y)
     }
     const onDragUp = () => this.endDrag(true)
     window.addEventListener('mousemove', onDragMove)
@@ -1453,18 +1513,75 @@ export class ChartDraw {
     if (moved) this.render()
   }
 
+  /** Where the dimension line currently sits in pixels — its midpoint for a
+   *  locked one, the anchor midpoint for a free one. The grab reference. */
+  private dimAnchorPx(m: Measure): XY | null {
+    const A = this.resolveAnchor(m.a)
+    const B = this.resolveAnchor(m.b)
+    if (!A || !B) return null
+    const seg = this.dimSeg(m, A, B)
+    if (!seg) return null
+    return { x: (seg.a.x + seg.b.x) / 2, y: (seg.a.y + seg.b.y) / 2 }
+  }
+
+  /** Move the DIMENSION. Never its anchors: the measured things stay exactly
+   *  where they are, which is the whole promise of a CAD dimension.
+   *
+   *  Only the shared coordinate changes — the time of a vertical dimension, the
+   *  price of a horizontal one — because that coordinate IS the position.
+   *  A free (unlocked) measure has no shared coordinate to move, so dragging it
+   *  LOCKS it: pull sideways and it becomes a vertical price dimension, pull up
+   *  or down and it becomes a horizontal span. That is the "snap when near
+   *  vertical" gesture, and judging it in pixels is legitimate here because it
+   *  is a live gesture, not a stored quantity — what gets stored is a time or a
+   *  price, either way. */
+  private moveDimension(mx: number, my: number): void {
+    if (!this.dimDrag) return
+    const m = this.bucket().measures.find((v) => v.id === this.dimDrag!.id)
+    if (!m) return
+    // Cursor minus the grab offset = where the dimension should sit now.
+    const x = mx - this.dimDrag.grab.x
+    const y = my - this.dimDrag.grab.y
+    if (!m.place) {
+      const A = this.resolveAnchor(m.a)
+      const B = this.resolveAnchor(m.b)
+      if (!A || !B) return
+      const ox = x - (A.x + B.x) / 2
+      const oy = y - (A.y + B.y) / 2
+      // Near the middle it stays free, so a nudge does not silently commit to
+      // an axis. Beyond that, the DOMINANT direction wins: 2:1 rather than
+      // bare comparison, so a diagonal drag does not flicker between the two.
+      if (Math.hypot(ox, oy) < CLICK_SLOP_PX * 2) return
+      if (Math.abs(ox) >= Math.abs(oy) * 2) m.place = { axis: 'time', at: 0 as UTCTimestamp }
+      else if (Math.abs(oy) >= Math.abs(ox) * 2) m.place = { axis: 'price', at: 0 }
+      else return
+    }
+    if (m.place.axis === 'time') {
+      const t = this.timeAtX(x)
+      const snapped = t === null ? null : this.nearestBarTime(t)
+      if (snapped === null) return
+      m.place = { axis: 'time', at: snapped as UTCTimestamp }
+    } else {
+      const p = this.priceAtY(y)
+      if (p === null) return
+      m.place = { axis: 'price', at: p }
+    }
+    this.render()
+  }
+
   /** End a drag. `commit` distinguishes mouseup from a fresh mousedown that
    *  supersedes an abandoned one. Pan/zoom is always restored - leaving the
    *  chart unpannable because a drag ended oddly would be far worse than a
    *  drawing landing a pixel out. */
   private endDrag(commit: boolean): void {
-    const wasLive = this.drag?.live === true
-    if (this.drag) {
+    const wasLive = this.drag?.live === true || this.dimDrag?.live === true
+    if (this.drag || this.dimDrag) {
       try {
         this.chart.applyOptions({ handleScroll: true, handleScale: true })
       } catch { /* see onDown */ }
     }
     this.drag = null
+    this.dimDrag = null
     if (commit && wasLive) {
       this.justDragged = true // swallow the click the library fires on mouseup
       this.emit()
@@ -1544,10 +1661,48 @@ export class ChartDraw {
       this.render()
       return
     }
-    this.bucket().measures.push({ id: mkId('ms'), a: this.pendingAnchor, b: snap.anchor })
+    const a = this.pendingAnchor
+    this.bucket().measures.push({
+      id: mkId('ms'), a, b: snap.anchor, place: this.defaultPlace(a, snap.anchor),
+    })
     this.pendingAnchor = null
     this.render()
     this.emit()
+  }
+
+  /** The axis a new measure is born locked to, or undefined for a free one.
+   *
+   *  Decided in DATA space, never in pixels. A pixel threshold looks tempting
+   *  and is wrong here: the default chart depth is "all", which puts ~2,700
+   *  bars in ~900px, so ten pixels spans about thirty bars and nearly every
+   *  measure would auto-lock at birth and lose its bar count.
+   *
+   *  Two h-lines are the case Kade described: "how far apart are these?" is a
+   *  price question, so the dimension stands vertically between them. Until
+   *  now that pair drew a DIAGONAL between wherever the two clicks landed, and
+   *  printed a time row describing only the clicks — both artefacts of the
+   *  click positions rather than facts about the lines. */
+  private defaultPlace(a: MeasureAnchor, b: MeasureAnchor): MeasurePlace | undefined {
+    const dA = a.kind === 'line' ? this.bucket().drawings.find((d) => d.id === a.drawingId) : null
+    const dB = b.kind === 'line' ? this.bucket().drawings.find((d) => d.id === b.drawingId) : null
+    // Through resolveAnchor rather than the anchor fields: an anchor's own
+    // time/price is documented as the snap-moment SNAPSHOT kept as a fallback
+    // for a deleted drawing, and only 'line'/'free' carry a price at all.
+    const A = this.resolveAnchor(a)
+    const B = this.resolveAnchor(b)
+    if (!A || !B) return undefined
+    if (dA?.kind === 'hline' && dB?.kind === 'hline') {
+      // Midway between the two clicks: the user's own indication of where they
+      // were looking, and draggable from there.
+      const t = this.nearestBarTime(((A.time as number) + (B.time as number)) / 2)
+      if (t !== null) return { axis: 'time', at: t as UTCTimestamp }
+    }
+    if (dA?.kind === 'vline' && dB?.kind === 'vline') {
+      // The mirror: two v-lines are a "how long between these?" question, so
+      // the dimension lies horizontally across them.
+      return { axis: 'price', at: (A.price + B.price) / 2 }
+    }
+    return undefined
   }
 
   private clickInspect(time: UTCTimestamp | null): void {
@@ -1733,13 +1888,63 @@ export class ChartDraw {
     }
   }
 
+  /** The dimension's drawn segment, plus the witness lines that tie it back to
+   *  what it measures. Free (no place) = the anchors themselves, i.e. exactly
+   *  today's diagonal, with no witnesses.
+   *
+   *  Locked to 'time': both ends share x = xForTime(at) and keep their own
+   *  prices — two prices at one time. Locked to 'price': both ends share
+   *  y = yForPrice(at) and keep their own times. That IS the whole geometry;
+   *  there is no angle in it. */
+  private dimSeg(
+    m: Measure,
+    A: ResolvedAnchor,
+    B: ResolvedAnchor
+  ): { a: XY; b: XY; wit: [XY, XY][] } | null {
+    if (!m.place) return { a: { x: A.x, y: A.y }, b: { x: B.x, y: B.y }, wit: [] }
+    if (m.place.axis === 'time') {
+      const x = this.xForTime(m.place.at)
+      // Unprojectable (scrolled off, or the anchoring symbol was hidden on the
+      // multi-chart page): HIDE it, the way resolveAnchor hides an unresolvable
+      // measure. Falling back to the anchor-to-anchor diagonal would redraw the
+      // exact defect this exists to fix, while the chip kept printing the
+      // locked, price-only reading — geometry saying one thing and the label
+      // another is worse than a measure that waits for the range to come back.
+      if (x === null) return null
+      return {
+        a: { x, y: A.y },
+        b: { x, y: B.y },
+        wit: [
+          [{ x: A.x, y: A.y }, { x, y: A.y }],
+          [{ x: B.x, y: B.y }, { x, y: B.y }],
+        ],
+      }
+    }
+    const y = this.yForPrice(m.place.at)
+    if (y === null) return null
+    return {
+      a: { x: A.x, y },
+      b: { x: B.x, y },
+      wit: [
+        [{ x: A.x, y: A.y }, { x: A.x, y }],
+        [{ x: B.x, y: B.y }, { x: B.x, y }],
+      ],
+    }
+  }
+
   /** Overlay-only emphasis for a snapped line during measure hover. */
   private highlightDrawing(pane: { width: number; height: number }, d: Drawing): void {
     const seg = this.hitSegPx(d, pane)
     if (seg) this.line(seg.a, seg.b, HALO, 8)
   }
 
-  private measureRows(aKind: string, bKind: string, A: ResolvedAnchor, B: ResolvedAnchor): ChipRow[] {
+  private measureRows(
+    aKind: string,
+    bKind: string,
+    A: ResolvedAnchor,
+    B: ResolvedAnchor,
+    place?: MeasurePlace
+  ): ChipRow[] {
     const dp = B.price - A.price
     let priceTxt: string
     if (this.percentMode()) {
@@ -1772,6 +1977,20 @@ export class ChartDraw {
           }
     const withSlope = (rows: ChipRow[]): ChipRow[] =>
       slopeRow === null ? rows : [...rows, slopeRow]
+    // An axis-locked dimension answers ONE question, and printing the other
+    // number would be printing a property of the dimension's own placement
+    // rather than of anything measured. A vertical dimension's two ends share
+    // a time, so "0 bars" says nothing; a horizontal one's ends share a price,
+    // so the price delta is always zero. Drop the dead row, and drop the slope
+    // with it — a locked dimension has no slope, by construction.
+    if (place?.axis === 'time') {
+      priceRow.cls = 'em'
+      return [priceRow]
+    }
+    if (place?.axis === 'price') {
+      timeRow.cls = 'em'
+      return [timeRow]
+    }
     if (aKind === 'candle' && bKind === 'candle') {
       timeRow.cls = 'em' // candle↔candle is a how-long question
       return withSlope([timeRow, priceRow])
@@ -1804,13 +2023,21 @@ export class ChartDraw {
     const hot = !liveB && !picked && this.hoverId === m.id
     const ink = picked || hot ? STROKE : MEASURE_STROKE
     const wide = picked ? 2 : 1.25
-    this.line(A, B, ink, wide, true)
-    // Dimension end ticks, perpendicular to the connector.
-    const len = Math.hypot(B.x - A.x, B.y - A.y)
+    // Where the dimension LINE goes, which is not necessarily between the
+    // anchors: an axis-locked one stands off at its own time or price, joined
+    // back to what it measures by witness lines. The in-progress preview is
+    // always the free diagonal — you cannot stand off from a point you have
+    // not placed yet.
+    const seg = liveB ? { a: A as XY, b: B as XY, wit: [] as [XY, XY][] } : this.dimSeg(m, A, B)
+    if (!seg) return // locked somewhere unprojectable — wait for the range
+    for (const [w0, w1] of seg.wit) this.line(w0, w1, MEASURE_STROKE, 0.75, true)
+    this.line(seg.a, seg.b, ink, wide, true)
+    // Dimension end ticks, perpendicular to the dimension line itself.
+    const len = Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y)
     if (len > 1) {
-      const px = -(B.y - A.y) / len
-      const py = (B.x - A.x) / len
-      for (const e of [A, B]) {
+      const px = -(seg.b.y - seg.a.y) / len
+      const py = (seg.b.x - seg.a.x) / len
+      for (const e of [seg.a, seg.b]) {
         this.line(
           { x: e.x - px * 5, y: e.y - py * 5 },
           { x: e.x + px * 5, y: e.y + py * 5 },
@@ -1819,12 +2046,25 @@ export class ChartDraw {
         )
       }
     }
+    // Dots stay on the ANCHORS — they mark what is being measured, which is
+    // the thing a witness line exists to keep visible once the dimension has
+    // been dragged away from it.
     this.el('circle', { cx: A.x, cy: A.y, r: 2, fill: ink })
     this.el('circle', { cx: B.x, cy: B.y, r: 2, fill: ink })
-    const rows = this.measureRows(m.a.kind, liveB ? liveB.anchor.kind : m.b.kind, A, B)
+    const rows = this.measureRows(
+      m.a.kind, liveB ? liveB.anchor.kind : m.b.kind, A, B, liveB ? undefined : m.place
+    )
+    // On the DIMENSION line's midpoint, not the anchors': the chip is the grab
+    // handle, so it has to travel with the thing being grabbed. For a free
+    // measure the two are the same point.
+    // The axis rides on the chip as a class so it is observable from the DOM.
+    // Without it a test can only read a selection COUNT, which cannot tell a
+    // locked dimension from a free one — and "is it actually locked" is the
+    // whole claim being made here.
+    const axisCls = m.place ? ` cd-ax-${m.place.axis}` : ''
     const box = this.chip(
-      (A.x + B.x) / 2, (A.y + B.y) / 2 - 10, rows,
-      picked ? 'cd-sel' : hot ? 'cd-hot' : '', 0.5, 1, pane
+      (seg.a.x + seg.b.x) / 2, (seg.a.y + seg.b.y) / 2 - 10, rows,
+      `${picked ? 'cd-sel' : hot ? 'cd-hot' : ''}${liveB ? '' : axisCls}`.trim(), 0.5, 1, pane
     )
     // The chip IS the measurement's handle — it is what the eye reads as the
     // object, so it is what a click must resolve to. Only for a REAL stored
