@@ -32,6 +32,12 @@ DOC_VERSION = 1
 DRAW_KINDS = ("trend", "hline", "vline", "circle")
 ANCHOR_KINDS = ("candle", "line", "free")
 PLACE_AXES = ("time", "price")
+# Deliberately one kind. The relations that need a solver ('on', 'coincident',
+# 'samePrice', 'sameTime') widen this tuple and ChartDraw.ts's union in the SAME
+# commit as the solver that can honour them — accepting a constraint the engine
+# silently ignores is a worse lie than not offering it.
+CONSTRAINT_KINDS = ("lock",)
+ENTITY_PARTS = ("line", "a", "b")
 
 # How many points each kind carries. trend/circle are two-point (circle is
 # centre + edge); hline/vline are one — the line IS one coordinate and the
@@ -199,8 +205,34 @@ def validate(doc: Any) -> dict[str, Any]:
         pid = _id(p.get("id"), "pin", seen)
         pins.append({"id": pid, "time": _time(p.get("time"), f"pin {pid}.time")})
 
+    # Constraints reference drawings by id, so unlike every other collection
+    # they can DANGLE. The engine prunes on every commit; this refuses a dangling
+    # reference at the door too, because a lock pointing at a deleted drawing is
+    # invisible, unremovable through the UI, and still counts against the degrees
+    # of freedom the user is shown.
+    known = {d["id"] for d in drawings}
+    constraints: list[dict[str, Any]] = []
+    for c in _list(doc, "constraints"):
+        if not isinstance(c, dict):
+            _fail("each constraint must be an object")
+        kind = c.get("kind")
+        if kind not in CONSTRAINT_KINDS:
+            _fail(f"unknown constraint kind {kind!r}")
+        cid = _id(c.get("id"), f"constraint {kind}", seen)
+        ref = c.get("a")
+        if not isinstance(ref, dict):
+            _fail(f"constraint {cid}: 'a' must be an entity reference")
+        target = ref.get("id")
+        part = ref.get("part")
+        if part not in ENTITY_PARTS:
+            _fail(f"constraint {cid}: unknown entity part {part!r}")
+        if not isinstance(target, str) or target not in known:
+            _fail(f"constraint {cid}: names drawing {target!r}, which is not in this document")
+        constraints.append({"id": cid, "kind": kind,
+                            "a": {"id": target, "part": part}})
+
     clean = {"version": DOC_VERSION, "drawings": drawings,
-             "measures": measures, "pins": pins}
+             "measures": measures, "pins": pins, "constraints": constraints}
     size = len(json.dumps(clean))
     if size > MAX_DOC_BYTES:
         _fail(f"chart document is {size} bytes, over the {MAX_DOC_BYTES} limit")
@@ -208,7 +240,8 @@ def validate(doc: Any) -> dict[str, Any]:
 
 
 def empty_doc() -> dict[str, Any]:
-    return {"version": DOC_VERSION, "drawings": [], "measures": [], "pins": []}
+    return {"version": DOC_VERSION, "drawings": [], "measures": [],
+            "pins": [], "constraints": []}
 
 
 def clean_key(key: Any) -> str:
@@ -218,7 +251,13 @@ def clean_key(key: Any) -> str:
 
 
 def is_empty(doc: dict[str, Any]) -> bool:
-    return not (doc["drawings"] or doc["measures"] or doc["pins"])
+    # The constraints term is UNREACHABLE while validate() refuses a dangling
+    # reference: a constraint must name a drawing in the same document, so a
+    # non-empty constraints list implies a non-empty drawings list. Kept as the
+    # belt to that pair of braces, and named here so nobody "simplifies" it
+    # without noticing it is load-bearing the moment that rule relaxes.
+    return not (doc["drawings"] or doc["measures"] or doc["pins"]
+                or doc["constraints"])
 
 
 def get(db: sqlite3.Connection, user_id: int, key: str) -> dict[str, Any]:

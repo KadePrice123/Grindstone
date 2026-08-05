@@ -21,6 +21,19 @@
 .draw-save-err {
   color: var(--loss);
 }
+/* A refused constraint reads as a refusal, not as an error: the engine did
+   exactly what it should, it just could not do what was asked. */
+.draw-issue {
+  color: var(--warn, var(--loss));
+}
+/* Sketch status. Fully defined is the GOOD state, so it is the one that gets
+   the accent -- CAD colours fully-defined geometry to say "this is finished". */
+.draw-dof {
+  color: var(--text-dim);
+}
+.draw-dof-fixed {
+  color: var(--accent);
+}
 
 .mc-legend {
   display: flex;

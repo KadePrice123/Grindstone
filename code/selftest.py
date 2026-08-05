@@ -2664,6 +2664,17 @@ def _chart_persistence():
         f"backend {sorted(co.ANCHOR_KINDS)}")
     assert axes == set(co.PLACE_AXES), (
         f"dimension axes drifted: engine {sorted(axes)} vs backend {sorted(co.PLACE_AXES)}")
+
+    ckinds = set(re.findall(
+        r"'(\w+)'", _block(r"export type ConstraintKind =([^\n]+)", "ConstraintKind")))
+    parts = set(re.findall(
+        r"'(\w+)'", _block(r"export type EntityPart =([^\n]+)", "EntityPart")))
+    assert ckinds == set(co.CONSTRAINT_KINDS), (
+        f"constraint vocabulary drifted: engine {sorted(ckinds)} vs backend "
+        f"{sorted(co.CONSTRAINT_KINDS)} — the backend would accept a constraint "
+        "the engine ignores, or refuse one it can honour")
+    assert parts == set(co.ENTITY_PARTS), (
+        f"entity parts drifted: engine {sorted(parts)} vs backend {sorted(co.ENTITY_PARTS)}")
     assert set(co.POINTS_FOR) == set(co.DRAW_KINDS), \
         "a DrawKind has no declared point count in chartobjects.POINTS_FOR"
 
@@ -2845,6 +2856,233 @@ console.log(JSON.stringify(out))
     assert not bad, "the drawing engine's persistence is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad)
     assert len(results) >= 16, f"the probe lost assertions: only {len(results)} ran"
+
+
+@check("chart constraints: lock removes DOF exactly, and says why it will not move")
+def _chart_constraints():
+    """Stage 2 of the sketch-constraint work: `lock`, and nothing that needs a
+    solver. The claims worth pinning down are all about EXACTNESS and HONESTY:
+
+      - DOF is counted, not estimated. A handle coordinate must never enter the
+        count — an hline's time and a vline's price only place the grab handle,
+        and if they were variables nothing could ever reach 'fully defined' and
+        the whole status signal would be dead.
+      - A second lock on one coordinate adds no information, and is refused by
+        an O(1) occupancy test rather than discovered numerically. Refusing it
+        matters twice over: DOF stays exact, and the user is told.
+      - A locked drawing does not move, and the refusal reaches the page. A
+        lock that let a drag start and then snapped back would read as jitter.
+      - A constraint naming a deleted drawing DANGLES. It is invisible, still
+        counts against DOF, and no other collection has this failure mode.
+    """
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from fastapi.testclient import TestClient
+
+    from backend import chartobjects as co
+    from backend.app import State, create_app
+
+    KEY = "SPY|1Day"
+
+    # -- 1. the store keeps constraints, and refuses a dangling one ----------
+    with tempfile.TemporaryDirectory() as tmp:
+        state = State("boot-token-for-tests", db_path=Path(tmp) / "app.db")
+        client = TestClient(create_app(state), base_url="http://127.0.0.1")
+        B = {"X-App-Token": "boot-token-for-tests"}
+        token = client.post("/api/auth/setup", headers=B,
+                            json={"username": "t", "password": "longenough1"}).json()["token"]
+        A = {**B, "Authorization": f"Bearer {token}"}
+
+        doc = {
+            "drawings": [
+                {"id": "dw1", "kind": "hline", "points": [{"time": 1700000000, "price": 600}]},
+                {"id": "dw2", "kind": "trend", "points": [
+                    {"time": 1700000000, "price": 600}, {"time": 1700086400, "price": 604}]},
+            ],
+            "constraints": [{"id": "cn3", "kind": "lock", "a": {"id": "dw1", "part": "line"}}],
+        }
+        r = client.put("/api/chart-objects", headers=A, json={"key": KEY, "doc": doc})
+        assert r.status_code == 200, r.text
+        back = client.get("/api/chart-objects", headers=A, params={"key": KEY}).json()["doc"]
+        assert back["constraints"] == [
+            {"id": "cn3", "kind": "lock", "a": {"id": "dw1", "part": "line"}}], back
+        assert len(back["drawings"]) == 2
+
+        # NOT asserted here: "a constraints-only document is not empty". It is
+        # unreachable — a constraint must name a drawing in the same document,
+        # so constraints imply drawings and the assertion would pass whatever
+        # is_empty did with them. The rule that makes it unreachable is the
+        # dangling-reference refusal below, which IS tested.
+        assert not co.is_empty(back)
+
+        bad = {
+            "dangling reference": {**doc, "constraints": [
+                {"id": "cn4", "kind": "lock", "a": {"id": "nope", "part": "line"}}]},
+            "unknown constraint kind": {**doc, "constraints": [
+                {"id": "cn4", "kind": "parallel", "a": {"id": "dw1", "part": "line"}}]},
+            "unknown entity part": {**doc, "constraints": [
+                {"id": "cn4", "kind": "lock", "a": {"id": "dw1", "part": "middle"}}]},
+            "constraint id collides with a drawing": {**doc, "constraints": [
+                {"id": "dw1", "kind": "lock", "a": {"id": "dw1", "part": "line"}}]},
+        }
+        for name, d in bad.items():
+            rr = client.put("/api/chart-objects", headers=A, json={"key": KEY, "doc": d})
+            assert rr.status_code == 422, f"{name}: expected 422, got {rr.status_code} {rr.text[:160]}"
+
+    # -- 2. the seams that must agree, or the feature is invisible -----------
+    # A refusal the engine computes and no page renders is the same as no
+    # refusal at all, and that is the specific failure this feature cannot have.
+    for page in ("ChartsPage.tsx", "SymbolPage.tsx"):
+        src = (CODE / "app/src/renderer/src/pages" / page).read_text(encoding="utf-8")
+        assert "drawState?.issue" in src, \
+            f"{page} never renders the engine's issue — a refused lock would be silent"
+        assert "data-draw-issue" in src, f"{page}: the issue is not testable from the DOM"
+        assert "dofFree" in src, f"{page} does not report degrees of freedom to the chart"
+    chart = (CODE / "app/src/renderer/src/components/Chart.tsx").read_text(encoding="utf-8")
+    assert "data-draw-dof" in chart, "Chart.tsx exposes no DOF attribute for e2e to read"
+    draw_src = (CODE / "app/src/renderer/src/components/ChartDraw.ts").read_text(encoding="utf-8")
+    # pruneConstraints must hang off commit(), not off each deletion path: trim
+    # replaces a drawing with new ones and would otherwise leave a lock behind.
+    assert "this.pruneConstraints(this.bucket())" in draw_src, \
+        "commit() no longer prunes dangling constraints — trim and delete would leave them"
+
+    # -- 3. the engine's own arithmetic and behaviour ------------------------
+    app_dir = CODE / "app"
+    if not (app_dir / "node_modules" / "typescript").exists():
+        print("      (node_modules absent — npm install enables the constraint probe)")
+        return
+    exe = _node_exe()
+    assert exe, "no node runtime on PATH — the constraint arithmetic cannot be run"
+
+    probe = r"""
+import { ChartDraw, slotsOf, degreesOfFreedom }
+  from './src/renderer/src/components/ChartDraw.ts'
+const out = []
+const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail })
+
+const hline = (id, price) => ({ id, kind: 'hline', points: [{ time: 1700000000, price }] })
+const vline = (id) => ({ id, kind: 'vline', points: [{ time: 1700000000, price: 1 }] })
+const trend = (id) => ({ id, kind: 'trend',
+  points: [{ time: 1700000000, price: 600 }, { time: 1700086400, price: 604 }] })
+const circle = (id) => ({ id, kind: 'circle',
+  points: [{ time: 1700000000, price: 600 }, { time: 1700086400, price: 604 }] })
+const lock = (id, on, part = 'line') => ({ id, kind: 'lock', a: { id: on, part } })
+
+// A HANDLE IS NOT A VARIABLE. An hline is one price; its time only places the
+// grab handle. If handles counted, every hline would carry a permanently free
+// DOF and nothing could ever read 'fully defined'.
+ok('an hline owns exactly one coordinate', slotsOf(hline('dw1', 600)).length === 1,
+   JSON.stringify(slotsOf(hline('dw1', 600))))
+ok('a vline owns exactly one', slotsOf(vline('dw2')).length === 1, JSON.stringify(slotsOf(vline('dw2'))))
+ok('a trend owns four', slotsOf(trend('dw3')).length === 4, JSON.stringify(slotsOf(trend('dw3'))))
+ok('a circle owns none — the plane is not isotropic', slotsOf(circle('dw4')).length === 0, '')
+ok('an hline holds its PRICE, not its time', slotsOf(hline('dw1', 600))[0].endsWith(':p'),
+   slotsOf(hline('dw1', 600))[0])
+ok('a vline holds its TIME', slotsOf(vline('dw2'))[0].endsWith(':i'), slotsOf(vline('dw2'))[0])
+
+// Kade's scene: two h-lines and a diagonal = 1 + 1 + 4 = 6 free coordinates.
+const scene = [hline('dw1', 600), hline('dw2', 604), trend('dw3')]
+ok('the two-hlines-and-a-diagonal scene has 6 coordinates',
+   degreesOfFreedom(scene, []).total === 6, degreesOfFreedom(scene, []).total)
+ok('with nothing locked, all 6 are free', degreesOfFreedom(scene, []).free === 6, '')
+ok('locking one h-line removes exactly one',
+   degreesOfFreedom(scene, [lock('cn1', 'dw1')]).free === 5,
+   degreesOfFreedom(scene, [lock('cn1', 'dw1')]).free)
+ok('locking the whole diagonal removes four',
+   degreesOfFreedom(scene, [lock('cn1', 'dw3')]).free === 2,
+   degreesOfFreedom(scene, [lock('cn1', 'dw3')]).free)
+ok('locking ONE endpoint removes two',
+   degreesOfFreedom(scene, [lock('cn1', 'dw3', 'a')]).free === 4,
+   degreesOfFreedom(scene, [lock('cn1', 'dw3', 'a')]).free)
+// THE OCCUPANCY RULE, at the arithmetic level: a repeated lock adds nothing, so
+// counting rows instead of SLOTS would report a DOF that is simply wrong.
+ok('a duplicated lock does not remove a second DOF',
+   degreesOfFreedom(scene, [lock('cn1', 'dw1'), lock('cn2', 'dw1')]).free === 5,
+   degreesOfFreedom(scene, [lock('cn1', 'dw1'), lock('cn2', 'dw1')]).free)
+ok('a lock on a missing drawing removes nothing',
+   degreesOfFreedom(scene, [lock('cn1', 'ghost')]).free === 6, '')
+ok('a lock on a circle removes nothing',
+   degreesOfFreedom([circle('dw9')], [lock('cn1', 'dw9')]).free === 0, '')
+
+// ---- the engine surface ---------------------------------------------------
+// Only the constructor touches the DOM (see _chart_time): the prototype plus
+// the fields these methods read is a complete enough `this`.
+const mkEngine = (key) => Object.assign(Object.create(ChartDraw.prototype), {
+  key, saveTimer: null, destroyed: false, changeCb: null, issue: null,
+  tool: 'pointer', selected: [], hidden: false, barsOpt: () => [],
+  render() {}, applyCursor() {},
+})
+
+const e = mkEngine('LOCK|1Day')
+const b = e.bucket()
+b.drawings.push(hline('dw1', 600), trend('dw3'))
+
+e.selected = ['dw1']
+e.lockSelected()
+ok('locking the selection adds one constraint', b.constraints.length === 1,
+   JSON.stringify(b.constraints))
+ok('and the state reports the DOF', e.getState().dof.free === 4, JSON.stringify(e.getState().dof))
+ok('and names what is locked', e.getState().lockedIds.join() === 'dw1', e.getState().lockedIds.join())
+
+// Locking twice is refused WITH A REASON, not silently ignored.
+e.lockSelected()
+ok('a second lock on the same thing is refused', b.constraints.length === 1, b.constraints.length)
+ok('and the refusal reaches the page in words',
+   e.getState().issue && e.getState().issue.code === 'duplicate',
+   JSON.stringify(e.getState().issue))
+
+// A dangling constraint is pruned by commit(), which every deletion path ends
+// in — including trim, which replaces a drawing with new ones.
+b.drawings = b.drawings.filter((d) => d.id !== 'dw1')
+e.commit()
+ok('deleting the drawing takes its lock with it', b.constraints.length === 0,
+   JSON.stringify(b.constraints))
+ok('so the DOF returns to the diagonal alone', e.getState().dof.free === 4,
+   JSON.stringify(e.getState().dof))
+
+// Unlock is the inverse, and it is what the blocked-drag notice points at.
+e.selected = ['dw3']
+e.lockSelected()
+ok('the diagonal locks whole', e.getState().dof.free === 0, JSON.stringify(e.getState().dof))
+
+// THE BLOCKED DRAG. This is the rule the whole feature rests on: a locked
+// drawing must be refused BEFORE the gesture starts, or it reads as jitter
+// rather than as a constraint.
+const blocked = e.movableIds(['dw3'])
+ok('a locked drawing cannot be dragged', blocked.ids.length === 0, JSON.stringify(blocked.ids))
+ok('and the refusal names it in words',
+   blocked.issue && blocked.issue.code === 'blocked' && /locked/i.test(blocked.issue.message),
+   JSON.stringify(blocked.issue))
+// A mixed selection still moves what it can, rather than refusing wholesale.
+b.drawings.push(hline('dw7', 610))
+const partly = e.movableIds(['dw3', 'dw7'])
+ok('a mixed selection moves the unlocked part',
+   partly.ids.join() === 'dw7' && partly.issue === null, JSON.stringify(partly))
+
+e.unlockSelected()
+ok('unlock releases it', e.getState().dof.free === 5 && b.constraints.length === 0,
+   JSON.stringify(e.getState().dof))
+ok('and clears the notice', e.getState().issue === null, JSON.stringify(e.getState().issue))
+const free = e.movableIds(['dw3'])
+ok('and the drag is permitted again', free.ids.join() === 'dw3' && free.issue === null,
+   JSON.stringify(free))
+
+console.log(JSON.stringify(out))
+"""
+    probe_path = app_dir / ".selftest-constraints.mjs"
+    try:
+        probe_path.write_text(probe, encoding="utf-8")
+        r = subprocess.run([exe, str(probe_path)], cwd=app_dir,
+                           capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, f"constraint probe crashed:\n{(r.stderr or r.stdout)[:1500]}"
+        results = json.loads(r.stdout.strip().splitlines()[-1])
+    finally:
+        probe_path.unlink(missing_ok=True)
+    bad_r = [x for x in results if not x["cond"]]
+    assert not bad_r, "the constraint model is wrong:\n" + "\n".join(
+        f"  - {x['name']} (got {x['detail']})" for x in bad_r)
+    assert len(results) >= 22, f"the probe lost assertions: only {len(results)} ran"
 
 
 def main() -> int:

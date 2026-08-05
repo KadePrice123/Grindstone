@@ -179,6 +179,96 @@ export interface InspectPin {
   time: UTCTimestamp
 }
 
+// ---------------------------------------------------------------------------
+// Constraints
+// ---------------------------------------------------------------------------
+
+/** DELIBERATELY ONE KIND. The relations that need a solver ('on', 'coincident',
+ *  'samePrice', 'sameTime') widen this union and chartobjects.py's tuple in the
+ *  same commit as the solver that can honour them. Declaring them early would
+ *  make the backend accept a constraint the engine silently ignores, which is a
+ *  worse lie than not offering it — the gate compares the two vocabularies
+ *  exactly so that cannot drift. */
+export type ConstraintKind = 'lock'
+
+/** Which coordinate-carrying part of a drawing a constraint names. 'line' is a
+ *  whole hline/vline — it IS one coordinate, so it has no endpoints, the same
+ *  fact POINTS_FOR states on the backend. 'a'/'b' are a trend's two points. */
+export type EntityPart = 'line' | 'a' | 'b'
+
+export interface EntityRef {
+  id: string
+  part: EntityPart
+}
+
+/** 'lock' pins whatever coordinates its target owns, at their current values.
+ *  It is the only constraint that needs no solver: it removes degrees of
+ *  freedom outright, so DOF is exact by counting. */
+export interface Constraint {
+  id: string
+  kind: ConstraintKind
+  a: EntityRef
+}
+
+/** Something the engine refused to do, or did with a caveat, in words meant for
+ *  a person. Carried on DrawState so a page can show it: a constraint that
+ *  silently fails to apply is the one outcome this feature cannot have. */
+export interface ConstraintIssue {
+  code: 'duplicate' | 'unknown' | 'unsupported' | 'blocked'
+  message: string
+}
+
+/** The free coordinates a drawing owns — its solver variables, and the unit DOF
+ *  is counted in. A slot id is `<drawingId>:<part>:<axis>`.
+ *
+ *  Handles are NOT variables. An hline's time and a vline's price only place
+ *  the grab handle; if they entered the count, every hline would carry a
+ *  permanently free DOF, nothing could ever reach "fully defined", and the whole
+ *  status signal would be dead. Circles own none: ellipsePx is this codebase's
+ *  own proof the plane is not isotropic, so a circle is not a constrainable
+ *  object here. */
+export function slotsOf(d: Drawing): string[] {
+  if (d.kind === 'hline') return [`${d.id}:line:p`]
+  if (d.kind === 'vline') return [`${d.id}:line:i`]
+  if (d.kind === 'trend') return [`${d.id}:a:i`, `${d.id}:a:p`, `${d.id}:b:i`, `${d.id}:b:p`]
+  return [] // circle
+}
+
+/** The slots one constraint pins, or null when it names something that cannot
+ *  carry it (a part the kind does not have, a circle, a missing drawing). */
+export function lockedSlots(c: Constraint, byId: Map<string, Drawing>): string[] | null {
+  const d = byId.get(c.a.id)
+  if (!d) return null
+  if (d.kind === 'circle') return null
+  if (d.kind === 'trend') {
+    if (c.a.part === 'line') return slotsOf(d) // the whole segment: both ends
+    return [`${d.id}:${c.a.part}:i`, `${d.id}:${c.a.part}:p`]
+  }
+  // hline/vline carry one coordinate and no endpoints.
+  return c.a.part === 'line' ? slotsOf(d) : null
+}
+
+/** Degrees of freedom, by counting.
+ *
+ *  Exact with no matrix, no tolerance and no rank test, because a lock is
+ *  trivially independent of every other lock unless it names a coordinate
+ *  already locked — and that case is refused at admission by an O(1) occupancy
+ *  test rather than discovered numerically. When relations arrive they bring a
+ *  rank test with them; until then this is not an approximation of one, it is
+ *  the right answer. */
+export function degreesOfFreedom(
+  drawings: Drawing[],
+  constraints: Constraint[]
+): { total: number; locked: number; free: number } {
+  const byId = new Map(drawings.map((d) => [d.id, d]))
+  const total = drawings.reduce((n, d) => n + slotsOf(d).length, 0)
+  const held = new Set<string>()
+  for (const c of constraints) {
+    for (const s of lockedSlots(c, byId) ?? []) held.add(s)
+  }
+  return { total, locked: held.size, free: total - held.size }
+}
+
 /** What one chart's persisted objects look like on the wire. It is the bucket,
  *  nothing more — no selection, no tool, no hidden flag: those are how you are
  *  looking at the chart right now, not what you drew on it. */
@@ -187,6 +277,7 @@ export interface ChartDoc {
   drawings: Drawing[]
   measures: Measure[]
   pins: InspectPin[]
+  constraints: Constraint[]
 }
 
 /** Persistence, INJECTED rather than imported.
@@ -245,6 +336,14 @@ export interface DrawState {
    *  honest "is anything selected". */
   selected: string[]
   hidden: boolean
+  /** Sketch status, CAD-style. `free` is what the badge shows: 0 means every
+   *  coordinate is pinned and nothing can shift under you. */
+  dof: { total: number; locked: number; free: number }
+  /** Drawings carrying at least one constraint — what the page paints. */
+  lockedIds: string[]
+  /** The last refusal or caveat, in words. Null when the engine has nothing to
+   *  say; cleared by the next successful action. */
+  issue: ConstraintIssue | null
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +354,7 @@ interface Bucket {
   drawings: Drawing[]
   measures: Measure[]
   pins: InspectPin[]
+  constraints: Constraint[]
 }
 
 const sessionStore = new Map<string, Bucket>()
@@ -262,14 +362,17 @@ const sessionStore = new Map<string, Bucket>()
 function bucketFor(key: string): Bucket {
   let b = sessionStore.get(key)
   if (!b) {
-    b = { drawings: [], measures: [], pins: [] }
+    b = { drawings: [], measures: [], pins: [], constraints: [] }
     sessionStore.set(key, b)
   }
   return b
 }
 
 const isEmptyBucket = (b: Bucket): boolean =>
-  b.drawings.length === 0 && b.measures.length === 0 && b.pins.length === 0
+  b.drawings.length === 0 &&
+  b.measures.length === 0 &&
+  b.pins.length === 0 &&
+  b.constraints.length === 0
 
 let nextId = 1
 const mkId = (prefix: string) => `${prefix}${nextId++}`
@@ -298,6 +401,7 @@ const docOf = (b: Bucket): ChartDoc => ({
   drawings: b.drawings,
   measures: b.measures,
   pins: b.pins,
+  constraints: b.constraints,
 })
 
 /** Move the id counter past everything we just loaded.
@@ -308,7 +412,7 @@ const docOf = (b: Bucket): ChartDoc => ({
  *  string[] matched by id, so the two would select, drag and delete as one. */
 function adoptIds(b: Bucket): void {
   let max = 0
-  for (const o of [...b.drawings, ...b.measures, ...b.pins]) {
+  for (const o of [...b.drawings, ...b.measures, ...b.pins, ...b.constraints]) {
     const n = Number(/\d+$/.exec(o.id)?.[0] ?? '0')
     if (Number.isFinite(n) && n > max) max = n
   }
@@ -580,6 +684,7 @@ export class ChartDraw {
   } | null = null
   private teardown: (() => void)[] = []
   private store?: ChartStore
+  private issue: ConstraintIssue | null = null
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   /** Set by destroy(), read by the load continuation — a response can outlive
    *  the engine that asked for it. */
@@ -716,15 +821,27 @@ export class ChartDraw {
       // Grabbing something already selected moves the WHOLE selection - the
       // same rule clickDelete uses, so "what will this act on" has one answer.
       const b = this.bucket()
-      const ids = this.selected.includes(hit.id)
+      const wanted = this.selected.includes(hit.id)
         ? this.selected.filter((id) => b.drawings.some((d) => d.id === id))
         : [hit.id]
+      // A locked drawing does not move, and it says so. Decided BEFORE the pan
+      // is suspended and before any pixel is captured: a lock that let the drag
+      // start and then snapped back would read as jitter, not as a constraint.
+      const { ids, issue } = this.movableIds(wanted)
+      if (issue) {
+        this.issue = issue
+        this.emit()
+        return
+      }
       const orig = new Map<string, Pt[]>()
       for (const id of ids) {
         const d = b.drawings.find((x) => x.id === id)
         if (d) orig.set(id, d.points.map((p) => ({ ...p })))
       }
       if (orig.size === 0) return
+      // A successful grab clears a stale refusal; leaving it up would make the
+      // notice describe an action two gestures ago.
+      this.issue = null
       this.drag = { ids, orig, from: at, live: false }
       // Suspend pan/zoom NOW, not at the slop threshold: the chart pans on its
       // own mousemove, so waiting would let it slide a few pixels before we
@@ -786,6 +903,13 @@ export class ChartDraw {
         }
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.selected.length > 0) {
         this.deleteSelected()
+      } else if ((e.key === 'l' || e.key === 'L') && this.selected.length > 0) {
+        // Chart-scoped, like every other key here. App-wide would mean routing
+        // through main's before-input-event (the pattern main/tabs.ts uses for
+        // F12), which is a shell change and deliberately out of scope.
+        this.lockSelected()
+      } else if ((e.key === 'u' || e.key === 'U') && this.selected.length > 0) {
+        this.unlockSelected()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -958,7 +1082,123 @@ export class ChartDraw {
         .filter((p): p is InspectPin => p !== undefined),
       selected: [...this.selected],
       hidden: this.hidden,
+      dof: degreesOfFreedom(b.drawings, b.constraints),
+      lockedIds: [...new Set(b.constraints.map((c) => c.a.id))],
+      issue: this.issue,
     }
+  }
+
+  // ---- constraints --------------------------------------------------------
+
+  /** Lock every selected drawing where it stands.
+   *
+   *  A selected TREND locks as a whole segment (both endpoints), because "lock
+   *  this line" is what the gesture means; an endpoint-only lock is available
+   *  through the same call with an explicit part once endpoints are selectable.
+   *  Circles are refused with a reason rather than silently skipped — a gesture
+   *  that appears to do nothing is indistinguishable from a bug. */
+  lockSelected(): void {
+    const b = this.bucket()
+    const byId = new Map(b.drawings.map((d) => [d.id, d]))
+    let added = 0
+    let issue: ConstraintIssue | null = null
+    for (const id of this.selected) {
+      const d = byId.get(id)
+      if (!d) continue // a measure or pin: nothing to lock, and not an error
+      if (d.kind === 'circle') {
+        issue = { code: 'unsupported', message: 'A circle cannot be locked.' }
+        continue
+      }
+      const res = this.addConstraint({ kind: 'lock', a: { id, part: 'line' } })
+      if (res.ok) added++
+      else issue = res.issue
+    }
+    this.issue = issue
+    if (added > 0) this.commit()
+    else this.emit() // the refusal still has to reach the page
+  }
+
+  /** Remove every lock on the selection. The inverse gesture, and the answer a
+   *  blocked-drag notice points at. */
+  unlockSelected(): void {
+    const b = this.bucket()
+    const doomed = new Set(this.selected)
+    const before = b.constraints.length
+    b.constraints = b.constraints.filter((c) => !doomed.has(c.a.id))
+    this.issue = null
+    if (b.constraints.length !== before) this.commit()
+    else this.emit()
+  }
+
+  /** Add one constraint, or say why not.
+   *
+   *  ADMISSION IS O(1) HERE, deliberately. A lock names a set of coordinate
+   *  slots, and the only way it can fail to add information is by naming a slot
+   *  already held — so an occupancy test settles it exactly, with no matrix and
+   *  no floating-point tolerance anywhere near a user-visible refusal. */
+  addConstraint(c: Omit<Constraint, 'id'>): { ok: true; id: string } | { ok: false; issue: ConstraintIssue } {
+    const b = this.bucket()
+    const byId = new Map(b.drawings.map((d) => [d.id, d]))
+    const want = lockedSlots({ ...c, id: 'probe' }, byId)
+    if (want === null || want.length === 0) {
+      return {
+        ok: false,
+        issue: { code: 'unknown', message: 'That constraint names something that cannot carry it.' },
+      }
+    }
+    const held = new Set<string>()
+    for (const ex of b.constraints) for (const s of lockedSlots(ex, byId) ?? []) held.add(s)
+    const clash = want.find((s) => held.has(s))
+    if (clash) {
+      const d = byId.get(c.a.id)
+      return {
+        ok: false,
+        issue: {
+          code: 'duplicate',
+          message: `That ${d ? d.kind : 'object'} is already locked.`,
+        },
+      }
+    }
+    const id = mkId('cn')
+    b.constraints.push({ ...c, id })
+    return { ok: true, id }
+  }
+
+  /** Which of the wanted drawings a drag may actually move, and why not if not.
+   *
+   *  A named method rather than four lines inside the mousedown closure, because
+   *  the rule is the feature: it is the difference between "locked" meaning
+   *  something and a drag that visibly starts and then snaps back. Nothing here
+   *  touches the DOM, so the gate can exercise it directly. */
+  private movableIds(wanted: string[]): { ids: string[]; issue: ConstraintIssue | null } {
+    const b = this.bucket()
+    const held = new Set(b.constraints.map((c) => c.a.id))
+    const ids = wanted.filter((id) => !held.has(id))
+    if (ids.length > 0) return { ids, issue: null }
+    const d = b.drawings.find((x) => x.id === wanted[0])
+    return {
+      ids,
+      issue: {
+        code: 'blocked',
+        message: `That ${d ? d.kind : 'drawing'} is locked. Unlock it to move it.`,
+      },
+    }
+  }
+
+  /** Drop constraints whose target no longer exists.
+   *
+   *  Called from commit(), so EVERY path that removes a drawing is covered —
+   *  delete, clear, and trim, which replaces a drawing with new ones and would
+   *  otherwise leave a lock pointing at an id that is gone. A dangling
+   *  constraint is invisible, still counts against DOF, and the backend
+   *  validator has no way to know the id is dead. */
+  private pruneConstraints(b: Bucket): boolean {
+    if (b.constraints.length === 0) return false
+    const live = new Set(b.drawings.map((d) => d.id))
+    const kept = b.constraints.filter((c) => live.has(c.a.id))
+    if (kept.length === b.constraints.length) return false
+    b.constraints = kept
+    return true
   }
 
   /** Single subscriber (the owning page). Fires immediately so the page's
@@ -1019,6 +1259,7 @@ export class ChartDraw {
           b.drawings = doc?.drawings ?? []
           b.measures = doc?.measures ?? []
           b.pins = doc?.pins ?? []
+          b.constraints = doc?.constraints ?? []
           adoptIds(b)
           // Now in sync with the store, so the emit below is not a write.
           savedDocs.set(key, JSON.stringify(docOf(b)))
@@ -1075,6 +1316,7 @@ export class ChartDraw {
    *  not twelve of each — and it must not run at all when you merely click
    *  something. */
   private commit(): void {
+    this.pruneConstraints(this.bucket())
     this.render()
     this.emit()
   }
@@ -2092,12 +2334,14 @@ export class ChartDraw {
     if (trimPrev?.whole) dangerIds.add(hover!.drawing.id) // no intersections: trim deletes whole
 
     if (!this.hidden) {
+      const locked = new Set(b.constraints.map((c) => c.a.id))
       for (const d of b.drawings) {
         this.renderDrawing(pane, d, {
           selected: this.selected.includes(d.id),
           hover: this.hoverId === d.id,
           danger: dangerIds.has(d.id),
         })
+        if (locked.has(d.id)) this.renderLock(d)
       }
       for (const m of b.measures) this.renderMeasure(pane, m)
       for (const pin of b.pins) this.renderPin(pane, pin)
@@ -2114,6 +2358,26 @@ export class ChartDraw {
     this.renderPreview(pane)
     // Frame complete — swap the chip hit-zones in atomically.
     this.hotZones = this.zoneDraft
+  }
+
+  /** A padlock at the drawing's handle. CAD shows constrained geometry in a
+   *  different colour; a glyph is the honest equivalent here, because this
+   *  chart's stroke colour is already carrying selection, hover and danger, and
+   *  a fourth meaning on the same channel would be unreadable. */
+  private renderLock(d: Drawing): void {
+    const at = this.project(d.points[0])
+    if (!at) return
+    const x = Math.round(at.x) + 8
+    const y = Math.round(at.y) - 10
+    this.el('rect', {
+      x: x - 4, y: y, width: 8, height: 6, rx: 1,
+      fill: STROKE, 'fill-opacity': 0.9,
+    })
+    // The shackle: an arc over the body, so it reads as closed.
+    this.el('path', {
+      d: `M ${x - 2.5} ${y} v -2 a 2.5 2.5 0 0 1 5 0 v 2`,
+      fill: 'none', stroke: STROKE, 'stroke-width': 1.2,
+    })
   }
 
   private renderDrawing(

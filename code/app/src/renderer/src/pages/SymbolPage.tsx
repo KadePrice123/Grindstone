@@ -458,6 +458,24 @@ export function SymbolPage({
               drawings not saved: {drawSaveErr}
             </span>
           ) : null}
+          {/* A refusal the engine could not carry out — a locked drawing that
+              will not drag, a constraint that adds nothing. Silence here would
+              make the gesture look broken. */}
+          {drawState?.issue ? (
+            <span className="subtle draw-issue" data-draw-issue={drawState.issue.code}>
+              {drawState.issue.message}
+            </span>
+          ) : null}
+          {drawState && drawState.dof.total > 0 ? (
+            <span
+              className={`subtle draw-dof${drawState.dof.free === 0 ? ' draw-dof-fixed' : ''}`}
+              title="Free coordinates left in this sketch. 0 = fully defined: nothing can shift under you."
+            >
+              {drawState.dof.free === 0
+                ? 'fully defined'
+                : `${drawState.dof.free} free`}
+            </span>
+          ) : null}
         </div>
         <div className="chart-stage">
           {bars.length > 0 ? (
@@ -474,6 +492,7 @@ export function SymbolPage({
               drawCount={drawState?.drawings ?? 0}
               measureCount={drawState?.measures ?? 0}
               selectedCount={selectedCount}
+              dofFree={drawState?.dof.free ?? null}
             />
           ) : (
             <div className="chart-empty dim">{barNote || 'No bars for this timeframe.'}</div>

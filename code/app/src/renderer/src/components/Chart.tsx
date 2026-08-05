@@ -168,6 +168,7 @@ export function Chart({
   drawCount = 0,
   measureCount = 0,
   selectedCount = 0,
+  dofFree = null,
 }: {
   bars?: Bar[]
   indicators?: IndicatorKey[]
@@ -200,6 +201,8 @@ export function Chart({
   drawCount?: number
   measureCount?: number
   selectedCount?: number
+  /** Free coordinates left in the sketch; null when nothing is constrained. */
+  dofFree?: number | null
 }) {
   const box = useRef<HTMLDivElement>(null)
   const chart = useRef<IChartApi | null>(null)
@@ -431,6 +434,7 @@ export function Chart({
       data-draw-count={drawCount}
       data-measure-count={measureCount}
       data-draw-selected={selectedCount}
+      data-draw-dof={dofFree ?? ''}
     />
   )
 }
