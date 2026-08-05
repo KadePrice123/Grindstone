@@ -20,7 +20,8 @@
  *     date can't silently hide the drawing.
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import type { ChartDraw, Drawing, Pt } from './ChartDraw'
+import type { ChartDraw, Drawing, Pt, ResolvedLeg } from './ChartDraw'
+import { LEG_PALETTE } from './ChartDraw'
 
 function fmtPrice(p: number): string {
   // Trim float noise but keep real precision: 264.5 not 264.50000000000003.
@@ -166,6 +167,95 @@ function Field({
       />
       {onToggleLock ? <Padlock on={!!locked} onToggle={onToggleLock} /> : null}
     </label>
+  )
+}
+
+/** The selected LEG's exact-value editor — the type-in path Kade asked for
+ *  ("you can also just type it in if you want"). Reuses Field's contract
+ *  (commit on Enter/blur, red on invalid, Escape reverts). Typing a value the
+ *  host drives goes through updateLeg, which UNBINDS first — the typed number
+ *  wins over the line, and the engine says so by the binding disappearing. */
+export function LegEditor({ engine, leg }: { engine: ChartDraw; leg: ResolvedLeg }) {
+  const color = LEG_PALETTE[leg.slot % LEG_PALETTE.length]
+  const patch = (p: Parameters<ChartDraw['updateLeg']>[1]) => engine.updateLeg(leg.id, p)
+  return (
+    <div className="draw-editor">
+      <div className="de-head">
+        <span>
+          <span className="cp-swatch" style={{ background: color }} /> Option leg
+          {leg.resolved.hosted ? <span className="dim"> · rides {leg.resolved.hosted}</span> : null}
+        </span>
+        <button className="de-x" title="Deselect (Esc)" onClick={() => engine.clearSelection()}>
+          ×
+        </button>
+      </div>
+      <div className="de-row">
+        <span className="de-lbl">Side</span>
+        <div className="seg de-seg">
+          <button
+            className={`seg-btn${leg.side === 'long' ? ' on' : ''}`}
+            onClick={() => patch({ side: 'long' })}
+          >
+            Buy
+          </button>
+          <button
+            className={`seg-btn${leg.side === 'short' ? ' on' : ''}`}
+            onClick={() => patch({ side: 'short' })}
+          >
+            Sell
+          </button>
+        </div>
+      </div>
+      <div className="de-row">
+        <span className="de-lbl">Right</span>
+        <div className="seg de-seg">
+          <button
+            className={`seg-btn${leg.right === 'C' ? ' on' : ''}`}
+            onClick={() => patch({ right: 'C' })}
+          >
+            Call
+          </button>
+          <button
+            className={`seg-btn${leg.right === 'P' ? ' on' : ''}`}
+            onClick={() => patch({ right: 'P' })}
+          >
+            Put
+          </button>
+        </div>
+      </div>
+      <Field
+        key={`${leg.id}:strike:${leg.resolved.strike}`}
+        label="Strike"
+        initial={fmtPrice(leg.resolved.strike)}
+        parse={parsePrice}
+        onCommit={(v) => patch({ strike: v })}
+      />
+      <Field
+        key={`${leg.id}:exp:${leg.resolved.expiration}`}
+        label="Expiry"
+        initial={leg.resolved.expiration}
+        parse={parseTime}
+        // parseTime hands back epoch seconds; the leg stores the calendar date.
+        onCommit={(v) => patch({ expiration: new Date(v * 1000).toISOString().slice(0, 10) })}
+      />
+      <Field
+        key={`${leg.id}:dtol:${leg.dteTol}`}
+        label="±days"
+        initial={String(Math.round(leg.dteTol))}
+        parse={parsePrice}
+        onCommit={(v) => patch({ dteTol: Math.max(0, Math.min(60, v)) })}
+      />
+      <Field
+        key={`${leg.id}:stol:${leg.strikeTol}`}
+        label="±$"
+        initial={fmtPrice(leg.strikeTol)}
+        parse={parsePrice}
+        onCommit={(v) => patch({ strikeTol: Math.max(0, Math.min(500, v)) })}
+      />
+      <button className="btn de-del" onClick={() => engine.deleteLeg(leg.id)}>
+        Delete leg
+      </button>
+    </div>
   )
 }
 

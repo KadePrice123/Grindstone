@@ -233,3 +233,187 @@
 .de-del:hover {
   border-color: var(--loss);
 }
+
+/* ---- the near-fullscreen ticker page ----------------------------------- */
+/* .page is a scrolling document; .page-chart is a workstation: full height,
+   flex column, the chart owns whatever the fixed rows do not. Every
+   below-fold reach lives in its own overflow container. */
+.page-chart {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 10px 14px 6px;
+  gap: 8px;
+}
+.ph-strip {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-shrink: 0;
+}
+.ph-strip .page-head {
+  margin: 0;
+  flex-shrink: 0;
+}
+/* Metrics condensed to a single horizontal strip: same component, denser
+   clothes — the gate requires the numbers on the page, not a layout. */
+.ph-metrics {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ph-metrics .metrics {
+  display: flex;
+  gap: 16px;
+  flex-wrap: nowrap;
+}
+.pc-toolbar {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.pc-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 8px;
+}
+.pc-stage {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+.pc-stage .chart-box {
+  flex: 1;
+  min-height: 0;
+}
+.seg-select {
+  background: none;
+  border: 0;
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+.seg-select:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+.ind-float {
+  width: 230px;
+}
+.ind-float-seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.de-seg {
+  flex: 1;
+  display: flex;
+  gap: 4px;
+}
+
+/* ---- the right panel ---------------------------------------------------- */
+.side-panel {
+  width: 360px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow-y: auto;
+  padding: 10px 12px;
+}
+@media (max-width: 1000px) {
+  .side-panel {
+    width: 280px;
+  }
+}
+.sp-news .news-row {
+  padding: 8px 0;
+}
+.chain-idle {
+  padding: 14px 4px;
+  line-height: 1.5;
+}
+.chain-empty {
+  border: 1px solid color-mix(in srgb, var(--loss) 35%, var(--border));
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  line-height: 1.45;
+}
+.chain-panel-body {
+  font-size: 12.5px;
+}
+.cp-source {
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+.cp-leg {
+  border-top: 1px solid var(--border);
+  padding: 8px 0;
+}
+.cp-leg-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cp-count {
+  margin-left: auto;
+  color: var(--text-dim);
+}
+.cp-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  vertical-align: baseline;
+}
+.cp-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.cp-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px 2px 0;
+}
+.cp-table td {
+  padding: 2px 6px 2px 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+/* ---- status bar ---------------------------------------------------------- */
+.status-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 22px;
+  font-size: 11.5px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+/* The fixed UserChip parks at left:16 bottom:16 — reserve its footprint so it
+   sits on chrome, never on candles or status text. */
+.status-chip-space {
+  width: 210px;
+  flex-shrink: 0;
+}
+.leg-status {
+  color: var(--text-dim);
+}

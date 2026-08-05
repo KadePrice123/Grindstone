@@ -3139,6 +3139,32 @@ const mkEngine = (key) => Object.assign(Object.create(ChartDraw.prototype), {
   tool: 'pointer', selected: [], hidden: false, barsOpt: () => bars,
   render() {}, applyCursor() {},
 })
+// ---- presets: deterministic placement from bar data alone -----------------
+const { PRESETS, placePreset, expirationForDte } =
+  await import('./src/renderer/src/presets.ts')
+const condor = PRESETS.find((p) => p.key === 'iron_condor')
+const placed = placePreset(condor, 600, '2026-08-05')
+ok('the condor is four legs', placed.length === 4, placed.length)
+ok('short put below, long put further below',
+   placed[0].strike === 570 && placed[1].strike === 564 &&
+   placed[0].side === 'short' && placed[1].side === 'long' &&
+   placed[0].right === 'P' && placed[1].right === 'P',
+   JSON.stringify(placed.slice(0, 2).map((l) => `${l.side} ${l.right} ${l.strike}`)))
+ok('short call above, long call further above',
+   placed[2].strike === 630 && placed[3].strike === 636 &&
+   placed[2].side === 'short' && placed[3].right === 'C', '')
+ok('one shared expiration across the group',
+   new Set(placed.map((l) => l.expiration)).size === 1, placed[0].expiration)
+// 2026-08-05 + 45cd = 2026-09-19, a SATURDAY - must roll back to Friday.
+ok('a weekend-landing expiration rolls back to Friday',
+   placed[0].expiration === '2026-09-18', placed[0].expiration)
+ok('wings carry the wider strike tolerance',
+   placed[1].strikeTol > placed[0].strikeTol,
+   `${placed[0].strikeTol} vs ${placed[1].strikeTol}`)
+ok('a dead spot places nothing, not a crash', placePreset(condor, 0, '2026-08-05') === null, '')
+ok('expirationForDte handles Sunday too',
+   expirationForDte('2026-08-05', 46) === '2026-09-18', expirationForDte('2026-08-05', 46))
+
 const e = mkEngine('LEGS|1Day')
 const b = e.bucket()
 b.drawings.push(
@@ -3224,7 +3250,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 21, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 29, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")

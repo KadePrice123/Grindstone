@@ -1747,6 +1747,80 @@ try {
   await pTool('Clear every drawing')
   await sleep(700)
 
+  // ---- option legs: zones, colors, honest empty chain --------------------
+  // The scratch profile has NO Alpaca creds, deliberately: leg GEOMETRY needs
+  // no market data, and the chain panel's no-provider state is the first
+  // state every fresh install sees — so both are asserted here, offline.
+  const legView = persistView
+  const applyPreset = (key) =>
+    legView.eval(
+      `(() => { const s = [...document.querySelectorAll('select.seg-select')][0];
+         if (!s) return 'no-select';
+         const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+         set.call(s, ${JSON.stringify(key)});
+         s.dispatchEvent(new Event('change', { bubbles: true }));
+         return 'ok' })()`
+    )
+  check((await applyPreset('iron_condor')) === 'ok', 'legs: the preset picker exists')
+  const condor = await waitFor(
+    async () => {
+      const s = await legView.eval(
+        `JSON.stringify({
+           zones: document.querySelectorAll('.cd-leg-zone').length,
+           hues: [...new Set([...document.querySelectorAll('.cd-leg-zone')]
+                    .map((z) => z.getAttribute('stroke')))].length,
+           count: document.querySelector('[data-draw-tool]')?.getAttribute('data-leg-count'),
+         })`
+      )
+      const st = JSON.parse(s)
+      return st.zones === 4 && st.count === '4' ? st : null
+    },
+    'the condor to land as four zones',
+    8000
+  ).catch(() => null)
+  check(condor !== null, 'legs: one click places an iron condor as four zones',
+    JSON.stringify(condor))
+  check(condor !== null && condor.hues === 4,
+    'legs: and each leg wears its own color', `hues=${condor ? condor.hues : '?'}`)
+
+  // The chain panel auto-opened on the preset, and with no creds it must say
+  // WHY it is empty — the endpoint's reason, verbatim, never a spinner.
+  const chainEmpty = await waitFor(
+    async () => {
+      const t = await legView.eval(
+        `document.querySelector('.chain-empty')?.textContent ?? null`
+      )
+      return t && /no data key/i.test(t) ? t : null
+    },
+    'the chain panel to explain the missing provider',
+    8000
+  ).catch(() => null)
+  check(chainEmpty !== null, 'legs: the no-creds chain state names its reason',
+    String(chainEmpty).slice(0, 80))
+
+  // Clear, then leave exactly ONE leg for the reload block to prove
+  // persistence with — the reload assertion checks it came back from the DB.
+  await legView.eval(
+    `(() => { const b = [...document.querySelectorAll('button')]
+        .find(x => (x.title ?? '') === 'Clear legs'); if (!b) return 'missing';
+      b.click(); return 'ok' })()`
+  )
+  await waitFor(
+    async () => ((await pAttr('data-leg-count')) === '0' ? 'ok' : null),
+    'legs cleared', 6000
+  )
+  await legView.eval(
+    `(() => { const b = [...document.querySelectorAll('button')]
+        .find(x => (x.title ?? '').startsWith('Leg —')); if (!b) return 'missing';
+      b.click(); return 'ok' })()`
+  )
+  const oneLeg = await waitFor(
+    async () => ((await pAttr('data-leg-count')) === '1' ? 'ok' : null),
+    'a single leg placed', 6000
+  ).catch(() => null)
+  check(oneLeg === 'ok', 'legs: the Leg button places a single at-the-money leg')
+
+
   // Place one h-line by hand, then wait for the debounced write.
   await pTool('Horizontal price line')
   await sleep(200)
@@ -1780,6 +1854,11 @@ try {
     'persist: it stores a real data-space point, not a pixel',
     JSON.stringify(saved.doc?.drawings?.[0]?.points)
   )
+  check(
+    (saved.doc?.legs?.length ?? 0) === 1 && typeof saved.doc.legs[0].expiration === 'string',
+    'persist: the leg rode the same save, expiration as a calendar date',
+    JSON.stringify(saved.doc?.legs)
+  )
 
   // THE ACTUAL PROMISE: reload the renderer — the session Map dies with it —
   // and the line must come back from the database.
@@ -1807,9 +1886,11 @@ try {
              if (document.querySelector('.page-head h1')?.textContent !== 'SPY') return null;
              const el = document.querySelector('[data-draw-tool]');
              if (!el || !el.querySelector('canvas')) return null;
-             return el.getAttribute('data-draw-count') })()`
+             // Drawing AND leg both came back from the database, or the check
+             // does not pass — the leg was placed by the block above.
+             return el.getAttribute('data-draw-count') + '/' + el.getAttribute('data-leg-count') })()`
         )
-        if (n === '1') {
+        if (n === '1/1') {
           reloadedView = c
           return 'ok'
         }

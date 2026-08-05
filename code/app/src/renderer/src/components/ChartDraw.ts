@@ -1924,6 +1924,24 @@ export class ChartDraw {
     this.commit()
   }
 
+  /** A whole strategy in one commit: N legs sharing one group tag, slots
+   *  assigned first-free in listed order, ONE render and ONE save — a condor
+   *  arriving as four separate commits would debounce-save four times and
+   *  flash the panel four times. Returns the group tag. */
+  addLegGroup(specs: Array<Omit<OptionLeg, 'id' | 'slot' | 'group'>>): string {
+    const b = this.bucket()
+    const g = mkId('gp')
+    const used = new Set(b.legs.map((l) => l.slot))
+    for (const spec of specs) {
+      let slot = 0
+      while (used.has(slot)) slot++
+      used.add(slot)
+      b.legs.push({ ...spec, id: mkId('lg'), group: g, slot })
+    }
+    this.commit()
+    return g
+  }
+
   deleteLeg(id: string): void {
     const b = this.bucket()
     const before = b.legs.length

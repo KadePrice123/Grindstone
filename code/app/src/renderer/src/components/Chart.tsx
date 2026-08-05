@@ -153,7 +153,7 @@ export function Chart({
   bars = NO_BARS,
   indicators = NO_INDICATORS,
   indicatorParams = NO_PARAMS,
-  height = 420,
+  height,
   compact = false,
   onClick,
   lines,
@@ -169,6 +169,10 @@ export function Chart({
   measureCount = 0,
   selectedCount = 0,
   dofFree = null,
+  legCount = 0,
+  legStrike = null,
+  legDte = null,
+  rightReserveBars = 0,
 }: {
   bars?: Bar[]
   indicators?: IndicatorKey[]
@@ -176,6 +180,9 @@ export function Chart({
    *  hosts must pass a stable object (state or module const), never a fresh
    *  inline literal per render. */
   indicatorParams?: IndicatorParams
+  /** Fixed pixel height, or ABSENT for fill mode: the box takes 100% of its
+   *  container and the library's autoSize ResizeObserver tracks it — the
+   *  near-fullscreen layout gives height through flex, not a prop. */
   height?: number
   compact?: boolean
   onClick?: () => void
@@ -203,6 +210,15 @@ export function Chart({
   selectedCount?: number
   /** Free coordinates left in the sketch; null when nothing is constrained. */
   dofFree?: number | null
+  /** Option-leg readouts for the e2e and the wheel: count of legs on this
+   *  chart, and the SELECTED leg's resolved strike / expiration. */
+  legCount?: number
+  legStrike?: number | null
+  legDte?: string | null
+  /** Bars of right-hand whitespace to keep open past the data — where the
+   *  future-dated leg zones live. fitContent() runs on every series rebuild
+   *  and would close it, so the reserve is re-asserted after each rebuild. */
+  rightReserveBars?: number
 }) {
   const box = useRef<HTMLDivElement>(null)
   const chart = useRef<IChartApi | null>(null)
@@ -405,6 +421,16 @@ export function Chart({
     if (price.current) onReadyRef.current?.({ chart: c, mainSeries: price.current })
   }, [bars, indicators, indicatorParams, compact, lines, normalize])
 
+  // Re-open the right-hand whitespace AFTER each rebuild: fitContent() above
+  // fits the DATA, which closes it, and the future-dated leg zones live out
+  // there. Ordering is guaranteed — effects run in declaration order.
+  useEffect(() => {
+    const c = chart.current
+    if (!c || rightReserveBars <= 0) return
+    const vr = c.timeScale().getVisibleLogicalRange()
+    if (vr) c.timeScale().setVisibleLogicalRange({ from: vr.from, to: vr.to + rightReserveBars })
+  }, [bars, indicators, indicatorParams, compact, lines, normalize, rightReserveBars])
+
   // Working charts declare themselves to the gesture wheel here — these
   // attrs are what wheelEvents.ts reads on right-click, so a chart on any
   // page (symbol, charts.gs) spawns the chart wheel with live state.
@@ -421,7 +447,7 @@ export function Chart({
     <div
       ref={box}
       className={compact ? 'chart-box compact' : 'chart-box'}
-      style={{ height }}
+      style={{ height: height ?? '100%' }}
       onClick={onClick}
       data-wheel-context={compact ? undefined : 'chart'}
       data-chart-symbols={ctxSymbols.join(',')}
@@ -435,6 +461,9 @@ export function Chart({
       data-measure-count={measureCount}
       data-draw-selected={selectedCount}
       data-draw-dof={dofFree ?? ''}
+      data-leg-count={legCount}
+      data-leg-strike={legStrike ?? ''}
+      data-leg-dte={legDte ?? ''}
     />
   )
 }

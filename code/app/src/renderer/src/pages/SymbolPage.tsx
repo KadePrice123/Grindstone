@@ -14,8 +14,10 @@ import {
   IndicatorKey,
   IndicatorParams,
 } from '../components/Chart'
-import { ChartDraw, DrawTool } from '../components/ChartDraw'
-import { DrawEditor } from '../components/DrawEditor'
+import { ChartDraw, DrawTool, tradingDayOffset } from '../components/ChartDraw'
+import { ChainPanel } from '../components/ChainPanel'
+import { DrawEditor, LegEditor } from '../components/DrawEditor'
+import { PRESETS, placePreset, expirationForDte } from '../presets'
 import { IndicatorSettings } from '../components/IndicatorSettings'
 import { Metrics, barRange } from '../components/Metrics'
 import { ChartMiniIcon } from '../components/icons'
@@ -109,6 +111,12 @@ export function SymbolPage({
   const [drawSaveErr, setDrawSaveErr] = useState<string | null>(null)
   const [indHidden, setIndHidden] = useState(false)
   const [showIndSettings, setShowIndSettings] = useState(false)
+  /** The right panel: chain, news, or closed. Options chains and news are
+   *  OPTIONAL — the chart is the centerpiece and owns the width they free. */
+  const [panel, setPanel] = useState<'chain' | 'news' | null>(null)
+  /** The five indicator toggles live in a popover now — they were the row that
+   *  made the toolbar wrap at 1180px. */
+  const [showInd, setShowInd] = useState(false)
   // Session-scoped periods (IndicatorSettings notes this); stable identity —
   // it sits in the Chart's rebuild-effect deps.
   const [indicatorParams, setIndicatorParams] = useState<IndicatorParams>(DEFAULT_PARAMS)
@@ -251,6 +259,32 @@ export function SymbolPage({
     else setDrawTool('delete')
   }, [])
 
+  /** One click, one strategy: legs land at %-of-spot defaults in the future
+   *  whitespace, the group is selected, and the chain panel opens — then
+   *  everything is the drag/type grammar. Deterministic from bar data alone,
+   *  so it works identically with no chain data at all. */
+  const applyPreset = useCallback((key: string) => {
+    const p = PRESETS.find((x) => x.key === key)
+    const spot = barsRef.current[barsRef.current.length - 1]?.close
+    if (!p || !spot) return
+    const specs = placePreset(p, spot, new Date().toISOString().slice(0, 10))
+    if (!specs) return
+    draw.current?.addLegGroup(specs)
+    setPanel('chain') // the readout must be visible when the zones land
+  }, [])
+
+  const addSingleLeg = useCallback(() => {
+    const spot = barsRef.current[barsRef.current.length - 1]?.close
+    if (!spot) return
+    const expiration = expirationForDte(new Date().toISOString().slice(0, 10), 45)
+    if (!expiration) return
+    draw.current?.addLeg({
+      side: 'long', right: 'C', expiration, strike: spot,
+      dteTol: 3, strikeTol: Math.max(1, spot * 0.005),
+    })
+    setPanel('chain')
+  }, [])
+
   const handleChartReady = useCallback(({ chart, mainSeries }: ChartReadyApi) => {
     if (draw.current && draw.current.chart === chart) {
       draw.current.setKey(drawKeyRef.current)
@@ -326,6 +360,25 @@ export function SymbolPage({
   /** See ChartsPage: every selected object, measures and pins included. */
   const selectedCount = drawState?.selected.length ?? 0
 
+  // Legs live on the DAILY chart: their bucket key is SYM|1Day, and a 30-DTE
+  // zone on a 5-minute axis would be two thousand bars of whitespace away.
+  const legsEnabled = timeframe === '1Day'
+  const legs = drawState?.legs ?? []
+  const selLeg = drawState?.selectedLegs[0]
+  const selLegResolved = selLeg ? legs.find((l) => l.id === selLeg.id) : undefined
+
+  // Whitespace for the future: keep the furthest zone edge reachable, plus
+  // margin, quantized so small drags do not churn the visible range.
+  let reserve = 0
+  const lastBarDate = bars.length > 0 ? bars[bars.length - 1].ts.slice(0, 10) : null
+  if (legsEnabled && lastBarDate) {
+    for (const l of legs) {
+      const off = tradingDayOffset(lastBarDate, l.window?.expTo ?? l.resolved.expiration)
+      if (off !== null && off > reserve) reserve = off
+    }
+  }
+  const rightReserveBars = reserve > 0 ? Math.ceil((reserve + 6) / 10) * 10 : 0
+
   const toolBtn = (t: { key: DrawTool; label: string; title: string }) => (
     <button
       key={t.key}
@@ -338,152 +391,155 @@ export function SymbolPage({
   )
 
   return (
-    <div className="page wide">
-      <div className="page-head">
-        <ChartMiniIcon />
-        <h1>{symbol}</h1>
-        <span className="dim">{data?.name}</span>
+    <div className="page-chart">
+      <div className="ph-strip">
+        <div className="page-head">
+          <ChartMiniIcon />
+          <h1>{symbol}</h1>
+          <span className="dim">{data?.name}</span>
+        </div>
+        <div className="ph-metrics">
+          <Metrics
+            quote={q}
+            range={barRange(yearBars, yearBars.length >= 200 ? '52-week range' : `${yearBars.length}-day range`)}
+          />
+        </div>
       </div>
 
       {error ? <div className="test-result bad">{error}</div> : null}
 
-      <div className="card">
-        <Metrics
-          quote={q}
-          range={barRange(yearBars, yearBars.length >= 200 ? '52-week range' : `${yearBars.length}-day range`)}
-        />
+      <div className="chart-toolbar pc-toolbar">
+        <div className="tgrp">
+          <span className="tgrp-label">Strategy</span>
+          <div className="seg">
+            <select
+              className="seg-select"
+              title="Strategy presets — place a whole options structure as zones"
+              value=""
+              disabled={!legsEnabled}
+              onChange={(e) => {
+                if (e.target.value) applyPreset(e.target.value)
+                e.target.value = ''
+              }}
+            >
+              <option value="">{legsEnabled ? 'Preset…' : 'Preset (1D only)'}</option>
+              {PRESETS.map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <button
+              className="seg-btn"
+              title="Leg — place a single option leg at the money"
+              disabled={!legsEnabled}
+              onClick={addSingleLeg}
+            >
+              Leg
+            </button>
+            <button
+              className="seg-btn"
+              title="Clear legs"
+              disabled={!legsEnabled || legs.length === 0}
+              onClick={() => draw.current?.clearLegs()}
+            >
+              Clear legs
+            </button>
+          </div>
+        </div>
+        <div className="tgrp">
+          <span className="tgrp-label">Time</span>
+          <div className="seg">
+            {TIMEFRAMES.map((t) => (
+              <button
+                key={t.key}
+                className={`seg-btn${timeframe === t.key ? ' on' : ''}`}
+                onClick={() => setTimeframe(t.key)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="tgrp">
+          <span className="tgrp-label">Draw</span>
+          <div className="seg">
+            {PLACE_TOOLS.map(toolBtn)}
+            <span className="seg-sep" />
+            <button
+              className={`seg-btn${drawTool === 'delete' ? ' on' : ''}`}
+              title="Delete — removes the selection, or arms click-to-delete"
+              onClick={deleteAction}
+            >
+              Del
+            </button>
+            {toolBtn(TRIM_TOOL)}
+            <span className="seg-sep" />
+            <button
+              className="seg-btn"
+              title="Clear every drawing on this timeframe"
+              onClick={() => draw.current?.clearDrawings()}
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+        <div className="tgrp">
+          <span className="tgrp-label">Measure</span>
+          <div className="seg">
+            {MEASURE_TOOLS.map(toolBtn)}
+            <button
+              className="seg-btn"
+              title="Clear all measurements"
+              onClick={() => draw.current?.clearMeasures()}
+            >
+              Clear M
+            </button>
+          </div>
+        </div>
+        <div className="tgrp">
+          <span className="tgrp-label">View</span>
+          <div className="seg">
+            <button
+              className={`seg-btn${showInd ? ' on' : ''}`}
+              title="Indicators — choose which are shown"
+              onClick={() => setShowInd((v) => !v)}
+            >
+              Indicators
+            </button>
+            <button
+              className={`seg-btn${drawingsHidden ? ' vis-off' : ''}`}
+              title={drawingsHidden ? 'Show drawings' : 'Hide drawings (kept, not deleted)'}
+              onClick={toggleDrawVis}
+            >
+              Drawings
+            </button>
+            <span className="seg-sep" />
+            <button
+              className={`seg-btn${panel === 'chain' ? ' on' : ''}`}
+              title="Options chain — contracts inside each leg's zone"
+              onClick={() => setPanel(panel === 'chain' ? null : 'chain')}
+            >
+              Chain
+            </button>
+            <button
+              className={`seg-btn${panel === 'news' ? ' on' : ''}`}
+              title="News"
+              onClick={() => setPanel(panel === 'news' ? null : 'news')}
+            >
+              News
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="card chart-card">
-        <div className="chart-toolbar">
-          <div className="tgrp">
-            <span className="tgrp-label">Time</span>
-            <div className="seg">
-              {TIMEFRAMES.map((t) => (
-                <button
-                  key={t.key}
-                  className={`seg-btn${timeframe === t.key ? ' on' : ''}`}
-                  onClick={() => setTimeframe(t.key)}
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="tgrp">
-            <span className="tgrp-label">Indicators</span>
-            <div className="seg">
-              {INDICATORS.map((i) => (
-                <button
-                  key={i.key}
-                  className={`seg-btn${indicators.includes(i.key) ? ' on' : ''}`}
-                  onClick={() => toggle(i.key)}
-                >
-                  {i.label}
-                </button>
-              ))}
-              <span className="seg-sep" />
-              <button
-                className={`seg-btn${showIndSettings ? ' on' : ''}`}
-                title="Indicator settings — edit periods"
-                onClick={() => setShowIndSettings((v) => !v)}
-              >
-                ⚙
-              </button>
-            </div>
-          </div>
-          <div className="tgrp">
-            <span className="tgrp-label">Draw</span>
-            <div className="seg">
-              {PLACE_TOOLS.map(toolBtn)}
-              <span className="seg-sep" />
-              <button
-                className={`seg-btn${drawTool === 'delete' ? ' on' : ''}`}
-                title="Delete — removes the selection, or arms click-to-delete"
-                onClick={deleteAction}
-              >
-                Del
-              </button>
-              {toolBtn(TRIM_TOOL)}
-              <span className="seg-sep" />
-              <button
-                className="seg-btn"
-                title="Clear every drawing on this timeframe"
-                onClick={() => draw.current?.clearDrawings()}
-              >
-                Clear
-              </button>
-            </div>
-          </div>
-          <div className="tgrp">
-            <span className="tgrp-label">Measure</span>
-            <div className="seg">
-              {MEASURE_TOOLS.map(toolBtn)}
-              <button
-                className="seg-btn"
-                title="Clear all measurements"
-                onClick={() => draw.current?.clearMeasures()}
-              >
-                Clear M
-              </button>
-            </div>
-          </div>
-          <div className="tgrp">
-            <span className="tgrp-label">View</span>
-            <div className="seg">
-              <button
-                className={`seg-btn${drawingsHidden ? ' vis-off' : ''}`}
-                title={drawingsHidden ? 'Show drawings' : 'Hide drawings (kept, just hidden)'}
-                onClick={toggleDrawVis}
-              >
-                Drawings
-              </button>
-              <button
-                className={`seg-btn${indHidden ? ' vis-off' : ''}`}
-                title={indHidden ? 'Restore indicators' : 'Hide all indicators (set is remembered)'}
-                onClick={toggleIndVis}
-              >
-                Indicators
-              </button>
-            </div>
-          </div>
-          <span className="subtle chart-source">
-            {bars.length > 0 ? `${bars.length} bars · ${barSource}` : barNote || 'loading…'}
-          </span>
-          {/* Drawings are saved in the background, so a failure has no other
-              way to reach the user — and "my lines vanished on restart" is
-              the complaint it prevents. */}
-          {drawSaveErr ? (
-            <span className="subtle draw-save-err" data-draw-save-err="1">
-              drawings not saved: {drawSaveErr}
-            </span>
-          ) : null}
-          {/* A refusal the engine could not carry out — a locked drawing that
-              will not drag, a constraint that adds nothing. Silence here would
-              make the gesture look broken. */}
-          {drawState?.issue ? (
-            <span className="subtle draw-issue" data-draw-issue={drawState.issue.code}>
-              {drawState.issue.message}
-            </span>
-          ) : null}
-          {drawState && drawState.dof.total > 0 ? (
-            <span
-              className={`subtle draw-dof${drawState.dof.free === 0 ? ' draw-dof-fixed' : ''}`}
-              title="Free coordinates left in this sketch. 0 = fully defined: nothing can shift under you."
-            >
-              {drawState.dof.free === 0
-                ? 'fully defined'
-                : `${drawState.dof.free} free`}
-            </span>
-          ) : null}
-        </div>
-        <div className="chart-stage">
+      <div className="pc-main">
+        <div className="chart-stage pc-stage">
           {bars.length > 0 ? (
             <Chart
               bars={bars}
               indicators={indicators}
               indicatorParams={indicatorParams}
-              height={indicators.includes('rsi14') ? 480 : 400}
               onReady={handleChartReady}
               symbols={[symbol]}
               timeframe={timeframe}
@@ -493,6 +549,10 @@ export function SymbolPage({
               measureCount={drawState?.measures ?? 0}
               selectedCount={selectedCount}
               dofFree={drawState?.dof.free ?? null}
+              legCount={legs.length}
+              legStrike={selLegResolved ? selLegResolved.resolved.strike : null}
+              legDte={selLegResolved ? selLegResolved.resolved.expiration : null}
+              rightReserveBars={rightReserveBars}
             />
           ) : (
             <div className="chart-empty dim">{barNote || 'No bars for this timeframe.'}</div>
@@ -509,6 +569,48 @@ export function SymbolPage({
               />
             </div>
           ) : null}
+          {engine && selection.length === 0 && selLegResolved && bars.length > 0 ? (
+            <div className="float-panel draw-editor-float">
+              <LegEditor engine={engine} leg={selLegResolved} />
+            </div>
+          ) : null}
+          {showInd ? (
+            <div className="float-panel ind-float">
+              <div className="de-head">
+                <span>Indicators</span>
+                <button className="de-x" title="Close" onClick={() => setShowInd(false)}>
+                  ×
+                </button>
+              </div>
+              <div className="seg ind-float-seg">
+                {INDICATORS.map((i) => (
+                  <button
+                    key={i.key}
+                    className={`seg-btn${indicators.includes(i.key) ? ' on' : ''}`}
+                    onClick={() => toggle(i.key)}
+                  >
+                    {i.label}
+                  </button>
+                ))}
+              </div>
+              <div className="seg ind-float-seg">
+                <button
+                  className="seg-btn"
+                  title="Indicator settings — edit periods"
+                  onClick={() => setShowIndSettings(true)}
+                >
+                  ⚙ Settings
+                </button>
+                <button
+                  className={`seg-btn${indHidden ? ' vis-off' : ''}`}
+                  title={indHidden ? 'Restore indicators' : 'Hide all indicators (set is remembered)'}
+                  onClick={toggleIndVis}
+                >
+                  {indHidden ? 'Restore' : 'Hide all'}
+                </button>
+              </div>
+            </div>
+          ) : null}
           {showIndSettings ? (
             <div className="float-panel indset-float">
               <IndicatorSettings
@@ -519,29 +621,74 @@ export function SymbolPage({
             </div>
           ) : null}
         </div>
+
+        {panel !== null ? (
+          <aside className="side-panel">
+            {panel === 'chain' ? (
+              <ChainPanel symbol={symbol} legs={legsEnabled ? legs : []} />
+            ) : (
+              <div className="sp-news">
+                {data == null ? (
+                  <div className="dim">Loading…</div>
+                ) : data.news.length === 0 ? (
+                  <div className="dim">Nothing recent for {symbol} in the local store.</div>
+                ) : (
+                  data.news.map((n) => (
+                    <div
+                      className="news-row"
+                      key={n.id}
+                      onClick={() => onNavigate({ name: 'article', id: n.id })}
+                      title="Read the article"
+                    >
+                      <div className="news-head">{n.headline}</div>
+                      <div className="subtle">
+                        {n.source} · {age(n.created_at)} · {n.symbols.slice(0, 5).join(' ')}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </aside>
+        ) : null}
       </div>
 
-      <div className="card">
-        <h2>News</h2>
-        {data == null ? (
-          <div className="dim">Loading…</div>
-        ) : data.news.length === 0 ? (
-          <div className="dim">Nothing recent for {symbol} in the local store.</div>
-        ) : (
-          data.news.map((n) => (
-            <div
-              className="news-row"
-              key={n.id}
-              onClick={() => onNavigate({ name: 'article', id: n.id })}
-              title="Read the article"
-            >
-              <div className="news-head">{n.headline}</div>
-              <div className="subtle">
-                {n.source} · {age(n.created_at)} · {n.symbols.slice(0, 5).join(' ')}
-              </div>
-            </div>
-          ))
-        )}
+      <div className="status-bar">
+        <span className="status-chip-space" aria-hidden="true" />
+        <span className="subtle chart-source">
+          {bars.length > 0 ? `${bars.length} bars · ${barSource}` : barNote || 'loading…'}
+        </span>
+        {/* Drawings are saved in the background, so a failure has no other
+            way to reach the user — and "my lines vanished on restart" is
+            the complaint it prevents. */}
+        {drawSaveErr ? (
+          <span className="subtle draw-save-err" data-draw-save-err="1">
+            drawings not saved: {drawSaveErr}
+          </span>
+        ) : null}
+        {/* A refusal the engine could not carry out — a locked drawing that
+            will not drag, a constraint that adds nothing. Silence here would
+            make the gesture look broken. */}
+        {drawState?.issue ? (
+          <span className="subtle draw-issue" data-draw-issue={drawState.issue.code}>
+            {drawState.issue.message}
+          </span>
+        ) : null}
+        {drawState && drawState.dof.total > 0 ? (
+          <span
+            className={`subtle draw-dof${drawState.dof.free === 0 ? ' draw-dof-fixed' : ''}`}
+            title="Free coordinates left in this sketch. 0 = fully defined: nothing can shift under you."
+          >
+            {drawState.dof.free === 0
+              ? 'fully defined'
+              : `${drawState.dof.free} free`}
+          </span>
+        ) : null}
+        {legs.length > 0 && legsEnabled ? (
+          <span className="subtle leg-status">
+            {legs.length} leg{legs.length === 1 ? '' : 's'}
+          </span>
+        ) : null}
       </div>
     </div>
   )
