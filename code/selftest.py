@@ -2773,6 +2773,12 @@ const RESTORED = {
   measures: [{ id: 'ms2', a: { kind: 'candle', time: 1700000000 },
                b: { kind: 'candle', time: 1700086400 } }],
   pins: [{ id: 'pin3', time: 1700000000 }],
+  // A leg holds the HIGHEST restored id, so the counter must adopt from the
+  // legs list specifically — dw/ms/pin only reach 3, and a counter that skips
+  // legs would mint 'lg4' for the next new object: two legs, one name, and
+  // deleteLeg sweeps both.
+  legs: [{ id: 'lg4', side: 'short', right: 'P', expiration: '2026-09-18',
+           strike: 560, dteTol: 3, strikeTol: 5, slot: 0 }],
 }
 
 const store = mkStore({ 'SPY|1Day': RESTORED })
@@ -2783,7 +2789,18 @@ await settle(5)
 let s = e.getState()
 ok('a saved chart comes back', s.drawings === 1, s.drawings)
 ok('measures and pins come back too', s.measures === 2, s.measures)
+ok('legs come back with the rest', s.legs.length === 1 && s.legs[0].id === 'lg4',
+   JSON.stringify(s.legs.map((l) => l.id)))
 ok('hydrating is not itself a write', store.saves.length === 0, store.saves.length)
+
+// The id counter adopted from the LEGS list: lg4 is the highest restored id,
+// so the next minted object must be 5+, never a second 'lg4'.
+const mintedLeg = e.addLeg({ side: 'long', right: 'C', expiration: '2026-10-16',
+                             strike: 570, dteTol: 3, strikeTol: 5 }).id
+ok('a new leg cannot reuse a restored leg id',
+   mintedLeg !== 'lg4' && e.bucket().legs.filter((l) => l.id === 'lg4').length === 1,
+   mintedLeg)
+e.deleteLeg(mintedLeg) // leave the scene as the later assertions expect
 
 // THE ID COLLISION: a fresh module counter starts at 1, so without adoptIds
 // the first new drawing is called 'dw1' -- the name a restored drawing already
@@ -2880,7 +2897,7 @@ console.log(JSON.stringify(out))
     bad = [x for x in results if not x["cond"]]
     assert not bad, "the drawing engine's persistence is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad)
-    assert len(results) >= 16, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 19, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("options: leg-window filtering is exact, and no-creds is a designed state")
@@ -3129,12 +3146,19 @@ b.drawings.push(
   { id: 'tr', kind: 'trend',
     points: [{ time: day(10), price: 600 }, { time: day(18), price: 604 }] }
 )
+// THE LEG IS MINTED THROUGH THE API, not hand-pushed. A hand-pushed fixture id
+// ('lg1') collided with the id the fresh module counter mints for the first
+// addLeg — two legs, one name — and deleteLeg then swept both, making every
+// slot assertion below pass VACUOUSLY under any mutation. Same lesson as the
+// constraints round, inverted: fixtures must travel the path real objects do.
 // Note 2024-01-02 is a Tuesday, so day() indices ARE calendar days here only
 // while inside the same week; the resolution below uses in-range dates, where
 // the real lattice answers, not the weekday extrapolation.
-b.legs.push({ id: 'lg1', side: 'short', right: 'P',
+const legA = e.addLeg({ side: 'short', right: 'P',
   expiration: new Date(day(30) * 1000).toISOString().slice(0, 10),
-  strike: 550, dteTol: 3, strikeTol: 5, slot: 0, hostId: 'tr' })
+  strike: 550, dteTol: 3, strikeTol: 5, hostId: 'tr' }).id
+ok('the minted id is unique in the bucket',
+   b.legs.filter((l) => l.id === legA).length === 1, JSON.stringify(b.legs.map((l) => l.id)))
 
 const r1 = e.legResolved(b.legs[0])
 ok('a trend host drives the strike at the LEG\'S expiration',
@@ -3166,21 +3190,25 @@ ok('an hline host drives the strike', r4.strike === 580, r4.strike)
 ok('and does not touch the expiration', r4.expiration === b.legs[0].expiration, '')
 
 // Typing a strike into a hosted leg means "stop riding the line".
-e.updateLeg('lg1', { strike: 555 })
+e.updateLeg(legA, { strike: 555 })
 ok('typing a strike unbinds a strike-driven leg',
    b.legs[0].hostId === undefined && b.legs[0].strike === 555,
    JSON.stringify({ hostId: b.legs[0].hostId, strike: b.legs[0].strike }))
 
-// Slots: first free slot is reused so the palette does not drift.
-e.addLeg({ side: 'long', right: 'C', expiration: '2026-09-18', strike: 600,
-           dteTol: 3, strikeTol: 5 })
+// Slots: first free slot is reused so the palette does not drift. The scene
+// must DISCRIMINATE reuse from slot-by-count: after deleting the slot-0 leg,
+// one leg (slot 1) remains, so first-free gives 0 while length gives 1.
+const legB = e.addLeg({ side: 'long', right: 'C', expiration: '2026-09-18', strike: 600,
+                        dteTol: 3, strikeTol: 5 }).id
 ok('a second leg takes the next free color slot',
-   b.legs[1].slot === 1, b.legs[1].slot)
-e.deleteLeg(b.legs[0].id)
-e.addLeg({ side: 'long', right: 'P', expiration: '2026-09-18', strike: 590,
-           dteTol: 3, strikeTol: 5 })
-ok('a freed slot is reused rather than drifting the palette',
-   b.legs.some((l) => l.slot === 0), JSON.stringify(b.legs.map((l) => l.slot)))
+   b.legs.find((l) => l.id === legB).slot === 1, JSON.stringify(b.legs.map((l) => l.slot)))
+e.deleteLeg(legA)
+ok('deleting removes exactly the named leg',
+   b.legs.length === 1 && b.legs[0].id === legB, JSON.stringify(b.legs.map((l) => l.id)))
+const legC = e.addLeg({ side: 'long', right: 'P', expiration: '2026-09-18', strike: 590,
+                        dteTol: 3, strikeTol: 5 }).id
+ok('the freed slot 0 is reused rather than drifting the palette',
+   b.legs.find((l) => l.id === legC).slot === 0, JSON.stringify(b.legs.map((l) => l.slot)))
 
 console.log(JSON.stringify(out))
 """
@@ -3196,7 +3224,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 19, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 21, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")
