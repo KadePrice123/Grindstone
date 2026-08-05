@@ -1,9 +1,15 @@
 # Pickup notes — installers, then chart dimensions (2026-08-05)
 
 Newest session first. Older sections are accurate history; where they quote a
-gate count it is stale — **the gate is 43/43** as of 2026-08-05. (The 41/41
+gate count it is stale — **the gate is 44/44** as of 2026-08-05. (The 41/41
 this line used to claim was itself stale by two: bump BOTH this line and
 `checkpoint.json` when you add a check.)
+
+> **Constraints have their own document now: [CONSTRAINTS.md](CONSTRAINTS.md).**
+> It is the settled architecture for the whole D1–D5 family — model, solver,
+> interaction, staging, and the three product calls Kade closed on 2026-08-05.
+> Read it before touching anything constraint-shaped. The D-items below stay as
+> the running checklist; the *reasoning* lives there.
 
 ## Open work — the whole list
 
@@ -54,6 +60,7 @@ false while you merely scroll sideways.
 
 | # | Item | Size |
 |---|---|---|
+| ~~D0~~ | ~~Groundwork + `lock`~~ — **DONE 2026-08-05** (`c19eb57`, `edac3df`). Stages 1–2 of [CONSTRAINTS.md](CONSTRAINTS.md): chart-minute prefix sum, `barIndexOf` that reports instead of clamping, the `commit()` seam, then `lock` with exact counted DOF, the blocked-drag notice and the DOF badge. Gate 42 → 44. | |
 | D1 | **Type a value to make a dimension a driving constraint** — the core of the ask. Each constraint is one scalar equation over an affine quantity, so it is closed-form, one pass; no iterative solver needed. Detect over-definition at CREATION on a speculative copy and refuse, naming the conflict, rather than at drag time days later | medium |
 | D2 | **Drag a constrained object and the set follows** — the other half of D1. Needs blocked-drag behaviour: clamp at the last feasible position, keep the ghost tracking the cursor, paint the blocking constraint red. Never let the driver move while a constraint sits violated | medium |
 | D3 | **Ctrl-select two entities + a hotkey mints a dimension** — ctrl-click already means "add to selection", so this needs no new picking code, just a hotkey that reads `selected` and requires exactly two | small |
