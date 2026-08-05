@@ -331,7 +331,16 @@ export function ChartsPage() {
     })
     d.setTool(toolRef.current)
     d.setDrawingsHidden(drawHiddenRef.current)
-    d.onChange((s: EngineState) => setDrawState(s))
+    d.onChange((s: EngineState) => {
+      setDrawState(s)
+      // The engine can now disarm itself (Escape's last rung) while the PAGE
+      // owns the lit toolbar button. Mirror its tool back or they desync: React
+      // would still hold 'trend', so clicking Trend again is a same-value
+      // setState — no re-render, no effect, and the toolbar looks dead.
+      // setTool()'s `if (tool === this.tool) return` guard makes the round trip
+      // a no-op, so this cannot loop.
+      setTool(s.tool)
+    })
     draw.current = d
     setEngine(d)
     setDrawState(d.getState())
@@ -360,7 +369,10 @@ export function ChartsPage() {
   // selected it arms click-to-delete. The wheel's 'delete' routes here too.
   const deleteAction = useCallback(() => {
     const s = draw.current?.getState()
-    if (s && s.selection.length > 0) draw.current?.deleteSelected()
+    // `selected` (every kind), not `selection` (drawings only) — otherwise a
+    // selected measurement fell through to arming click-to-delete instead of
+    // deleting the thing the user had just selected.
+    if (s && s.selected.length > 0) draw.current?.deleteSelected()
     else setTool('delete')
   }, [])
 
@@ -467,6 +479,10 @@ export function ChartsPage() {
 
   const flags = drawingsHidden ? ['drawhidden'] : []
   const selection = drawState?.selection ?? []
+  /** Every selected object, not just drawings — a measurement counts as a
+   *  selection for the toolbar's sake even though it has no coordinate boxes
+   *  to edit. */
+  const selectedCount = drawState?.selected.length ?? 0
 
   const toolBtn = (t: { key: DrawTool; label: string; title: string }) => (
     <button
@@ -662,7 +678,7 @@ export function ChartsPage() {
               drawTool={tool}
               drawCount={drawState?.drawings ?? 0}
               measureCount={drawState?.measures ?? 0}
-              selectedCount={selection.length}
+              selectedCount={selectedCount}
             />
           )}
           {/* Selection editor appears with the selection and leaves with it. */}

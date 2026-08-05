@@ -136,6 +136,28 @@ export interface InspectPin {
   time: UTCTimestamp
 }
 
+/** What a pick can land on. Drawings carry the nearest-point/parameter that
+ *  trim and measure-snap need; measures and pins are pick-or-not. `id` is on
+ *  every arm so the selection can stay a flat string[] — mkId's single counter
+ *  makes ids unique across all three collections, so no per-kind bookkeeping
+ *  is needed anywhere downstream. */
+export type Hit =
+  | { kind: 'drawing'; id: string; drawing: Drawing; dist: number; nx: number; ny: number; u: number }
+  | { kind: 'measure'; id: string; measure: Measure; dist: number }
+  | { kind: 'pin'; id: string; pin: InspectPin; dist: number }
+
+/** A chip's last drawn rectangle. Held as a {kind, id} REFERENCE rather than an
+ *  object pointer: resolving through the bucket at read time means a stale rect
+ *  left by a deleted measure picks nothing instead of resurrecting a ghost. */
+interface HotZone {
+  left: number
+  top: number
+  w: number
+  h: number
+  kind: 'measure' | 'pin'
+  id: string
+}
+
 export interface DrawState {
   tool: DrawTool
   /** COUNT of drawings — feeds data-draw-count as-is. */
@@ -143,9 +165,16 @@ export interface DrawState {
   /** COUNT of measures + inspect pins — feeds data-measure-count as-is
    *  (pins are measurement annotations: clearmeasure removes both). */
   measures: number
-  /** The selected Drawing objects, in selection order — feeds DrawEditor. */
+  /** The selected DRAWING objects, in selection order — feeds DrawEditor's
+   *  coordinate boxes, which are drawing vocabulary and stay typed to it. */
   selection: Drawing[]
-  /** Their ids, same order. */
+  /** Selected measures / pins, as parallel channels. A measure has no points[]
+   *  to edit, so folding these into `selection` would poison every existing
+   *  consumer for no gain. */
+  selectedMeasures: Measure[]
+  selectedPins: InspectPin[]
+  /** EVERY selected id, whatever kind. This — not selection.length — is the
+   *  honest "is anything selected". */
   selected: string[]
   hidden: boolean
 }
@@ -288,6 +317,13 @@ export class ChartDraw {
   private pendingAnchor: MeasureAnchor | null = null
   private cursor: { x: number; y: number; time: UTCTimestamp | null } | null = null
   private selected: string[] = []
+  /** Chip rectangles from the LAST COMPLETED render. Chips are HTML in a
+   *  pointer-events:none layer, so remembering where they were drawn is the
+   *  only way to click one. Published atomically at the END of render() from
+   *  zoneDraft — picking against a half-built list would resolve to the wrong
+   *  object, or to none. */
+  private hotZones: HotZone[] = []
+  private zoneDraft: HotZone[] = []
   private hidden = false
   private changeCb: ((s: DrawState) => void) | null = null
 
@@ -394,6 +430,14 @@ export class ChartDraw {
           this.selected = []
           this.render()
           this.emit()
+        } else if (this.tool !== 'pointer') {
+          // Last rung: nothing half-placed and nothing selected, so "cancel"
+          // can only mean the TOOL itself — which is what Escape means in
+          // every other drawing program. Without this the tool stayed armed
+          // and the next click started another shape. setTool() already nulls
+          // the pendings, resets the cursor, renders and emits, so the pages
+          // learn about it through onChange.
+          this.setTool('pointer')
         }
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.selected.length > 0) {
         this.deleteSelected()
@@ -474,11 +518,17 @@ export class ChartDraw {
     this.emit()
   }
 
+  /** Removes EVERY selected object, whatever kind. One doomed set sweeps all
+   *  three arrays because mkId's ids are globally unique — the selection needs
+   *  no per-kind bookkeeping. Previously this filtered b.drawings alone, so a
+   *  measure could never be deleted by the Del key or the Delete tool. */
   deleteSelected(): void {
     if (this.selected.length === 0) return
     const b = this.bucket()
     const doomed = new Set(this.selected)
     b.drawings = b.drawings.filter((d) => !doomed.has(d.id))
+    b.measures = b.measures.filter((m) => !doomed.has(m.id))
+    b.pins = b.pins.filter((p) => !doomed.has(p.id))
     this.selected = []
     this.render()
     this.emit()
@@ -511,8 +561,14 @@ export class ChartDraw {
   /** Measures + inspect pins only. */
   clearMeasures(): void {
     const b = this.bucket()
+    // Selected ids must go with the objects. Harmless while only drawings
+    // could be selected; now that measures and pins can be, leaving their ids
+    // behind would keep `selected` pointing at things that no longer exist and
+    // the Delete key would act on nothing.
+    const gone = new Set([...b.measures.map((m) => m.id), ...b.pins.map((p) => p.id)])
     b.measures = []
     b.pins = []
+    this.selected = this.selected.filter((id) => !gone.has(id))
     this.pendingAnchor = null
     this.render()
     this.emit()
@@ -531,6 +587,11 @@ export class ChartDraw {
   getState(): DrawState {
     const b = this.bucket()
     const byId = new Map(b.drawings.map((d) => [d.id, d]))
+    const mById = new Map(b.measures.map((m) => [m.id, m]))
+    const pById = new Map(b.pins.map((p) => [p.id, p]))
+    // Each kind is resolved into its own channel, in selection order. A
+    // selected measure used to be dropped silently here (the filter kept only
+    // Drawings), which is why clicking one could never light up the editor.
     return {
       tool: this.tool,
       drawings: b.drawings.length,
@@ -538,6 +599,12 @@ export class ChartDraw {
       selection: this.selected
         .map((id) => byId.get(id))
         .filter((d): d is Drawing => d !== undefined),
+      selectedMeasures: this.selected
+        .map((id) => mById.get(id))
+        .filter((m): m is Measure => m !== undefined),
+      selectedPins: this.selected
+        .map((id) => pById.get(id))
+        .filter((p): p is InspectPin => p !== undefined),
       selected: [...this.selected],
       hidden: this.hidden,
     }
@@ -781,6 +848,52 @@ export class ChartDraw {
       }
     }
     return best !== null && best.dist <= HIT_PX ? best : null
+  }
+
+  /**
+   * The picking entry point for select and delete.
+   *
+   * hitTest() above is left byte-identical and still walks drawings only —
+   * trim and measure-snap call it directly and their vocabulary IS lines, so
+   * widening it would let "trim" resolve to a measurement. This wrapper is
+   * what the user-facing "click a thing" verbs go through instead.
+   *
+   * Chips are tried first: a chip is an opaque box drawn over everything, and
+   * a label the eye reads as the object IS the object, so a click inside one
+   * can only have meant that chip. Connectors then compete with drawings on
+   * plain pixel distance, so the closer thing under the cursor wins rather
+   * than whichever array happened to be scanned first.
+   */
+  private hitAny(x: number, y: number): Hit | null {
+    const b = this.bucket()
+    for (const z of this.hotZones) {
+      if (x < z.left || x > z.left + z.w || y < z.top || y > z.top + z.h) continue
+      if (z.kind === 'measure') {
+        const m = b.measures.find((v) => v.id === z.id)
+        if (m) return { kind: 'measure', id: m.id, measure: m, dist: 0 }
+      } else {
+        const p = b.pins.find((v) => v.id === z.id)
+        if (p) return { kind: 'pin', id: p.id, pin: p, dist: 0 }
+      }
+    }
+    let best: Hit | null = null
+    for (const m of b.measures) {
+      const A = this.resolveAnchor(m.a)
+      const B = this.resolveAnchor(m.b)
+      if (!A || !B) continue
+      const h = distToSeg(x, y, A, B)
+      if (h.dist <= HIT_PX && (best === null || h.dist < best.dist)) {
+        best = { kind: 'measure', id: m.id, measure: m, dist: h.dist }
+      }
+    }
+    const d = this.hitTest(x, y)
+    if (d && (best === null || d.dist < best.dist)) {
+      return {
+        kind: 'drawing', id: d.drawing.id, drawing: d.drawing,
+        dist: d.dist, nx: d.nx, ny: d.ny, u: d.u,
+      }
+    }
+    return best
   }
 
   // ---- trim ---------------------------------------------------------------
@@ -1100,8 +1213,18 @@ export class ChartDraw {
     this.emit()
   }
 
+  /** Add/remove one id. Shared so selection behaves identically however the
+   *  pick arrived. */
+  private toggleSelect(id: string): void {
+    const at = this.selected.indexOf(id)
+    if (at >= 0) this.selected.splice(at, 1)
+    else this.selected.push(id)
+    this.render()
+    this.emit()
+  }
+
   private clickSelect(x: number, y: number): void {
-    const hit = this.hitTest(x, y)
+    const hit = this.hitAny(x, y)
     if (!hit) {
       if (this.selected.length > 0) {
         this.selected = []
@@ -1110,24 +1233,19 @@ export class ChartDraw {
       }
       return
     }
-    const id = hit.drawing.id
-    const at = this.selected.indexOf(id)
-    if (at >= 0) this.selected.splice(at, 1)
-    else this.selected.push(id)
-    this.render()
-    this.emit()
+    this.toggleSelect(hit.id)
   }
 
   private clickDelete(x: number, y: number): void {
-    const hit = this.hitTest(x, y)
+    const hit = this.hitAny(x, y)
     if (!hit) return // empty click = deliberate no-op, never "delete something"
     const b = this.bucket()
     // Clicking any SELECTED object deletes the whole selection; clicking an
     // unselected one deletes just it (selection survives).
-    const doomed = this.selected.includes(hit.drawing.id)
-      ? new Set(this.selected)
-      : new Set([hit.drawing.id])
+    const doomed = this.selected.includes(hit.id) ? new Set(this.selected) : new Set([hit.id])
     b.drawings = b.drawings.filter((d) => !doomed.has(d.id))
+    b.measures = b.measures.filter((m) => !doomed.has(m.id))
+    b.pins = b.pins.filter((p) => !doomed.has(p.id))
     this.selected = this.selected.filter((id) => !doomed.has(id))
     this.render()
     this.emit()
@@ -1259,6 +1377,10 @@ export class ChartDraw {
     this.labels.style.height = `${pane.height}px`
     while (this.svg.firstChild) this.svg.removeChild(this.svg.firstChild)
     while (this.labels.firstChild) this.labels.removeChild(this.labels.firstChild)
+    // Chip rectangles are collected into a draft and published at the very end
+    // of this method: hitAny() may be called at any time and must always see a
+    // COMPLETE frame (the last one), never this one half-built.
+    this.zoneDraft = []
 
     const b = this.bucket()
     const cur = this.cursor
@@ -1299,6 +1421,8 @@ export class ChartDraw {
     }
 
     this.renderPreview(pane)
+    // Frame complete — swap the chip hit-zones in atomically.
+    this.hotZones = this.zoneDraft
   }
 
   private renderDrawing(
@@ -1412,7 +1536,12 @@ export class ChartDraw {
     this.el('circle', { cx: A.x, cy: A.y, r: 2, fill: MEASURE_STROKE })
     this.el('circle', { cx: B.x, cy: B.y, r: 2, fill: MEASURE_STROKE })
     const rows = this.measureRows(m.a.kind, liveB ? liveB.anchor.kind : m.b.kind, A, B)
-    this.chip((A.x + B.x) / 2, (A.y + B.y) / 2 - 10, rows, '', 0.5, 1, pane)
+    const box = this.chip((A.x + B.x) / 2, (A.y + B.y) / 2 - 10, rows, '', 0.5, 1, pane)
+    // The chip IS the measurement's handle — it is what the eye reads as the
+    // object, so it is what a click must resolve to. Only for a REAL stored
+    // measure: liveB means this is the in-progress preview, which is not in
+    // b.measures and must never become clickable.
+    if (!liveB) this.zoneDraft.push({ ...box, kind: 'measure', id: m.id })
   }
 
   private inspectRows(bar: Bar, time: number): ChipRow[] {
@@ -1438,6 +1567,7 @@ export class ChartDraw {
     const yHigh = this.yForPrice(bar.high)
     if (x === null || yHigh === null) return
     const box = this.chip(x, yHigh - 12, this.inspectRows(bar, pin.time), 'cd-inspect cd-pin', 0.5, 1, pane)
+    this.zoneDraft.push({ ...box, kind: 'pin', id: pin.id })
     // Stem from the chip down to the bar it belongs to — a floating box with
     // no stem stops meaning anything the moment two pins share a screen.
     this.line({ x, y: box.top + box.h }, { x, y: yHigh - 2 }, MEASURE_STROKE, 1)

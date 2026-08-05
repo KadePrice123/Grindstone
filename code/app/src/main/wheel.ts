@@ -382,6 +382,25 @@ export class WheelManager {
    *  open tabs. A null ctx (the user navigated here without a chart under
    *  the spawning click) builds the honest empty state — placeholders and
    *  all-off markers, never a guess about some chart somewhere. */
+  /**
+   * Can this wheel do anything useful over a chart?
+   *
+   * A locked chart-draw or chart-measure can — its segments ARE chart actions,
+   * and honouring the lock there is the whole point. A locked Favorites cannot,
+   * and honouring it there would strand the chart hub: the main wheel's
+   * defaults carry no navigation to 'chart', so the only way back would be to
+   * unlock and respawn. So context still wins for wheels that have nothing to
+   * say about a chart.
+   */
+  private usableOverChart(doc: WheelDoc, id: string): boolean {
+    const w = doc.wheels.find((x) => x.id === id)
+    if (!w) return false
+    if (w.id === 'chart' || (w.dynamic ?? '').startsWith('chart-')) return true
+    return w.segments.some(
+      (s) => s.type === 'chart' || (s.type === 'wheel' && s.wheel === 'chart')
+    )
+  }
+
   private chartSegments(kind: string, doc: WheelDoc, ctx: WheelCtx | null): Segment[] {
     const symbols = ctx?.symbols ?? []
     const indicators = ctx?.indicators ?? []
@@ -512,13 +531,21 @@ export class WheelManager {
     const view = this.ensureOverlay(this.preloadPath)
     if (!this.tabs.attachOverlay(winId, view)) return
 
-    // Context BEATS the locked default: right-clicking any chart spawns the
-    // chart wheel; right-clicking off any chart spawns locked ?? main. The
-    // 'chart' wheel is a required builtin, but a doc is user data — check.
+    // An explicit LOCK is a user decision and outranks chart context — but
+    // only when the locked wheel can actually act on a chart. Context used to
+    // win unconditionally, which meant locking the Draw wheel and then
+    // right-clicking the very chart you were drawing on silently swapped it
+    // for the chart hub: the lock appeared to work everywhere EXCEPT the one
+    // surface it exists for.
+    // The 'chart' wheel is a required builtin, but a doc is user data — check.
+    const locked = doc.config.locked
+    const overChart = ctx?.context === 'chart' && doc.wheels.some((w) => w.id === 'chart')
     const wheelId =
-      ctx?.context === 'chart' && doc.wheels.some((w) => w.id === 'chart')
-        ? 'chart'
-        : doc.config.locked ?? 'main'
+      locked !== null && (!overChart || this.usableOverChart(doc, locked))
+        ? locked
+        : overChart
+          ? 'chart'
+          : 'main'
     const { def, segments } = this.materialize(doc, wheelId, 0, ctx, favorites)
     const center = this.clamp(winId, x, y)
 

@@ -1008,11 +1008,18 @@ try {
       await chartClick(fx2, fy2)
       await sleep(400)
       if ((await attr('data-draw-count')) === wantCount) return true
-      // a half-placed anchor would corrupt the next attempt — cancel it
+      // a half-placed anchor would corrupt the next attempt — cancel it.
+      // Escape now also DISARMS the tool as its last rung (the user asked for
+      // "escape cancels the tool you are using"), and this loop exists for the
+      // case where BOTH clicks were dropped — no pending, no selection, so
+      // that last rung is exactly what fires. Re-arm or every remaining retry
+      // clicks into a disarmed engine.
       await chartView.eval(
         `document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))`
       )
       await sleep(200)
+      await toolBtn('Trend line') // both call sites arm the trend tool
+      await sleep(150)
     }
     return (await attr('data-draw-count')) === wantCount
   }
@@ -1081,9 +1088,14 @@ try {
     await sleep(400)
     measured = (await attr('data-measure-count')) === '1'
     if (!measured) {
+      // See placeTwo: Escape's last rung disarms the tool, so re-arm Measure
+      // before retrying or the remaining attempts click into a dead engine.
       await chartView.eval(
         `document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))`
       )
+      await sleep(200)
+      await toolBtn('Measure')
+      await sleep(150)
     }
   }
   check(measured, 'tools: measure connects two real points')

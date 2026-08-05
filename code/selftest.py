@@ -1403,6 +1403,73 @@ def _chart_tools_v3():
         "the chart tools are no longer exercised with trusted input"
 
 
+@check("chart selection: measures are first-class, Escape disarms, lock wins")
+def _chart_selection():
+    """REGRESSION (2026-08-04): five separate reports that were one bug plus
+    two one-liners.
+
+    The engine had exactly ONE picking function and its loop body was
+    `bucket().drawings`, while the selection it fed was Drawing-typed end to
+    end. So a measurement could not be clicked, could not be selected, could
+    not be deleted by the Delete key or the Delete tool, and getState() threw
+    a selected measure's id away silently. Widening the pick and letting the
+    flat id list carry all three kinds closed all of it at once; ids are
+    globally unique (one mkId counter), so no per-kind bookkeeping exists.
+
+    Separately: Escape's ladder stopped after "clear selection" and never
+    disarmed the TOOL, so the next click drew again. And the wheel spawn read
+    "context BEATS the locked default", which meant locking the Draw wheel and
+    right-clicking the chart you were drawing on swapped it for the chart hub
+    -- the lock worked everywhere except the surface it exists for.
+    """
+    draw = (CODE / "app/src/renderer/src/components/ChartDraw.ts").read_text(encoding="utf-8")
+
+    # -- picking reaches every kind ---------------------------------------
+    assert "hitAny" in draw, "the widened picking entry point is gone"
+    for verb in ("clickSelect", "clickDelete"):
+        seg = draw.split(f"private {verb}(")[1][:400]
+        assert "hitAny(" in seg, f"{verb} went back to the drawings-only hitTest"
+    # hitTest itself must stay lines-only: trim and measure-snap call it
+    # directly and widening it would let "trim" resolve to a measurement.
+    trim = draw.split("private clickTrim(")[1][:300]
+    assert "hitTest(" in trim, "clickTrim must keep using the narrow hitTest"
+
+    # -- one doomed set sweeps all three collections ------------------------
+    seg = draw.split("deleteSelected(): void")[1][:600]
+    for arr in ("b.drawings", "b.measures", "b.pins"):
+        assert f"{arr} = {arr}.filter" in seg, \
+            f"deleteSelected no longer removes {arr} - that is the whole bug"
+
+    # -- chips are clickable, and only from a COMPLETE frame ----------------
+    assert "hotZones" in draw and "zoneDraft" in draw, "chip hit-zones are gone"
+    assert "this.hotZones = this.zoneDraft" in draw, \
+        "hit-zones must be published atomically at the END of render(); " \
+        "picking against a half-built list resolves to the wrong object"
+
+    # -- Escape's third rung ------------------------------------------------
+    esc = draw.split("if (e.key === 'Escape')")[1][:1400]
+    assert "setTool('pointer')" in esc, \
+        "Escape stops at clearing the selection again - the tool stays armed " \
+        "and the next click draws"
+
+    # -- the pages act on EVERY selected kind, not just drawings ------------
+    for page in ("ChartsPage", "SymbolPage"):
+        src = (CODE / f"app/src/renderer/src/pages/{page}.tsx").read_text(encoding="utf-8")
+        assert "s.selected.length > 0" in src, \
+            f"{page}'s Delete reads `selection` (drawings only) again, so a " \
+            f"selected measurement falls through to arming click-to-delete"
+        assert "setDrawTool(s.tool)" in src or "setTool(s.tool)" in src, \
+            f"{page} no longer mirrors the engine's tool back - after Escape " \
+            f"disarms the engine the toolbar button goes dead"
+
+    # -- the lock outranks chart context ------------------------------------
+    wheel = (CODE / "app/src/main/wheel.ts").read_text(encoding="utf-8")
+    assert "usableOverChart" in wheel, "the lock/chart-context precedence fix is gone"
+    assert "Context BEATS the locked default" not in wheel, \
+        "the old precedence is back: a locked chart-draw wheel gets replaced " \
+        "by the chart hub on the chart it is being used to draw on"
+
+
 @check("candle depth setting + fixed tab actions")
 def _candles_and_tab_actions():
     sys.path.insert(0, str(CODE))

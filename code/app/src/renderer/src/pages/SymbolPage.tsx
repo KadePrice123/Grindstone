@@ -240,7 +240,9 @@ export function SymbolPage({
   // wheel's 'delete' action routes through the same choice.
   const deleteAction = useCallback(() => {
     const s = draw.current?.getState()
-    if (s && s.selection.length > 0) draw.current?.deleteSelected()
+    // See ChartsPage: `selected` covers measures and pins too, `selection`
+    // is drawings only.
+    if (s && s.selected.length > 0) draw.current?.deleteSelected()
     else setDrawTool('delete')
   }, [])
 
@@ -262,7 +264,12 @@ export function SymbolPage({
     })
     d.setTool(toolRef.current)
     d.setDrawingsHidden(drawHiddenRef.current)
-    d.onChange((s: EngineState) => setDrawState(s))
+    d.onChange((s: EngineState) => {
+      setDrawState(s)
+      // See ChartsPage: Escape's last rung disarms the engine, and the page
+      // owns the lit toolbar button — mirror the tool back or it goes dead.
+      setDrawTool(s.tool)
+    })
     draw.current = d
     setEngine(d)
     setDrawState(d.getState())
@@ -310,6 +317,8 @@ export function SymbolPage({
     ...(indHidden ? ['indhidden'] : []),
   ]
   const selection = drawState?.selection ?? []
+  /** See ChartsPage: every selected object, measures and pins included. */
+  const selectedCount = drawState?.selected.length ?? 0
 
   const toolBtn = (t: { key: DrawTool; label: string; title: string }) => (
     <button
@@ -451,7 +460,7 @@ export function SymbolPage({
               drawTool={drawTool}
               drawCount={drawState?.drawings ?? 0}
               measureCount={drawState?.measures ?? 0}
-              selectedCount={selection.length}
+              selectedCount={selectedCount}
             />
           ) : (
             <div className="chart-empty dim">{barNote || 'No bars for this timeframe.'}</div>
