@@ -1,7 +1,55 @@
-# Pickup notes — install, browsing, charting (2026-08-04)
+# Pickup notes — installers tested on real clean machines (2026-08-05)
 
 Newest session first. The backtest section below is still accurate history but
 its gate number is stale: the gate is **42/42** now, not 38/38.
+
+Both installers were run end to end against genuinely clean machines, and the
+test found three defects that a re-run on a working machine never would.
+
+**Windows** — fresh clone on a box with neither Python nor Node: winget
+installed both, Electron's binary postinstall was skipped and the fallback
+fetched it, gate green. **206s.** The Node MSI is machine-scope, so it raises
+a UAC prompt; that is unavoidable and worth saying in any install doc.
+
+**Linux** — a *freshly created* Ubuntu 26.04 (WSL2), Python 3.14.4, no
+`ensurepip`, no node. The installer recovered the missing system package by
+itself and finished green in **103s**. Every pinned dependency had a cp314
+wheel. The private-Node install (`~/.local/share/grindstone`, 54 MB, no root)
+is the strongest part of that script.
+
+What the clean machines exposed, in order of how much it mattered:
+
+1. **The frontend typecheck was a false green.** `_frontend` resolved node
+   three levels *above* the repo (`<workspace>/runtimes/node/node.exe`), so it
+   only ever ran on the one machine that had that folder — and being `.exe`,
+   it could never run on Linux or macOS at all. It printed "toolchain absent"
+   and still counted `ok`. Confirmed in the wild on Linux, not just reasoned
+   about. Now resolves via PATH, then the portable copy, then the POSIX
+   installer's private Node; **and a missing runtime with typescript present
+   is a FAIL, not a skip.** If a check can silently no-op, assume it does.
+2. **`./install.sh --no-ui` hung forever** whenever sudo wanted a password —
+   and `--no-ui` is the documented unattended mode. Closing stdin does not
+   help: **sudo reads its prompt from `/dev/tty`, not stdin.** It sat in `S+`
+   on pts/0 until killed. `gs_sudo_prefix` now answers "can I become root
+   without blocking?" via `sudo -n`, treats already-being-root as needing no
+   sudo (the container case, where sudo often is not installed), and otherwise
+   bails in ~3s printing the one command to run.
+3. **`Find-Python` rejected a working Microsoft Store Python** as an alias
+   stub. The bare stub is dead, but the real interpreter lives in a package
+   subfolder under the same root and builds a valid venv — so the installer
+   declared "no Python" on a machine that had a good 3.12 and installed a
+   second copy.
+
+Also: the gate printed a full `BrokerError` stack trace on every keyless
+clone, because selftest boots the app and the background market refresh used
+`LOG.exception`. Expected broker failures now log one line. **The Alpaca paper
+key is dead (401/403)** — rotate it before testing anything broker-live.
+
+Untested and should not be claimed otherwise: **macOS**. No Mac here. The
+right fix is a GitHub Actions matrix (`macos-latest` runners are free) rather
+than shipping a Linux container for Mac — a container gives an unsigned,
+XQuartz-dependent, still-untested app, and does not produce the notarized
+`.app` that Gatekeeper expects.
 
 ## Shipped and verified
 

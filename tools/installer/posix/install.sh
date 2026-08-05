@@ -90,6 +90,22 @@ gs_run() {   # log a command and stream it
 
 gs_have_sudo() { command -v sudo >/dev/null 2>&1; }
 
+# How to run a privileged command: empty when we are already root, "sudo" when
+# sudo will run WITHOUT prompting, and failure when becoming root would block.
+#
+# `command -v sudo` is not the question. sudo reads its password prompt from
+# /dev/tty, not stdin, so an unattended run does not fail on it -- it HANGS
+# there forever, with no visible prompt. `sudo -n` is the only way to ask "can
+# I do this without a prompt?". Being root already is the container case, where
+# sudo is frequently not installed at all.
+gs_sudo_prefix() {
+  [ "$(id -u)" = 0 ] && { printf ''; return 0; }
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    printf 'sudo'; return 0
+  fi
+  return 1
+}
+
 MIN_PY=3.12.0
 MIN_NODE=20.0.0
 
@@ -153,13 +169,22 @@ gs_linux_pkg_install() {
     command -v "$m" >/dev/null 2>&1 && { mgr="$m"; break; }
   done
   [ -n "$mgr" ] || return 1
-  gs_have_sudo || { gs_warn "no sudo available - please run: $mgr install $*"; return 1; }
+  local SUDO
+  if ! SUDO="$(gs_sudo_prefix)"; then
+    gs_warn "installing system packages needs root, and sudo here would stop"
+    gs_warn "at a password prompt that an installer cannot answer."
+    gs_warn "Run this once, then start the installer again:"
+    gs_warn "    sudo $mgr install $*"
+    return 1
+  fi
+  # $SUDO is deliberately unquoted: empty must vanish rather than become an
+  # empty first argument.
   case "$mgr" in
-    apt-get) gs_run sudo apt-get update -qq; gs_run sudo apt-get install -y "$@" ;;
-    dnf|yum) gs_run sudo "$mgr" install -y "$@" ;;
-    pacman)  gs_run sudo pacman -Sy --noconfirm "$@" ;;
-    zypper)  gs_run sudo zypper --non-interactive install "$@" ;;
-    apk)     gs_run sudo apk add "$@" ;;
+    apt-get) gs_run $SUDO apt-get update -qq; gs_run $SUDO apt-get install -y "$@" ;;
+    dnf|yum) gs_run $SUDO "$mgr" install -y "$@" ;;
+    pacman)  gs_run $SUDO pacman -Sy --noconfirm "$@" ;;
+    zypper)  gs_run $SUDO zypper --non-interactive install "$@" ;;
+    apk)     gs_run $SUDO apk add "$@" ;;
   esac
 }
 

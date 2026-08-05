@@ -39,6 +39,17 @@ the verification gate, and creates the shortcuts you ticked. Nothing needs to
 be installed beforehand — the installer is built on what each OS already ships
 (WinForms, `osascript`, `zenity`/`kdialog`, or a plain terminal prompt).
 
+**Linux note.** Debian and Ubuntu ship Python without `ensurepip`, so creating
+a virtualenv needs one system package. The installer installs it for you when
+it can do so without stopping to ask — that is, when you are root or `sudo`
+is already authorized. Otherwise it stops in a couple of seconds and prints
+the single command to run; an installer cannot answer a password prompt, so it
+refuses to start one rather than appear to hang:
+
+```bash
+sudo apt-get install python3-venv     # then run ./install.sh again
+```
+
 Afterwards Grindstone launches from its desktop icon or your applications menu
 like any other program: no terminal, no `npm`. The shortcut points straight at
 the Electron binary in the clone, so the app stays wherever you cloned it —
@@ -131,8 +142,15 @@ full output of every step.
   com.apple.quarantine ~/Applications/Grindstone.app`. The Dock tile may read
   "Electron": the wrapper runs Electron's own binary, and only real packaging
   (REQUIREMENTS.md §6.8) fixes that.
+- **Linux: "Could not create a virtualenv"** — Debian/Ubuntu split `ensurepip`
+  into its own package and the installer could not become root without a
+  password prompt. Run `sudo apt-get install python3-venv` (Ubuntu 26.04 also
+  accepts the versioned `python3.14-venv`), then rerun the installer.
 - **Linux: the desktop icon does nothing** — GNOME will not run a launcher it
   does not trust. Right-click it and choose "Allow launching".
+- **Linux: no desktop icon appeared** — there was no `~/Desktop` (common on
+  servers, containers and WSL). The applications-menu entry is still created at
+  `~/.local/share/applications/grindstone.desktop`.
 - **Windows: "Pin to taskbar" did not happen** — Windows 10 1809 removed the
   API that let installers do it. The Start Menu shortcut is created; right-click
   it and pin from there.
@@ -144,8 +162,12 @@ full output of every step.
   are gitignored and the gate scans every tracked file before a push.
 - **Installers**: GitHub Releases on the same repo (download-and-install
   without the source); the auto-updater reads the same Releases feed.
-- **OS targets**: Windows now; Linux committed next; macOS pending the Apple
-  Developer decision (REQUIREMENTS.md §6.8).
+- **OS targets**: Windows and Linux both verified end to end from a clean
+  machine (2026-08-05) — Windows 11 with neither Python nor Node present, and
+  a freshly created Ubuntu 26.04 / Python 3.14.4 with no `ensurepip`. Both
+  finished with the gate green. macOS is written but **untested**: no Mac
+  here, so treat `Install.command` as unverified until it runs on real
+  hardware or a CI runner (REQUIREMENTS.md §6.8).
 
 ## Status
 
@@ -177,5 +199,7 @@ M1 (spine) + search/data (early M4 slice) — the app boots and *works*:
   a form (legs, exit toggles, sizing) for humans, raw JSON for the full spec
   language and future AI agents — both compile to the same spec.
   Pickup notes for in-flight work: `code/docs/NOTES.md`.
-Roadmap: REQUIREMENTS.md §10. Alpaca paper key verified working (in
-`env/alpaca.env`).
+Roadmap: REQUIREMENTS.md §10. The Alpaca paper key in `env/alpaca.env` is
+**no longer valid** — it is rejected 401/403 as of 2026-08-05, so the market
+refresh degrades to the keyless fallback until a fresh key is added in
+Accounts. That is a dead credential, not a bug in the app.
