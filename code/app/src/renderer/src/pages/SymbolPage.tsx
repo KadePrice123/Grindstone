@@ -502,7 +502,11 @@ export function SymbolPage({
               over an empty box driving a disposed engine. */}
           {engine && selection.length > 0 && bars.length > 0 ? (
             <div className="float-panel draw-editor-float">
-              <DrawEditor engine={engine} selection={selection} />
+              <DrawEditor
+                engine={engine}
+                selection={selection}
+                lockedSlots={drawState?.lockedSlots}
+              />
             </div>
           ) : null}
           {showIndSettings ? (

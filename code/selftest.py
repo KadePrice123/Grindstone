@@ -2916,6 +2916,18 @@ def _chart_constraints():
         # dangling-reference refusal below, which IS tested.
         assert not co.is_empty(back)
 
+        # An 'on' round-trips with BOTH references and the optional axis.
+        rel = {**doc, "constraints": [
+            {"id": "cn3", "kind": "on",
+             "a": {"id": "dw2", "part": "a"}, "b": {"id": "dw1", "part": "line"}},
+            {"id": "cn5", "kind": "lock",
+             "a": {"id": "dw2", "part": "b", "axis": "price"}}]}
+        rr = client.put("/api/chart-objects", headers=A, json={"key": KEY, "doc": rel})
+        assert rr.status_code == 200, rr.text
+        got = client.get("/api/chart-objects", headers=A, params={"key": KEY}).json()["doc"]
+        assert got["constraints"][0]["b"] == {"id": "dw1", "part": "line"}, got["constraints"]
+        assert got["constraints"][1]["a"]["axis"] == "price", got["constraints"]
+
         bad = {
             "dangling reference": {**doc, "constraints": [
                 {"id": "cn4", "kind": "lock", "a": {"id": "nope", "part": "line"}}]},
@@ -2925,10 +2937,30 @@ def _chart_constraints():
                 {"id": "cn4", "kind": "lock", "a": {"id": "dw1", "part": "middle"}}]},
             "constraint id collides with a drawing": {**doc, "constraints": [
                 {"id": "dw1", "kind": "lock", "a": {"id": "dw1", "part": "line"}}]},
+            # A relation stated with one reference would load as a silent no-op.
+            "'on' with no second reference": {**doc, "constraints": [
+                {"id": "cn4", "kind": "on", "a": {"id": "dw2", "part": "a"}}]},
+            "'on' against itself": {**doc, "constraints": [
+                {"id": "cn4", "kind": "on", "a": {"id": "dw2", "part": "a"},
+                 "b": {"id": "dw2", "part": "line"}}]},
+            "'on' with a dangling host": {**doc, "constraints": [
+                {"id": "cn4", "kind": "on", "a": {"id": "dw2", "part": "a"},
+                 "b": {"id": "gone", "part": "line"}}]},
+            "lock given a second reference": {**doc, "constraints": [
+                {"id": "cn4", "kind": "lock", "a": {"id": "dw1", "part": "line"},
+                 "b": {"id": "dw2", "part": "line"}}]},
+            "unknown axis": {**doc, "constraints": [
+                {"id": "cn4", "kind": "lock",
+                 "a": {"id": "dw1", "part": "line", "axis": "sideways"}}]},
         }
         for name, d in bad.items():
             rr = client.put("/api/chart-objects", headers=A, json={"key": KEY, "doc": d})
             assert rr.status_code == 422, f"{name}: expected 422, got {rr.status_code} {rr.text[:160]}"
+        # The message matters, not just the status: a half-stated relation has a
+        # specific cause and _ref's generic "must be an entity reference" would
+        # send the reader looking in the wrong place.
+        rr = client.put("/api/chart-objects", headers=A, json={"key": KEY, "doc": bad["'on' with no second reference"]})
+        assert "held against" in rr.text, f"unhelpful refusal for a half-stated 'on': {rr.text[:200]}"
 
     # -- 2. the seams that must agree, or the feature is invisible -----------
     # A refusal the engine computes and no page renders is the same as no
@@ -2956,7 +2988,7 @@ def _chart_constraints():
     assert exe, "no node runtime on PATH — the constraint arithmetic cannot be run"
 
     probe = r"""
-import { ChartDraw, slotsOf, degreesOfFreedom }
+import { ChartDraw, slotsOf, degreesOfFreedom, analyze, propagate }
   from './src/renderer/src/components/ChartDraw.ts'
 const out = []
 const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail })
@@ -2968,6 +3000,7 @@ const trend = (id) => ({ id, kind: 'trend',
 const circle = (id) => ({ id, kind: 'circle',
   points: [{ time: 1700000000, price: 600 }, { time: 1700086400, price: 604 }] })
 const lock = (id, on, part = 'line') => ({ id, kind: 'lock', a: { id: on, part } })
+const lockAxis = (id, on, part, axis) => ({ id, kind: 'lock', a: { id: on, part, axis } })
 
 // A HANDLE IS NOT A VARIABLE. An hline is one price; its time only places the
 // grab handle. If handles counted, every hline would carry a permanently free
@@ -3004,6 +3037,55 @@ ok('a lock on a missing drawing removes nothing',
    degreesOfFreedom(scene, [lock('cn1', 'ghost')]).free === 6, '')
 ok('a lock on a circle removes nothing',
    degreesOfFreedom([circle('dw9')], [lock('cn1', 'dw9')]).free === 0, '')
+// A per-axis lock holds ONE coordinate: the editor's per-field padlocks.
+ok('locking just a price leaves the date free',
+   degreesOfFreedom(scene, [lockAxis('cn1', 'dw3', 'a', 'price')]).free === 5,
+   degreesOfFreedom(scene, [lockAxis('cn1', 'dw3', 'a', 'price')]).free)
+ok('and locking just a date leaves the price free',
+   degreesOfFreedom(scene, [lockAxis('cn1', 'dw3', 'a', 'time')]).free === 5, '')
+
+// ---- 'on' is an EQUALITY, not a lock --------------------------------------
+// Kade: "this is not locking any X or Y but instead forcing the trend line to
+// stretch to always be in contact with both h lines." So the endpoint takes the
+// line's PRICE and keeps its own TIME — and that surviving freedom is what lets
+// the diagonal slide while still touching.
+const held = (pointId, part, lineId) =>
+  ({ id: 'cn_' + pointId + part + lineId, kind: 'on',
+     a: { id: pointId, part }, b: { id: lineId, part: 'line' } })
+
+const bound = [held('dw3', 'a', 'dw1'), held('dw3', 'b', 'dw2')]
+const an = analyze(scene, bound)
+ok('two on-relations merge two pairs of coordinates', an.classes === 4, an.classes)
+ok('so the scene has 4 degrees of freedom, not 6',
+   degreesOfFreedom(scene, bound).free === 4, degreesOfFreedom(scene, bound).free)
+ok("the endpoint's PRICE is now the h-line's price",
+   an.rep.get('dw3:a:p') === an.rep.get('dw1:line:p'), '')
+ok("but its TIME is still its own — this is the slide",
+   an.rep.get('dw3:a:i') !== an.rep.get('dw1:line:p'), '')
+ok('an on-relation pins nothing at all', an.pinned.size === 0, an.pinned.size)
+
+// KADE'S POINT 5: "the locking two lines together must mean that at least one
+// line's actual units are not locked or nothing can move." Lock BOTH h-lines
+// and the only freedom left is the two endpoint times — the diagonal can slide
+// but not change shape. The badge has to be able to say that.
+const bothLocked = [...bound, lock('cnA', 'dw1'), lock('cnB', 'dw2')]
+ok('locking both hosts leaves only the endpoint times free',
+   degreesOfFreedom(scene, bothLocked).free === 2,
+   degreesOfFreedom(scene, bothLocked).free)
+// A lock must reach THROUGH the equality, in BOTH directions. Locking the host
+// is the easy direction (the host's slot is the class representative, so even a
+// broken implementation looks right); locking the ENDPOINT is the one that only
+// works if the pin is recorded against the class rather than the raw slot.
+const reach = analyze(scene, bothLocked)
+ok('a lock on the h-line pins the endpoint held to it',
+   reach.pinned.has(reach.rep.get('dw3:a:p')), '')
+const endLocked = [...bound, lockAxis('cnC', 'dw3', 'a', 'price')]
+const reachBack = analyze(scene, endLocked)
+ok('and locking the ENDPOINT pins the h-line it rides',
+   reachBack.pinned.has(reachBack.rep.get('dw1:line:p')), '')
+ok('so that lock removes exactly one degree of freedom',
+   degreesOfFreedom(scene, endLocked).free === 3,
+   degreesOfFreedom(scene, endLocked).free)
 
 // ---- the engine surface ---------------------------------------------------
 // Only the constructor touches the DOM (see _chart_time): the prototype plus
@@ -3016,57 +3098,101 @@ const mkEngine = (key) => Object.assign(Object.create(ChartDraw.prototype), {
 
 const e = mkEngine('LOCK|1Day')
 const b = e.bucket()
-b.drawings.push(hline('dw1', 600), trend('dw3'))
+b.drawings.push(hline('dw1', 600), hline('dw2', 604), trend('dw3'))
+e.addConstraint({ kind: 'on', a: { id: 'dw3', part: 'a' }, b: { id: 'dw1', part: 'line' } })
+ok('an on-relation is admitted', b.constraints.length === 1, JSON.stringify(b.constraints))
+const dup = e.addConstraint({ kind: 'on', a: { id: 'dw3', part: 'a' }, b: { id: 'dw1', part: 'line' } })
+ok('and the same one twice is refused as redundant',
+   dup.ok === false && dup.issue.code === 'duplicate', JSON.stringify(dup))
 
-e.selected = ['dw1']
-e.lockSelected()
-ok('locking the selection adds one constraint', b.constraints.length === 1,
-   JSON.stringify(b.constraints))
-ok('and the state reports the DOF', e.getState().dof.free === 4, JSON.stringify(e.getState().dof))
-ok('and names what is locked', e.getState().lockedIds.join() === 'dw1', e.getState().lockedIds.join())
+// AN 'on' MUST NOT BLOCK A DRAG. Treating any constraint as a brake would
+// forbid exactly the motion the feature exists to allow.
+const canDrag = e.movableIds(['dw1'])
+ok('a line with something held onto it still drags',
+   canDrag.ids.join() === 'dw1' && canDrag.issue === null, JSON.stringify(canDrag))
+const pointDrag = e.movableIds(['dw3'])
+ok('and so does the trend that is held to it',
+   pointDrag.ids.join() === 'dw3' && pointDrag.issue === null, JSON.stringify(pointDrag))
 
-// Locking twice is refused WITH A REASON, not silently ignored.
-e.lockSelected()
-ok('a second lock on the same thing is refused', b.constraints.length === 1, b.constraints.length)
-ok('and the refusal reaches the page in words',
-   e.getState().issue && e.getState().issue.code === 'duplicate',
-   JSON.stringify(e.getState().issue))
+// THE STRETCH, end to end: move the h-line, the attached endpoint follows in
+// PRICE and stays put in TIME.
+const t0 = b.drawings[2].points[0].time
+b.drawings[0].points[0].price = 590
+propagate(b.drawings, b.constraints, new Set(['dw1']))
+ok('dragging the h-line carries the endpoint held to it',
+   b.drawings[2].points[0].price === 590, b.drawings[2].points[0].price)
+ok('and does NOT move it in time — the trend stretches, it does not slide',
+   b.drawings[2].points[0].time === t0, b.drawings[2].points[0].time)
+ok('the far endpoint, held to nothing, is untouched',
+   b.drawings[2].points[1].price === 604, b.drawings[2].points[1].price)
+// Both members of one class moved at once (a multi-selection drag). They must
+// END UP EQUAL: skipping the moved slots would leave the equality false.
+b.drawings[0].points[0].price = 575
+b.drawings[2].points[0].price = 999
+propagate(b.drawings, b.constraints, new Set(['dw1', 'dw3']))
+ok('dragging both ends of one equality leaves them agreeing',
+   b.drawings[0].points[0].price === b.drawings[2].points[0].price,
+   `${b.drawings[0].points[0].price} vs ${b.drawings[2].points[0].price}`)
 
-// A dangling constraint is pruned by commit(), which every deletion path ends
-// in — including trim, which replaces a drawing with new ones.
-b.drawings = b.drawings.filter((d) => d.id !== 'dw1')
-e.commit()
-ok('deleting the drawing takes its lock with it', b.constraints.length === 0,
-   JSON.stringify(b.constraints))
-ok('so the DOF returns to the diagonal alone', e.getState().dof.free === 4,
-   JSON.stringify(e.getState().dof))
-
-// Unlock is the inverse, and it is what the blocked-drag notice points at.
-e.selected = ['dw3']
-e.lockSelected()
-ok('the diagonal locks whole', e.getState().dof.free === 0, JSON.stringify(e.getState().dof))
-
-// THE BLOCKED DRAG. This is the rule the whole feature rests on: a locked
-// drawing must be refused BEFORE the gesture starts, or it reads as jitter
-// rather than as a constraint.
-const blocked = e.movableIds(['dw3'])
-ok('a locked drawing cannot be dragged', blocked.ids.length === 0, JSON.stringify(blocked.ids))
+// ---- lock, and the single toggle ------------------------------------------
+e.selected = ['dw2']
+e.toggleLockSelected()
+ok('L locks the selection', e.getState().lockedIds.join() === 'dw2', e.getState().lockedIds.join())
+e.toggleLockSelected()
+ok('and L again unlocks it — one key, both directions',
+   e.getState().lockedIds.length === 0, JSON.stringify(e.getState().lockedIds))
+e.toggleLockSelected()
+const lockedDrag = e.movableIds(['dw2'])
+ok('a locked drawing cannot be dragged', lockedDrag.ids.length === 0, JSON.stringify(lockedDrag.ids))
 ok('and the refusal names it in words',
-   blocked.issue && blocked.issue.code === 'blocked' && /locked/i.test(blocked.issue.message),
-   JSON.stringify(blocked.issue))
-// A mixed selection still moves what it can, rather than refusing wholesale.
-b.drawings.push(hline('dw7', 610))
-const partly = e.movableIds(['dw3', 'dw7'])
-ok('a mixed selection moves the unlocked part',
-   partly.ids.join() === 'dw7' && partly.issue === null, JSON.stringify(partly))
+   lockedDrag.issue && lockedDrag.issue.code === 'blocked' && /locked/i.test(lockedDrag.issue.message),
+   JSON.stringify(lockedDrag.issue))
+const partly = e.movableIds(['dw2', 'dw1'])
+ok('a mixed selection still moves what it can',
+   partly.ids.join() === 'dw1' && partly.issue === null, JSON.stringify(partly))
 
-e.unlockSelected()
-ok('unlock releases it', e.getState().dof.free === 5 && b.constraints.length === 0,
-   JSON.stringify(e.getState().dof))
-ok('and clears the notice', e.getState().issue === null, JSON.stringify(e.getState().issue))
-const free = e.movableIds(['dw3'])
-ok('and the drag is permitted again', free.ids.join() === 'dw3' && free.issue === null,
-   JSON.stringify(free))
+// ---- per-coordinate locks, which is what the editor's padlocks store -------
+const eB = mkEngine('SLOT|1Day')
+const bB = eB.bucket()
+bB.drawings.push(trend('dw5'))
+ok('a trend starts with four free coordinates', eB.getState().dof.free === 4,
+   JSON.stringify(eB.getState().dof))
+const setPrice = eB.setSlotValue({ id: 'dw5', part: 'a', axis: 'price' }, 612.5)
+ok('typing a price sets it', setPrice.ok === true && bB.drawings[0].points[0].price === 612.5,
+   bB.drawings[0].points[0].price)
+ok('and locks that one coordinate only', eB.getState().dof.free === 3,
+   JSON.stringify(eB.getState().dof))
+ok("so the same point's DATE is still free",
+   bB.constraints.length === 1 && bB.constraints[0].a.axis === 'price',
+   JSON.stringify(bB.constraints))
+// Re-typing your own locked value moves it; it does not refuse itself.
+ok('re-typing a value you locked yourself just moves it',
+   eB.setSlotValue({ id: 'dw5', part: 'a', axis: 'price' }, 620).ok === true &&
+     bB.drawings[0].points[0].price === 620, bB.drawings[0].points[0].price)
+eB.clearSlotLock({ id: 'dw5', part: 'a', axis: 'price' })
+ok('and the padlock comes off again', eB.getState().dof.free === 4,
+   JSON.stringify(eB.getState().dof))
+
+// THE NOTIFICATION KADE ASKED FOR: a value held through an equality by someone
+// else's lock refuses, and names the holder.
+const eC = mkEngine('HELD|1Day')
+const bC = eC.bucket()
+bC.drawings.push(hline('dw6', 600), trend('dw7'))
+eC.addConstraint({ kind: 'on', a: { id: 'dw7', part: 'a' }, b: { id: 'dw6', part: 'line' } })
+eC.selected = ['dw6']
+eC.toggleLockSelected()
+const refused = eC.setSlotValue({ id: 'dw7', part: 'a', axis: 'price' }, 555)
+ok('a coordinate held by another object\'s lock refuses to be set',
+   refused.ok === false && refused.issue.code === 'blocked', JSON.stringify(refused))
+ok('and the refusal names what is holding it',
+   refused.issue && /hline/.test(refused.issue.message), refused.issue && refused.issue.message)
+ok('and nothing moved', bC.drawings[1].points[0].price === 600, bC.drawings[1].points[0].price)
+
+// ---- dangling constraints are pruned by commit() --------------------------
+bC.drawings = bC.drawings.filter((d) => d.id !== 'dw6')
+eC.commit()
+ok('deleting a drawing takes every constraint naming it',
+   bC.constraints.length === 0, JSON.stringify(bC.constraints))
 
 console.log(JSON.stringify(out))
 """
@@ -3082,7 +3208,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the constraint model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 22, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 40, f"the probe lost assertions: only {len(results)} ran"
 
 
 def main() -> int:

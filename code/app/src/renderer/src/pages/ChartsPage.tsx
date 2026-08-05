@@ -711,7 +711,11 @@ export function ChartsPage() {
           {/* Selection editor appears with the selection and leaves with it. */}
           {engine && selection.length > 0 && st.symbols.length > 0 ? (
             <div className="float-panel draw-editor-float">
-              <DrawEditor engine={engine} selection={selection} />
+              <DrawEditor
+                engine={engine}
+                selection={selection}
+                lockedSlots={drawState?.lockedSlots}
+              />
             </div>
           ) : null}
         </div>

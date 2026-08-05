@@ -32,11 +32,13 @@ DOC_VERSION = 1
 DRAW_KINDS = ("trend", "hline", "vline", "circle")
 ANCHOR_KINDS = ("candle", "line", "free")
 PLACE_AXES = ("time", "price")
-# Deliberately one kind. The relations that need a solver ('on', 'coincident',
-# 'samePrice', 'sameTime') widen this tuple and ChartDraw.ts's union in the SAME
-# commit as the solver that can honour them — accepting a constraint the engine
-# silently ignores is a worse lie than not offering it.
-CONSTRAINT_KINDS = ("lock",)
+# 'lock' PINS a coordinate; 'on' EQUATES two of them and leaves both free to
+# move together. Both are equalities, which is what lets the engine compute
+# degrees of freedom with union-find instead of a matrix. Kinds that are NOT
+# equalities (a typed slope or gap) arrive with the factorisation that can
+# honour them, not before — accepting a constraint the engine silently ignores
+# is a worse lie than not offering it.
+CONSTRAINT_KINDS = ("lock", "on")
 ENTITY_PARTS = ("line", "a", "b")
 
 # How many points each kind carries. trend/circle are two-point (circle is
@@ -211,6 +213,26 @@ def validate(doc: Any) -> dict[str, Any]:
     # invisible, unremovable through the UI, and still counts against the degrees
     # of freedom the user is shown.
     known = {d["id"] for d in drawings}
+
+    def _ref(v: Any, what: str) -> dict[str, Any]:
+        if not isinstance(v, dict):
+            _fail(f"{what} must be an entity reference")
+        target = v.get("id")
+        part = v.get("part")
+        if part not in ENTITY_PARTS:
+            _fail(f"{what}: unknown entity part {part!r}")
+        if not isinstance(target, str) or target not in known:
+            _fail(f"{what}: names drawing {target!r}, which is not in this document")
+        out = {"id": target, "part": part}
+        # Absent axis = every coordinate that part owns. Present = just one,
+        # which is what an editor's per-field padlock stores.
+        axis = v.get("axis")
+        if axis is not None:
+            if axis not in PLACE_AXES:
+                _fail(f"{what}: unknown axis {axis!r}")
+            out["axis"] = axis
+        return out
+
     constraints: list[dict[str, Any]] = []
     for c in _list(doc, "constraints"):
         if not isinstance(c, dict):
@@ -219,17 +241,19 @@ def validate(doc: Any) -> dict[str, Any]:
         if kind not in CONSTRAINT_KINDS:
             _fail(f"unknown constraint kind {kind!r}")
         cid = _id(c.get("id"), f"constraint {kind}", seen)
-        ref = c.get("a")
-        if not isinstance(ref, dict):
-            _fail(f"constraint {cid}: 'a' must be an entity reference")
-        target = ref.get("id")
-        part = ref.get("part")
-        if part not in ENTITY_PARTS:
-            _fail(f"constraint {cid}: unknown entity part {part!r}")
-        if not isinstance(target, str) or target not in known:
-            _fail(f"constraint {cid}: names drawing {target!r}, which is not in this document")
-        constraints.append({"id": cid, "kind": kind,
-                            "a": {"id": target, "part": part}})
+        out: dict[str, Any] = {"id": cid, "kind": kind,
+                               "a": _ref(c.get("a"), f"constraint {cid}.a")}
+        if kind == "on":
+            # 'on' is a relation BETWEEN two things; one reference cannot state
+            # it, and a half-stated relation would load as a silent no-op.
+            if c.get("b") is None:
+                _fail(f"constraint {cid}: 'on' needs the line it is held against")
+            out["b"] = _ref(c.get("b"), f"constraint {cid}.b")
+            if out["b"]["id"] == out["a"]["id"]:
+                _fail(f"constraint {cid}: a drawing cannot be held against itself")
+        elif c.get("b") is not None:
+            _fail(f"constraint {cid}: a {kind} names one thing, not two")
+        constraints.append(out)
 
     clean = {"version": DOC_VERSION, "drawings": drawings,
              "measures": measures, "pins": pins, "constraints": constraints}

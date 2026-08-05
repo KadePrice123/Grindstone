@@ -65,16 +65,51 @@ function parseTime(s: string): number | null {
   return ms / 1000
 }
 
+/** The per-field padlock.
+ *
+ *  Kade: "In these forms I have posted I should also be able to type and lock
+ *  the prices and dates as well." So each coordinate gets its own, and locking
+ *  one leaves the other free — lock a trend endpoint's price and it can still
+ *  slide in time; lock its date and it can only move vertically.
+ *
+ *  It lights for a coordinate pinned THROUGH an equality too, not only for one
+ *  you locked directly: a price held by a lock on the line it rides is just as
+ *  immovable, and drawing it open would be a lie. */
+function Padlock({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      className={`de-lock${on ? ' on' : ''}`}
+      title={on ? 'Locked — click to release' : 'Lock this value'}
+      aria-pressed={on}
+      onClick={onToggle}
+    >
+      <svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true">
+        <rect x="3" y="6.5" width="8" height="6" rx="1.2" fill="currentColor" />
+        {on ? (
+          <path d="M4.8 6.5V4.6a2.2 2.2 0 0 1 4.4 0v1.9" fill="none" stroke="currentColor" strokeWidth="1.3" />
+        ) : (
+          <path d="M4.8 6.5V4.6a2.2 2.2 0 0 1 4.4 0" fill="none" stroke="currentColor" strokeWidth="1.3" />
+        )}
+      </svg>
+    </button>
+  )
+}
+
 function Field({
   label,
   initial,
   parse,
   onCommit,
+  locked,
+  onToggleLock,
 }: {
   label: string
   initial: string
   parse: (s: string) => number | null
   onCommit: (v: number) => void
+  locked?: boolean
+  onToggleLock?: () => void
 }) {
   const [draft, setDraft] = useState(initial)
   const [bad, setBad] = useState(false)
@@ -129,6 +164,7 @@ function Field({
           }
         }}
       />
+      {onToggleLock ? <Padlock on={!!locked} onToggle={onToggleLock} /> : null}
     </label>
   )
 }
@@ -143,10 +179,13 @@ const KIND_TITLE: Record<Drawing['kind'], string> = {
 export function DrawEditor({
   engine,
   selection,
+  lockedSlots = [],
 }: {
   engine: ChartDraw
   /** The selected drawings, in selection order (engine state's `selection`). */
   selection: Drawing[]
+  /** Pinned coordinate slots from engine state — which padlocks are closed. */
+  lockedSlots?: string[]
 }) {
   if (selection.length === 0) return null
 
@@ -180,13 +219,44 @@ export function DrawEditor({
       d.points.map((p, j) => (j === i ? { ...p, ...patch } : p))
     )
   }
+  // Which coordinate each field edits, in the engine's own slot vocabulary.
+  // An hline/vline is `line`; a trend's points are `a` and `b`.
+  const part = (i: number): 'line' | 'a' | 'b' =>
+    d.kind === 'trend' || d.kind === 'circle' ? (i === 0 ? 'a' : 'b') : 'line'
+  const held = new Set(lockedSlots)
+  const isHeld = (i: number, code: 'p' | 'i') => held.has(`${d.id}:${part(i)}:${code}`)
+  // Circles carry no constrainable coordinates (ellipsePx is the in-tree proof
+  // the plane is not isotropic), so they get plain fields and no padlocks.
+  const lockable = d.kind !== 'circle'
+
   const priceField = (i: number, label: string) => (
     <Field
       key={`${d.id}:${i}:p:${d.points[i].price}`}
       label={label}
       initial={fmtPrice(d.points[i].price)}
       parse={parsePrice}
-      onCommit={(v) => setPt(i, { price: v })}
+      // Typing a value SETS AND HOLDS it — "setting any dimension of an item
+      // will lock that dimension until the user changes it". setSlotValue also
+      // writes through any equality, so a price typed on a trend endpoint moves
+      // the line it rides, and refuses with a reason when something else holds
+      // it. Circles fall back to the plain path.
+      onCommit={(v) =>
+        lockable
+          ? engine.setSlotValue({ id: d.id, part: part(i), axis: 'price' }, v)
+          : setPt(i, { price: v })
+      }
+      locked={isHeld(i, 'p')}
+      onToggleLock={
+        lockable
+          ? () =>
+              isHeld(i, 'p')
+                ? engine.clearSlotLock({ id: d.id, part: part(i), axis: 'price' })
+                : engine.setSlotValue(
+                    { id: d.id, part: part(i), axis: 'price' },
+                    d.points[i].price
+                  )
+          : undefined
+      }
     />
   )
   const timeField = (i: number, label: string) => (
@@ -195,7 +265,23 @@ export function DrawEditor({
       label={label}
       initial={fmtTime(d.points[i].time)}
       parse={parseTime}
-      onCommit={(v) => setPt(i, { time: v as Pt['time'] })}
+      onCommit={(v) =>
+        lockable
+          ? engine.setSlotValue({ id: d.id, part: part(i), axis: 'time' }, v)
+          : setPt(i, { time: v as Pt['time'] })
+      }
+      locked={isHeld(i, 'i')}
+      onToggleLock={
+        lockable
+          ? () =>
+              isHeld(i, 'i')
+                ? engine.clearSlotLock({ id: d.id, part: part(i), axis: 'time' })
+                : engine.setSlotValue(
+                    { id: d.id, part: part(i), axis: 'time' },
+                    d.points[i].time
+                  )
+          : undefined
+      }
     />
   )
 

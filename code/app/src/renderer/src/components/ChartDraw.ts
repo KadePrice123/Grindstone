@@ -183,31 +183,45 @@ export interface InspectPin {
 // Constraints
 // ---------------------------------------------------------------------------
 
-/** DELIBERATELY ONE KIND. The relations that need a solver ('on', 'coincident',
- *  'samePrice', 'sameTime') widen this union and chartobjects.py's tuple in the
- *  same commit as the solver that can honour them. Declaring them early would
- *  make the backend accept a constraint the engine silently ignores, which is a
- *  worse lie than not offering it — the gate compares the two vocabularies
- *  exactly so that cannot drift. */
-export type ConstraintKind = 'lock'
+/** Two kinds, and the difference between them is the whole model.
+ *
+ *  'lock' PINS a coordinate: it stops moving.
+ *  'on'   EQUATES two coordinates: they become one number, and both are still
+ *         free to move — together.
+ *
+ *  Kade, on why that distinction is the feature: "this is not locking any X or Y
+ *  but instead forcing the trend line to stretch to always be in contact with
+ *  both h lines." A trend endpoint `on` an hline shares that line's PRICE and
+ *  keeps its own TIME, so the h-line can be dragged (the endpoint rides it) and
+ *  the endpoint can still slide along it. Locking either would have frozen
+ *  exactly what is supposed to move.
+ *
+ *  Both are EQUALITIES between coordinates, which is why this whole stage needs
+ *  no matrix — see analyze(). */
+export type ConstraintKind = 'lock' | 'on'
 
 /** Which coordinate-carrying part of a drawing a constraint names. 'line' is a
  *  whole hline/vline — it IS one coordinate, so it has no endpoints, the same
  *  fact POINTS_FOR states on the backend. 'a'/'b' are a trend's two points. */
 export type EntityPart = 'line' | 'a' | 'b'
 
+/** Which coordinate of that part. Absent = every coordinate it owns, so a lock
+ *  on a trend endpoint with no axis pins the point, and with one pins just its
+ *  price or just its date — which is what the editor's per-field padlocks are. */
+export type SlotAxis = 'price' | 'time'
+
 export interface EntityRef {
   id: string
   part: EntityPart
+  axis?: SlotAxis
 }
 
-/** 'lock' pins whatever coordinates its target owns, at their current values.
- *  It is the only constraint that needs no solver: it removes degrees of
- *  freedom outright, so DOF is exact by counting. */
 export interface Constraint {
   id: string
   kind: ConstraintKind
   a: EntityRef
+  /** 'on' only: the line the point is held against. */
+  b?: EntityRef
 }
 
 /** Something the engine refused to do, or did with a caveat, in words meant for
@@ -234,39 +248,189 @@ export function slotsOf(d: Drawing): string[] {
   return [] // circle
 }
 
-/** The slots one constraint pins, or null when it names something that cannot
- *  carry it (a part the kind does not have, a circle, a missing drawing). */
-export function lockedSlots(c: Constraint, byId: Map<string, Drawing>): string[] | null {
-  const d = byId.get(c.a.id)
-  if (!d) return null
-  if (d.kind === 'circle') return null
+const AXIS_CODE: Record<SlotAxis, 'p' | 'i'> = { price: 'p', time: 'i' }
+
+/** The slots one reference names. Empty when it names something that cannot
+ *  carry a constraint: a circle, a missing drawing, or an endpoint on an
+ *  hline/vline — which have no endpoints, only the one coordinate they ARE. */
+export function slotsForRef(ref: EntityRef, byId: Map<string, Drawing>): string[] {
+  const d = byId.get(ref.id)
+  if (!d || d.kind === 'circle') return []
+  let owned: string[]
   if (d.kind === 'trend') {
-    if (c.a.part === 'line') return slotsOf(d) // the whole segment: both ends
-    return [`${d.id}:${c.a.part}:i`, `${d.id}:${c.a.part}:p`]
+    owned =
+      ref.part === 'line'
+        ? slotsOf(d) // the whole segment: both ends
+        : [`${d.id}:${ref.part}:i`, `${d.id}:${ref.part}:p`]
+  } else {
+    if (ref.part !== 'line') return []
+    owned = slotsOf(d)
   }
-  // hline/vline carry one coordinate and no endpoints.
-  return c.a.part === 'line' ? slotsOf(d) : null
+  if (!ref.axis) return owned
+  const code = AXIS_CODE[ref.axis]
+  return owned.filter((s) => s.endsWith(`:${code}`))
 }
 
-/** Degrees of freedom, by counting.
+/** The equality an 'on' asserts.
  *
- *  Exact with no matrix, no tolerance and no rank test, because a lock is
- *  trivially independent of every other lock unless it names a coordinate
- *  already locked — and that case is refused at admission by an O(1) occupancy
- *  test rather than discovered numerically. When relations arrive they bring a
- *  rank test with them; until then this is not an approximation of one, it is
- *  the right answer. */
+ *  The point shares the LINE'S OWN coordinate and keeps the other. An hline is
+ *  a price, so a point on it shares a price and stays free in time — and that
+ *  surviving freedom is the whole point: it is what lets the trend slide along
+ *  while still touching. A vline is the transpose.
+ *
+ *  ONE equality, never two. Two would be point-to-point coincidence, which
+ *  welds the endpoint to a spot and is a different (also useful) relation. */
+export function onPair(c: Constraint, byId: Map<string, Drawing>): [string, string] | null {
+  if (c.kind !== 'on' || !c.b) return null
+  const pt = byId.get(c.a.id)
+  const host = byId.get(c.b.id)
+  if (!pt || !host || pt.kind !== 'trend') return null
+  if (host.kind !== 'hline' && host.kind !== 'vline') return null
+  if (c.a.part !== 'a' && c.a.part !== 'b') return null
+  const code = host.kind === 'hline' ? 'p' : 'i'
+  return [`${pt.id}:${c.a.part}:${code}`, `${host.id}:line:${code}`]
+}
+
+export interface SketchAnalysis {
+  /** Every slot, mapped to the representative of its equality class. Two slots
+   *  sharing a representative are ONE number. */
+  rep: Map<string, string>
+  /** Representatives of classes that cannot move. */
+  pinned: Set<string>
+  /** Distinct coordinates before equalities are applied. */
+  total: number
+  /** Distinct coordinates after: the real variable count. */
+  classes: number
+  /** What the badge shows. 0 = fully defined. */
+  free: number
+}
+
+/** Union-find over coordinate slots — and it is EXACT, not an approximation.
+ *
+ *  Every constraint in this vocabulary is an equality between two coordinates
+ *  ('on') or a pin on one ('lock'). For a system of equalities the rank is
+ *  exactly (variables − connected components), which is precisely what
+ *  union-find computes. So degrees of freedom come out right with no matrix, no
+ *  rank tolerance, and no floating-point anywhere near a number shown to a user.
+ *
+ *  A QR factorisation only becomes necessary when DIMENSIONAL constraints
+ *  arrive — a typed slope or gap is not an equality between two variables, it is
+ *  a linear relation among several. That is the next stage, and it is the reason
+ *  this one can ship without it. */
+export function analyze(drawings: Drawing[], constraints: Constraint[]): SketchAnalysis {
+  const byId = new Map(drawings.map((d) => [d.id, d]))
+  const parent = new Map<string, string>()
+  const add = (s: string): void => {
+    if (!parent.has(s)) parent.set(s, s)
+  }
+  const find = (x: string): string => {
+    let r = x
+    while (parent.get(r) !== r) r = parent.get(r) as string
+    let c = x
+    while (parent.get(c) !== r) {
+      const next = parent.get(c) as string
+      parent.set(c, r)
+      c = next
+    }
+    return r
+  }
+  for (const d of drawings) for (const s of slotsOf(d)) add(s)
+  for (const c of constraints) {
+    const pair = onPair(c, byId)
+    if (!pair) continue
+    // An 'on' naming a slot no drawing owns is dangling; ignore rather than
+    // inventing the slot, or a deleted line would keep constraining a live one.
+    if (!parent.has(pair[0]) || !parent.has(pair[1])) continue
+    const ra = find(pair[0])
+    const rb = find(pair[1])
+    if (ra !== rb) parent.set(ra, rb)
+  }
+  const pinned = new Set<string>()
+  for (const c of constraints) {
+    if (c.kind !== 'lock') continue
+    for (const s of slotsForRef(c.a, byId)) if (parent.has(s)) pinned.add(find(s))
+  }
+  const rep = new Map<string, string>()
+  const reps = new Set<string>()
+  for (const s of parent.keys()) {
+    const r = find(s)
+    rep.set(s, r)
+    reps.add(r)
+  }
+  return {
+    rep,
+    pinned,
+    total: parent.size,
+    classes: reps.size,
+    free: reps.size - pinned.size,
+  }
+}
+
+const slotOwner = (slot: string): string => slot.slice(0, slot.indexOf(':'))
+const slotPoint = (d: Drawing, slot: string): Pt | undefined =>
+  d.points[slot.split(':')[1] === 'b' ? 1 : 0]
+
+export function readSlot(d: Drawing, slot: string): number | null {
+  const pt = slotPoint(d, slot)
+  if (!pt) return null
+  return slot.endsWith(':p') ? pt.price : pt.time
+}
+
+export function writeSlot(d: Drawing, slot: string, v: number): void {
+  const pt = slotPoint(d, slot)
+  if (!pt) return
+  if (slot.endsWith(':p')) pt.price = v
+  else pt.time = v as UTCTimestamp
+}
+
+/** Make every equality true again after `movedIds` changed.
+ *
+ *  This is the entire solver for this vocabulary, and it is one pass: slots in
+ *  a class are the same number, so a class containing something that moved
+ *  simply takes that value everywhere. Drag an h-line and the trend endpoint
+ *  held onto it comes along — "the trend line must stretch to always be in
+ *  contact" — while the endpoint's TIME, which is in no class, does not move.
+ *
+ *  Directional on purpose: what the user grabbed is the truth, and everything
+ *  attached follows. A class with two moved members takes the first, which is
+ *  arbitrary but only reachable by dragging both ends of one equality at once. */
+export function propagate(
+  drawings: Drawing[],
+  constraints: Constraint[],
+  movedIds: Set<string>
+): void {
+  const a = analyze(drawings, constraints)
+  const byId = new Map(drawings.map((d) => [d.id, d]))
+  const truth = new Map<string, number>()
+  for (const [slot, r] of a.rep) {
+    if (!movedIds.has(slotOwner(slot)) || truth.has(r)) continue
+    const d = byId.get(slotOwner(slot))
+    const v = d ? readSlot(d, slot) : null
+    if (v !== null) truth.set(r, v)
+  }
+  if (truth.size === 0) return
+  // Writes to the moved slots too, deliberately. Skipping them looks like an
+  // optimisation and is a bug: drag two drawings that share a class and the
+  // second would keep its own value, leaving the equality false. Writing the
+  // class value everywhere is a no-op for one mover and a repair for two.
+  for (const [slot, r] of a.rep) {
+    const v = truth.get(r)
+    if (v === undefined) continue
+    const d = byId.get(slotOwner(slot))
+    if (d) writeSlot(d, slot, v)
+  }
+}
+
+/** What the DOF badge reads. `locked` counts SLOTS held (so a pinned class of
+ *  two reports two), `free` counts CLASSES still able to move. */
 export function degreesOfFreedom(
   drawings: Drawing[],
   constraints: Constraint[]
 ): { total: number; locked: number; free: number } {
-  const byId = new Map(drawings.map((d) => [d.id, d]))
-  const total = drawings.reduce((n, d) => n + slotsOf(d).length, 0)
-  const held = new Set<string>()
-  for (const c of constraints) {
-    for (const s of lockedSlots(c, byId) ?? []) held.add(s)
-  }
-  return { total, locked: held.size, free: total - held.size }
+  const a = analyze(drawings, constraints)
+  let locked = 0
+  for (const r of a.rep.values()) if (a.pinned.has(r)) locked++
+  return { total: a.total, locked, free: a.free }
 }
 
 /** What one chart's persisted objects look like on the wire. It is the bucket,
@@ -339,8 +503,13 @@ export interface DrawState {
   /** Sketch status, CAD-style. `free` is what the badge shows: 0 means every
    *  coordinate is pinned and nothing can shift under you. */
   dof: { total: number; locked: number; free: number }
-  /** Drawings carrying at least one constraint — what the page paints. */
+  /** Drawings carrying at least one LOCK — what the page paints a padlock on. */
   lockedIds: string[]
+  /** Every pinned coordinate slot, `<id>:<part>:<p|i>`. The editor reads this
+   *  to light the right per-field padlock, including coordinates held only
+   *  THROUGH an equality — a price pinned by a lock on the line it rides is
+   *  just as immovable, and showing it unlocked would be a lie. */
+  lockedSlots: string[]
   /** The last refusal or caveat, in words. Null when the engine has nothing to
    *  say; cleared by the next successful action. */
   issue: ConstraintIssue | null
@@ -627,6 +796,8 @@ export class ChartDraw {
 
   /** First click of a two-click placement (trend/circle). */
   private pendingPt: Pt | null = null
+  /** The line the first trend click snapped onto, held until the second. */
+  private pendingHost: string | null = null
   /** First click of a measure. */
   private pendingAnchor: MeasureAnchor | null = null
   private cursor: { x: number; y: number; time: UTCTimestamp | null } | null = null
@@ -886,6 +1057,7 @@ export class ChartDraw {
       if (e.key === 'Escape') {
         if (this.pendingPt !== null || this.pendingAnchor !== null) {
           this.pendingPt = null
+          this.pendingHost = null
           this.pendingAnchor = null
           this.render()
         } else if (this.selected.length > 0) {
@@ -904,12 +1076,10 @@ export class ChartDraw {
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.selected.length > 0) {
         this.deleteSelected()
       } else if ((e.key === 'l' || e.key === 'L') && this.selected.length > 0) {
-        // Chart-scoped, like every other key here. App-wide would mean routing
-        // through main's before-input-event (the pattern main/tabs.ts uses for
-        // F12), which is a shell change and deliberately out of scope.
-        this.lockSelected()
-      } else if ((e.key === 'u' || e.key === 'U') && this.selected.length > 0) {
-        this.unlockSelected()
+        // ONE key, both directions. Chart-scoped, like every other key here:
+        // app-wide would mean routing through main's before-input-event (the
+        // pattern main/tabs.ts uses for F12), a shell change and out of scope.
+        this.toggleLockSelected()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -961,6 +1131,7 @@ export class ChartDraw {
     this.flushSave()
     this.key = key
     this.pendingPt = null
+    this.pendingHost = null
     this.pendingAnchor = null
     this.selected = []
     this.cursor = null
@@ -973,6 +1144,7 @@ export class ChartDraw {
     if (tool === this.tool) return
     this.tool = tool
     this.pendingPt = null
+    this.pendingHost = null
     this.pendingAnchor = null
     this.cursor = null
     this.applyCursor()
@@ -993,6 +1165,7 @@ export class ChartDraw {
       time: (this.nearestBarTime(p.time) ?? p.time) as UTCTimestamp,
       price: p.price,
     }))
+    propagate(this.bucket().drawings, this.bucket().constraints, new Set([id]))
     this.commit()
   }
 
@@ -1083,29 +1256,48 @@ export class ChartDraw {
       selected: [...this.selected],
       hidden: this.hidden,
       dof: degreesOfFreedom(b.drawings, b.constraints),
-      lockedIds: [...new Set(b.constraints.map((c) => c.a.id))],
+      lockedSlots: (() => {
+        const a = analyze(b.drawings, b.constraints)
+        return [...a.rep].filter(([, r]) => a.pinned.has(r)).map(([s]) => s)
+      })(),
+      // LOCKS only. An 'on' is not a lock, and painting a padlock on a line
+      // that is merely held to something would say the opposite of the truth.
+      lockedIds: [
+        ...new Set(b.constraints.filter((c) => c.kind === 'lock').map((c) => c.a.id)),
+      ],
       issue: this.issue,
     }
   }
 
   // ---- constraints --------------------------------------------------------
 
-  /** Lock every selected drawing where it stands.
-   *
-   *  A selected TREND locks as a whole segment (both endpoints), because "lock
-   *  this line" is what the gesture means; an endpoint-only lock is available
-   *  through the same call with an explicit part once endpoints are selectable.
-   *  Circles are refused with a reason rather than silently skipped — a gesture
-   *  that appears to do nothing is indistinguishable from a bug. */
-  lockSelected(): void {
+  /** ONE key, both directions. Kade: "I shouldn't press l and u I should toggle
+   *  with one button." A separate unlock key also made the state invisible —
+   *  you had to try the wrong one to find out which it was. */
+  toggleLockSelected(): void {
     const b = this.bucket()
     const byId = new Map(b.drawings.map((d) => [d.id, d]))
+    const targets = this.selected.filter((id) => byId.has(id))
+    if (targets.length === 0) return
+    const lockedNow = new Set(
+      b.constraints.filter((c) => c.kind === 'lock').map((c) => c.a.id)
+    )
+    // All locked -> unlock. Otherwise lock whatever is not. Mixed selections
+    // resolve toward locked, so the key always has a visible effect.
+    if (targets.every((id) => lockedNow.has(id))) {
+      b.constraints = b.constraints.filter(
+        (c) => !(c.kind === 'lock' && targets.includes(c.a.id))
+      )
+      this.issue = null
+      this.commit()
+      return
+    }
     let added = 0
     let issue: ConstraintIssue | null = null
-    for (const id of this.selected) {
+    for (const id of targets) {
+      if (lockedNow.has(id)) continue
       const d = byId.get(id)
-      if (!d) continue // a measure or pin: nothing to lock, and not an error
-      if (d.kind === 'circle') {
+      if (d && d.kind === 'circle') {
         issue = { code: 'unsupported', message: 'A circle cannot be locked.' }
         continue
       }
@@ -1115,16 +1307,85 @@ export class ChartDraw {
     }
     this.issue = issue
     if (added > 0) this.commit()
-    else this.emit() // the refusal still has to reach the page
+    else this.emit() // a refusal still has to reach the page
   }
 
-  /** Remove every lock on the selection. The inverse gesture, and the answer a
-   *  blocked-drag notice points at. */
-  unlockSelected(): void {
+  /** Hold a trend endpoint against an hline/vline.
+   *
+   *  NOT a lock, and the difference is the feature: the endpoint takes the
+   *  line's price (or a vline's time) and KEEPS its other coordinate, so the
+   *  line can still be dragged, the endpoint rides it, and the trend stretches
+   *  to stay in contact. */
+  holdOn(point: EntityRef, host: EntityRef): { ok: true; id: string } | { ok: false; issue: ConstraintIssue } {
+    const res = this.addConstraint({ kind: 'on', a: point, b: host })
+    this.issue = res.ok ? null : res.issue
+    if (res.ok) this.commit()
+    else this.emit()
+    return res
+  }
+
+  /** Set one coordinate to an exact value AND hold it there.
+   *
+   *  Kade: "Setting any dimension of an item will lock that dimension until the
+   *  user changes it; if that dimension can't change because of a locking
+   *  constraint we must notify them." So this is one action, not two — typing a
+   *  price both moves it and pins it — and it refuses when the coordinate is
+   *  already held by SOMETHING ELSE, naming what. Re-typing a value you locked
+   *  yourself just moves it, which is how a driving dimension behaves in CAD. */
+  setSlotValue(ref: EntityRef, value: number): { ok: true } | { ok: false; issue: ConstraintIssue } {
     const b = this.bucket()
-    const doomed = new Set(this.selected)
+    const byId = new Map(b.drawings.map((d) => [d.id, d]))
+    const slots = slotsForRef(ref, byId)
+    if (slots.length !== 1) {
+      return {
+        ok: false,
+        issue: { code: 'unknown', message: 'That is not a single coordinate to set.' },
+      }
+    }
+    const slot = slots[0]
+    const a = analyze(b.drawings, b.constraints)
+    const r = a.rep.get(slot)
+    const mine = b.constraints.find(
+      (c) => c.kind === 'lock' && slotsForRef(c.a, byId).includes(slot)
+    )
+    if (r !== undefined && a.pinned.has(r) && !mine) {
+      // Held through an equality by a lock on something else — the case that
+      // has to be reported rather than silently ignored.
+      const holder = b.constraints.find((c) => {
+        if (c.kind !== 'lock') return false
+        return slotsForRef(c.a, byId).some((s) => a.rep.get(s) === r)
+      })
+      const hd = holder ? byId.get(holder.a.id) : null
+      return {
+        ok: false,
+        issue: {
+          code: 'blocked',
+          message: `That value is held by the lock on ${hd ? `the ${hd.kind}` : 'another object'}. Unlock it first.`,
+        },
+      }
+    }
+    // Write through the whole equality class: the point and the line it is held
+    // against are ONE number, so setting either sets both.
+    for (const [s, rr] of a.rep) {
+      if (rr !== r) continue
+      const d = byId.get(s.slice(0, s.indexOf(':')))
+      if (d) writeSlot(d, s, value)
+    }
+    if (!mine) this.addConstraint({ kind: 'lock', a: ref })
+    this.issue = null
+    this.commit()
+    return { ok: true }
+  }
+
+  /** Remove the lock on one coordinate (the editor's per-field padlock, off). */
+  clearSlotLock(ref: EntityRef): void {
+    const b = this.bucket()
+    const byId = new Map(b.drawings.map((d) => [d.id, d]))
+    const want = slotsForRef(ref, byId).join()
     const before = b.constraints.length
-    b.constraints = b.constraints.filter((c) => !doomed.has(c.a.id))
+    b.constraints = b.constraints.filter(
+      (c) => !(c.kind === 'lock' && slotsForRef(c.a, byId).join() === want)
+    )
     this.issue = null
     if (b.constraints.length !== before) this.commit()
     else this.emit()
@@ -1132,31 +1393,55 @@ export class ChartDraw {
 
   /** Add one constraint, or say why not.
    *
-   *  ADMISSION IS O(1) HERE, deliberately. A lock names a set of coordinate
-   *  slots, and the only way it can fail to add information is by naming a slot
-   *  already held — so an occupancy test settles it exactly, with no matrix and
-   *  no floating-point tolerance anywhere near a user-visible refusal. */
-  addConstraint(c: Omit<Constraint, 'id'>): { ok: true; id: string } | { ok: false; issue: ConstraintIssue } {
+   *  NO MATRIX. Every constraint here is an equality, so "does this add
+   *  information?" is answered exactly by union-find: a lock adds nothing if its
+   *  class is already pinned, and an 'on' adds nothing if the two slots are
+   *  already the same number. Both are set lookups, not tolerances. */
+  addConstraint(
+    c: Omit<Constraint, 'id'>
+  ): { ok: true; id: string } | { ok: false; issue: ConstraintIssue } {
     const b = this.bucket()
     const byId = new Map(b.drawings.map((d) => [d.id, d]))
-    const want = lockedSlots({ ...c, id: 'probe' }, byId)
-    if (want === null || want.length === 0) {
-      return {
-        ok: false,
-        issue: { code: 'unknown', message: 'That constraint names something that cannot carry it.' },
+    const probe: Constraint = { ...c, id: 'probe' }
+    const a = analyze(b.drawings, b.constraints)
+
+    if (c.kind === 'on') {
+      const pair = onPair(probe, byId)
+      if (!pair) {
+        return {
+          ok: false,
+          issue: {
+            code: 'unsupported',
+            message: 'Hold a trend endpoint against a horizontal or vertical line.',
+          },
+        }
       }
-    }
-    const held = new Set<string>()
-    for (const ex of b.constraints) for (const s of lockedSlots(ex, byId) ?? []) held.add(s)
-    const clash = want.find((s) => held.has(s))
-    if (clash) {
-      const d = byId.get(c.a.id)
-      return {
-        ok: false,
-        issue: {
-          code: 'duplicate',
-          message: `That ${d ? d.kind : 'object'} is already locked.`,
-        },
+      if (a.rep.get(pair[0]) === a.rep.get(pair[1])) {
+        return {
+          ok: false,
+          issue: { code: 'duplicate', message: 'Those are already held together.' },
+        }
+      }
+    } else {
+      const want = slotsForRef(c.a, byId)
+      if (want.length === 0) {
+        return {
+          ok: false,
+          issue: {
+            code: 'unknown',
+            message: 'That constraint names something that cannot carry it.',
+          },
+        }
+      }
+      if (want.every((s) => a.pinned.has(a.rep.get(s) as string))) {
+        const d = byId.get(c.a.id)
+        return {
+          ok: false,
+          issue: {
+            code: 'duplicate',
+            message: `That ${d ? d.kind : 'object'} is already locked.`,
+          },
+        }
       }
     }
     const id = mkId('cn')
@@ -1172,8 +1457,18 @@ export class ChartDraw {
    *  touches the DOM, so the gate can exercise it directly. */
   private movableIds(wanted: string[]): { ids: string[]; issue: ConstraintIssue | null } {
     const b = this.bucket()
-    const held = new Set(b.constraints.map((c) => c.a.id))
-    const ids = wanted.filter((id) => !held.has(id))
+    const a = analyze(b.drawings, b.constraints)
+    // PINNED, not merely constrained. An 'on' does not block anything — it is
+    // the relation that makes the h-line draggable WITH the trend attached, so
+    // treating any constraint as a brake would forbid exactly the motion the
+    // feature exists to allow. A translation moves every coordinate a drawing
+    // owns, so one pinned slot is enough to stop it.
+    const frozen = (id: string): boolean => {
+      const d = b.drawings.find((x) => x.id === id)
+      if (!d) return false
+      return slotsOf(d).some((s) => a.pinned.has(a.rep.get(s) as string))
+    }
+    const ids = wanted.filter((id) => !frozen(id))
     if (ids.length > 0) return { ids, issue: null }
     const d = b.drawings.find((x) => x.id === wanted[0])
     return {
@@ -1195,7 +1490,13 @@ export class ChartDraw {
   private pruneConstraints(b: Bucket): boolean {
     if (b.constraints.length === 0) return false
     const live = new Set(b.drawings.map((d) => d.id))
-    const kept = b.constraints.filter((c) => live.has(c.a.id))
+    // BOTH references. An 'on' names two drawings, so deleting the host leaves
+    // it dangling just as surely as deleting the point does — and a relation
+    // pointing at a dead id is invisible, unremovable, and still merges
+    // coordinate classes that no longer have any business being merged.
+    const kept = b.constraints.filter(
+      (c) => live.has(c.a.id) && (c.b === undefined || live.has(c.b.id))
+    )
     if (kept.length === b.constraints.length) return false
     b.constraints = kept
     return true
@@ -1939,25 +2240,59 @@ export class ChartDraw {
     }
   }
 
-  private clickTwoPoint(_x: number, y: number, time: UTCTimestamp | null): void {
+  /** An hline/vline under the cursor — what a trend endpoint snaps onto. */
+  private lineUnder(x: number, y: number): Drawing | null {
+    const d = this.hitTest(x, y)?.drawing
+    return d && (d.kind === 'hline' || d.kind === 'vline') ? d : null
+  }
+
+  private clickTwoPoint(x: number, y: number, time: UTCTimestamp | null): void {
     // Whitespace right of the last bar has no time — nothing to anchor to.
     // The preview dims out there so the dead zone is visible before the click.
     if (time === null) return
     const price = this.priceAtY(y)
     if (price === null) return
+    // SNAP AT PLACEMENT. Kade: "lines snap to each other". Dropping an endpoint
+    // on an h/v line takes that line's coordinate EXACTLY — not within a few
+    // pixels — and records that it is held there, so the two move together from
+    // then on. Only trends: a circle held to a line has no meaning here, since
+    // circles carry no constrainable coordinates at all.
+    const host = this.tool === 'trend' ? this.lineUnder(x, y) : null
     const pt: Pt = { time, price }
+    if (host) {
+      if (host.kind === 'hline') pt.price = host.points[0].price
+      else pt.time = host.points[0].time
+    }
     if (this.pendingPt === null) {
       this.pendingPt = pt
+      this.pendingHost = host?.id ?? null
       this.render()
       return
     }
     // Tool stays armed so several can go down without a toolbar round-trip.
+    const id = mkId('dw')
     this.bucket().drawings.push({
-      id: mkId('dw'),
+      id,
       kind: this.tool === 'circle' ? 'circle' : 'trend',
       points: [this.pendingPt, pt],
     })
+    if (this.tool === 'trend') {
+      // A refused inference is dropped in silence: the user asked for a line,
+      // not for a relation, so a modal about one they never requested would be
+      // noise. An explicit hold-on says why.
+      if (this.pendingHost) {
+        this.addConstraint({
+          kind: 'on',
+          a: { id, part: 'a' },
+          b: { id: this.pendingHost, part: 'line' },
+        })
+      }
+      if (host) {
+        this.addConstraint({ kind: 'on', a: { id, part: 'b' }, b: { id: host.id, part: 'line' } })
+      }
+    }
     this.pendingPt = null
+    this.pendingHost = null
     this.commit()
   }
 
@@ -2018,7 +2353,12 @@ export class ChartDraw {
       d.points = next
       moved = true
     }
-    if (moved) this.render()
+    if (moved) {
+      // Equalities re-satisfied every frame, so the attached trend stretches
+      // WHILE you drag rather than snapping into place on mouseup.
+      propagate(b.drawings, b.constraints, new Set(this.drag.ids))
+      this.render()
+    }
   }
 
   /** Where the dimension line currently sits in pixels — its midpoint for a
@@ -2334,7 +2674,9 @@ export class ChartDraw {
     if (trimPrev?.whole) dangerIds.add(hover!.drawing.id) // no intersections: trim deletes whole
 
     if (!this.hidden) {
-      const locked = new Set(b.constraints.map((c) => c.a.id))
+      const locked = new Set(
+        b.constraints.filter((c) => c.kind === 'lock').map((c) => c.a.id)
+      )
       for (const d of b.drawings) {
         this.renderDrawing(pane, d, {
           selected: this.selected.includes(d.id),

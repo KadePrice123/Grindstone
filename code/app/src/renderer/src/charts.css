@@ -195,6 +195,29 @@
   font-size: 12px;
 }
 /* Invalid input is a visible state: red border, draft kept, nothing committed. */
+.de-lock {
+  flex-shrink: 0;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.55;
+}
+.de-lock:hover {
+  color: var(--text);
+  background: var(--surface);
+  opacity: 1;
+}
+/* Closed reads as a held value, so it takes the accent and full opacity —
+   the same signal the chart's own padlock glyph uses. */
+.de-lock.on {
+  color: var(--accent);
+  opacity: 1;
+}
 .de-input.bad {
   border-color: var(--loss);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--loss) 18%, transparent);
