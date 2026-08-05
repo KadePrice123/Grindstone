@@ -19,7 +19,7 @@ full requirements document. Research backing its technical decisions:
 | `tools/installer/` | the double-click installers, per platform | yes |
 | `tools/icons/` | regenerates `app.ico` / `app.icns` / PNGs from `logo.svg` | yes |
 | `data/` | bars cache, news store, vector DB | no — Drive-backed |
-| `env/` | broker keys (`alpaca.env`, …) | no — never leaves this machine |
+| `env/` | broker keys (`alpaca.env`, …) — **not read by the app**; runtime credentials live in the encrypted user DB | no — never leaves this machine |
 | `.venv/` | virtualenv, created by the installer | no — rebuild from requirements.txt |
 
 ## Install
@@ -199,7 +199,11 @@ M1 (spine) + search/data (early M4 slice) — the app boots and *works*:
   a form (legs, exit toggles, sizing) for humans, raw JSON for the full spec
   language and future AI agents — both compile to the same spec.
   Pickup notes for in-flight work: `code/docs/NOTES.md`.
-Roadmap: REQUIREMENTS.md §10. The Alpaca paper key in `env/alpaca.env` is
-**no longer valid** — it is rejected 401/403 as of 2026-08-05, so the market
-refresh degrades to the keyless fallback until a fresh key is added in
-Accounts. That is a dead credential, not a bug in the app.
+Roadmap: REQUIREMENTS.md §10. Alpaca paper key verified working 2026-08-05
+(trading and data APIs both 200) — but note the app does not read it from
+`env/`: credentials live in the encrypted user DB, added through Accounts.
+
+If you see `market refresh skipped — alpaca data: keys rejected (401/403)`
+while the gate runs, that is **not** your key. The gate creates a throwaway
+profile with fixture credentials, and the app's background market refresh
+then tries them against Alpaca for real.

@@ -40,10 +40,29 @@ What the clean machines exposed, in order of how much it mattered:
    declared "no Python" on a machine that had a good 3.12 and installed a
    second copy.
 
-Also: the gate printed a full `BrokerError` stack trace on every keyless
-clone, because selftest boots the app and the background market refresh used
-`LOG.exception`. Expected broker failures now log one line. **The Alpaca paper
-key is dead (401/403)** — rotate it before testing anything broker-live.
+Also: the gate printed a full `BrokerError` stack trace on every clone,
+because selftest boots the app and the background market refresh used
+`LOG.exception`. Expected broker failures now log one line.
+
+**Correction, and a finding worth acting on.** That 401/403 was first read as
+a dead Alpaca key. It is not — the key in `env/alpaca.env` was tested
+directly on 2026-08-05 and returns 200 on both the trading and data APIs.
+The rejection comes from the gate's own fixture credentials, and that is the
+interesting part: **the "offline" gate makes a live outbound HTTPS call to
+Alpaca on every run.** `_auth_accounts` creates a throwaway profile with
+fixture keys, the app's `kick_market_refresh` fires on a background thread,
+and `AlpacaData._get` does a real `httpx.get` — a 401/403 status can only
+come from a server that answered. So the gate is neither offline nor
+hermetic: it is slower than it looks, behaves differently with no network,
+and quietly depends on Alpaca being up. README and REQUIREMENTS both say
+live connectivity belongs to `npm run e2e`, never the gate. Not yet fixed;
+the honest options are to stub the transport under the gate or to have
+`kick_market_refresh` no-op when a test flag is set.
+
+Related: nothing in `code/` reads `env/alpaca.env` at all — credentials come
+from the encrypted DB (`accounts` + `secrets`, decrypted with the profile
+DEK) via `market.alpaca_creds_for`. The env file is a leftover from before
+Accounts existed.
 
 Untested and should not be claimed otherwise: **macOS**. No Mac here. The
 right fix is a GitHub Actions matrix (`macos-latest` runners are free) rather
