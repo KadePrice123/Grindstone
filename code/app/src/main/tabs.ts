@@ -13,6 +13,7 @@
  * hovered index; outside every strip -> tear off into a new window there.
  */
 import { BaseWindow, Menu, WebContentsView, ipcMain, session, shell } from 'electron'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { backtestReportUrl } from './api'
 import { log } from './log'
@@ -21,7 +22,93 @@ import { log } from './log'
  *  node, denied permissions, downloads blocked. Article reading must never
  *  become a foothold into the app that holds broker credentials. */
 const BROWSE_PARTITION = 'persist:browsing'
-let browsingHardened = false
+
+/**
+ * Sign-in origins, which never load in a tab.
+ *
+ * Google blocks account sign-in in ANY embedded view as policy, not as a bug,
+ * and its published criteria are explicit that a browser "must not use another
+ * browser's User-Agent string, such as Chrome" when connecting to
+ * accounts.google.com — which is exactly what browsingUserAgent() does. So the
+ * compatibility UA below is actively counterproductive on these hosts, and no
+ * amount of it would help: RFC 8252 (OAuth for Native Apps) says native apps
+ * MUST NOT use embedded user-agents for authorization, and the sanctioned
+ * answer is to hand the flow to the real browser. That is also the better one
+ * for the user, whose password manager and passkeys live there.
+ *
+ * DELIBERATELY MINIMAL. Only providers that genuinely refuse to render in an
+ * embedded view belong here. An earlier draft also listed GitHub, Okta, Auth0,
+ * LinkedIn, Facebook and Yahoo — none of which block embedded views at all, so
+ * all that achieved was evicting sign-ins that worked perfectly well in-app and
+ * stranding the user in a browser without any of this app's tools. Every host
+ * added here costs the user their tooling; add one only after seeing it fail.
+ *
+ * Suffix-matched against the host, so accounts.google.co.uk matches too.
+ */
+const IDENTITY_HOSTS = [
+  'accounts.google.com',
+  'accounts.youtube.com',
+]
+
+/** Parse without throwing. A page-supplied string reaches these handlers, and
+ *  an unguarded `new URL()` throws inside a main-process event handler. */
+function parseUrl(u: string): URL | null {
+  try {
+    return new URL(u)
+  } catch {
+    return null
+  }
+}
+
+function isWebUrl(u: string): boolean {
+  const p = parseUrl(u)
+  return !!p && (p.protocol === 'https:' || p.protocol === 'http:')
+}
+
+function isIdentityUrl(u: string): boolean {
+  const p = parseUrl(u)
+  if (!p) return false
+  const hostPath = p.host + p.pathname
+  return IDENTITY_HOSTS.some(
+    (h) => p.host === h || p.host.endsWith('.' + h) || hostPath.startsWith(h)
+  )
+}
+
+/** Hand a sign-in URL to the real browser and say so in the log. */
+function handOffToBrowser(target: string, why: string): void {
+  log('identity flow ->', why, new URL(target).host)
+  shell.openExternal(target)
+}
+
+// --------------------------------------------------------------- identity
+// One place decides who this browser says it is. The UA string, the client
+// hint headers and navigator.userAgentData must all tell the SAME story: a
+// view that claims Chrome in its User-Agent while its client hints say
+// Chromium (or say nothing) is a contradiction every device-detection
+// library on the web reads as "not a real browser".
+
+function chromeMajor(): string {
+  return process.versions.chrome.split('.')[0]
+}
+
+/** The platform token Chrome itself puts in the UA string on each OS. */
+function uaPlatformToken(): string {
+  switch (process.platform) {
+    case 'darwin': return 'Macintosh; Intel Mac OS X 10_15_7'
+    case 'linux': return 'X11; Linux x86_64'
+    default: return 'Windows NT 10.0; Win64; x64'
+  }
+}
+
+/** The Sec-CH-UA-Platform value, which Chromium derives from the real OS —
+ *  hardcoding Windows here while running on a Mac is a self-contradiction. */
+function chPlatform(): string {
+  switch (process.platform) {
+    case 'darwin': return 'macOS'
+    case 'linux': return 'Linux'
+    default: return 'Windows'
+  }
+}
 
 /**
  * A clean Chrome user agent. Electron's default advertises "Electron/43" and
@@ -32,22 +119,131 @@ let browsingHardened = false
 function browsingUserAgent(): string {
   const chrome = process.versions.chrome
   return (
-    `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ` +
+    `Mozilla/5.0 (${uaPlatformToken()}) AppleWebKit/537.36 ` +
     `(KHTML, like Gecko) Chrome/${chrome} Safari/537.36`
   )
 }
 
+/** The low-entropy client-hint triple, matching browsingUserAgent(). */
+function clientHintHeaders(): Record<string, string> {
+  const major = chromeMajor()
+  return {
+    'Sec-CH-UA': `"Not;A=Brand";v="8", "Chromium";v="${major}", "Google Chrome";v="${major}"`,
+    'Sec-CH-UA-Mobile': '?0',
+    'Sec-CH-UA-Platform': `"${chPlatform()}"`,
+  }
+}
+
+/**
+ * The permission policy for untrusted pages.
+ *
+ * Previously both handlers were a blanket `false`. That is stricter than any
+ * real browser and it silently breaks ordinary sites: the worst offender is
+ * storage-access, whose denial puts any site using an embedded SSO iframe into
+ * an endless login loop. Denying what Chrome never even prompts for does not
+ * buy security, it just looks like the site is broken.
+ *
+ * Tier A below is exactly the set Chrome grants without ever asking, and every
+ * one of them is confined to this isolated partition — none of them can reach
+ * session.defaultSession, where the broker credentials live. Everything else,
+ * including camera, microphone, geolocation and notifications, stays denied.
+ */
+const AUTO_GRANT = new Set([
+  // Chromium sanitizes the payload; that is what the permission name means.
+  'clipboard-sanitized-write',
+  // Chrome gates these on a user gesture, not a permission prompt.
+  'fullscreen', 'pointerLock', 'keyboardLock',
+  // The login-loop fix. Grants an embedded frame access to its OWN cookies
+  // inside a partition that is already walled off from the app.
+  'storage-access', 'top-level-storage-access',
+  // Chrome does not prompt for EME on desktop. (Playback can still fail:
+  // Electron ships no Widevine CDM, which is a separate, unfixable matter.)
+  'mediaKeySystem',
+])
+
+function permissionAllowed(permission: string): boolean {
+  return AUTO_GRANT.has(permission)
+}
+
+const hardened = new WeakSet<Electron.Session>()
+
 function browsingSession(): Electron.Session {
   const s = session.fromPartition(BROWSE_PARTITION)
-  if (!browsingHardened) {
-    browsingHardened = true
-    s.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
-    s.setPermissionCheckHandler(() => false)
-    s.on('will-download', (e) => e.preventDefault())
+  // Keyed on the session, not a module flag: a second partition would
+  // otherwise silently inherit "already hardened" and get no policy at all.
+  if (!hardened.has(s)) {
+    hardened.add(s)
+
+    s.setPermissionRequestHandler((_wc, permission, cb, details) => {
+      // mailto:/tel:/sms: arrive here as 'openExternal' rather than as a
+      // navigation. Handing those three to the OS is what a browser does;
+      // anything else external stays blocked.
+      if (permission === 'openExternal') {
+        const ext = (details as { externalURL?: string }).externalURL ?? ''
+        const proto = parseUrl(ext)?.protocol ?? ''
+        const ok = /^(mailto|tel|sms):$/.test(proto)
+        if (!ok) log('blocked external scheme', ext.slice(0, 80))
+        return cb(ok)
+      }
+      const ok = permissionAllowed(permission)
+      if (!ok) log('permission denied', permission)
+      return cb(ok)
+    })
+    // Must agree with the request handler: this one is what
+    // navigator.permissions.query() and feature detection read, and it is
+    // synchronous, so it can never prompt.
+    s.setPermissionCheckHandler((_wc, permission) => permissionAllowed(permission))
+
+    // Downloads used to be cancelled with no error, no UI and no navigation —
+    // indistinguishable from a dead link, and it also killed the CSV export in
+    // our OWN backtest reports, which load in this partition. Still no file
+    // lands in the app's process; the real browser takes it, where the
+    // download manager and AV scanning already work.
+    s.on('will-download', (e, item) => {
+      const url = item.getURL()
+      e.preventDefault()
+      log('download handed to the browser:', item.getFilename())
+      if (isWebUrl(url)) shell.openExternal(url)
+    })
+
+    // Electron has no ClientHintsControllerDelegate, and that delegate is what
+    // adds client hints to a TOP-LEVEL NAVIGATION on the browser side. So the
+    // document request goes out with no Sec-CH-UA at all while its User-Agent
+    // claims Chrome — measured against real Chrome 150, which sends the full
+    // triple to the identical URL. Blink still adds the hints to subresource
+    // requests (fetch/XHR carry them either way), so this handler exists
+    // specifically to fix the navigation, which is the request a site's
+    // server-side browser detection actually sees first.
+    s.webRequest.onBeforeSendHeaders((d, cb) => {
+      cb({ requestHeaders: { ...d.requestHeaders, ...clientHintHeaders() } })
+    })
+
     s.setUserAgent(browsingUserAgent())
   }
   return s
 }
+
+// NOT DONE, deliberately: aligning navigator.userAgentData too.
+//
+// setUserAgent() leaves the client-hint brand list alone, so
+// navigator.userAgentData.brands stays [Not;A=Brand, Chromium] with no
+// "Google Chrome" entry, and the only way to change it is
+// webContents.debugger.attach() + Network.setUserAgentOverride. That was
+// implemented and then removed on 2026-08-04, because:
+//
+//  - It makes DevTools unusable on every browser tab: only one debugger may
+//    attach to a WebContents, and ours would already be there. Certain cost.
+//  - It bought nothing measurable. A/B against Cloudflare's Turnstile over
+//    four runs each: baseline 0/4 verified, header-injection-only 2/4, CDP
+//    attached 0/4. It never once helped.
+//
+// So the wire headers are fixed (browsingSession above, which is a real gap —
+// Electron ships no ClientHintsControllerDelegate and therefore sends no
+// Sec-CH-UA at all) and the JS-visible brand list is left honest. A site that
+// branches on navigator.userAgentData will read Chromium, which is what this
+// is. Note also that going further — shimming window.chrome, patching
+// navigator internals — is not a compatibility fix but bot-detection evasion,
+// and is out of scope on purpose.
 
 export const TABBAR_H = 40
 /** Extra chrome height when the active tab is a web page: its address bar. */
@@ -73,6 +269,53 @@ const PAGE_NAMES = new Set([
   'home', 'accounts', 'data', 'settings', 'search', 'article', 'news', 'charts',
   'help', 'backtest',
 ])
+
+/**
+ * The window / taskbar icon, generated from logo.svg by
+ * tools/icons/make-icons.ps1 and committed under assets/branding.
+ *
+ * macOS is deliberately absent: a .app bundle takes its icon from its own
+ * Info.plist, and passing one here does nothing there. A missing file must
+ * never be fatal — a source tree that has not run the generator still boots,
+ * just with Electron's default icon.
+ */
+function appIcon(): string | undefined {
+  // __dirname is <repo>/code/app/out/main in both dev and preview builds.
+  const name =
+    process.platform === 'win32' ? 'app.ico'
+    : process.platform === 'linux' ? 'icon-256.png'
+    : ''
+  if (!name) return undefined
+  const p = path.join(__dirname, '../../../assets/branding', name)
+  return existsSync(p) ? p : undefined
+}
+
+/**
+ * F12 (Ctrl+Shift+I, Cmd+Opt+I) opens DevTools for the focused view.
+ *
+ * There was previously no way to open DevTools anywhere in this app. The
+ * windows are frameless BaseWindows, which get no application menu, so
+ * Electron's built-in accelerator never applied either — a page's console and
+ * network tab were simply unreachable, which makes every "the site is blank"
+ * report unfalsifiable.
+ *
+ * Detached on purpose: this app positions every WebContentsView by hand, and
+ * docked DevTools resizes the page out from under that layout.
+ */
+function enableDevToolsShortcut(wc: Electron.WebContents): void {
+  wc.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+    const key = input.key.toLowerCase()
+    const combo =
+      input.key === 'F12' ||
+      (input.control && input.shift && key === 'i') ||
+      (input.meta && input.alt && key === 'i') // macOS
+    if (!combo) return
+    event.preventDefault()
+    if (wc.isDevToolsOpened()) wc.closeDevTools()
+    else wc.openDevTools({ mode: 'detach' })
+  })
+}
 
 /** What the gesture wheel sees of a tab. */
 export interface WheelTabInfo {
@@ -180,6 +423,7 @@ export class TabManager {
       },
     })
     view.setBackgroundColor(DARK_BG)
+    enableDevToolsShortcut(view.webContents)
     view.webContents.setWindowOpenHandler(({ url }) => {
       if (url.startsWith('https://')) shell.openExternal(url)
       return { action: 'deny' }
@@ -198,9 +442,11 @@ export class TabManager {
 
   // -------------------------------------------------------------- windows
   createWindow(at?: { x: number; y: number }): Win {
+    const icon = appIcon()
     const win = new BaseWindow({
       ...NEW_WINDOW_SIZE,
       ...(at ? { x: at.x, y: at.y } : {}),
+      ...(icon ? { icon } : {}),
       minWidth: MIN_W,
       minHeight: MIN_H,
       frame: false,
@@ -361,6 +607,13 @@ export class TabManager {
       return null
     }
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null
+    // The third and last door: typing a sign-in URL into the omnibox, or a
+    // page handing us one. Returning null here means no tab is created at all,
+    // which is the honest outcome — the flow continues in the real browser.
+    if (isIdentityUrl(url)) {
+      handOffToBrowser(url, 'opened directly')
+      return null
+    }
 
     const view = new WebContentsView({
       webPreferences: {
@@ -376,8 +629,13 @@ export class TabManager {
         webviewTag: false,
         experimentalFeatures: false,
         allowRunningInsecureContent: false,
+        // safeDialogs alone, NOT disableDialogs: the latter overrides it and
+        // makes window.confirm() return false unconditionally, so every
+        // confirm-gated button on every site silently does nothing. safeDialogs
+        // is the setting that actually addresses the threat — it adds
+        // Chromium's "prevent this page from creating additional dialogs"
+        // checkbox, which defeats dialog-spam loops without lying to the page.
         safeDialogs: true,
-        disableDialogs: true,
         navigateOnDragDrop: false,
         autoplayPolicy: 'document-user-activation-required',
         // NOT the app bridge — browser tabs never see grindstone/*. The only
@@ -402,21 +660,69 @@ export class TabManager {
     }
 
     const wc = view.webContents
-    wc.setWindowOpenHandler(({ url: target }) => {
+    enableDevToolsShortcut(wc)
+    wc.setWindowOpenHandler(({ url: target, disposition }) => {
+      // "Sign in with Google" and friends open a popup. Re-hosting that popup
+      // as another embedded tab is precisely what Google refuses to serve, so
+      // this is the choke point where every third-party sign-in button was
+      // dying, not just a visit to accounts.google.com.
+      if (isIdentityUrl(target)) {
+        handOffToBrowser(target, 'popup from ' + (parseUrl(tab.url ?? '')?.host ?? '?'))
+        return { action: 'deny' }
+      }
       // Popups become tabs, never new OS windows we do not control.
       const home = this.wins.find((x) => x.tabs.some((t) => t.id === tab.id))
-      if (home && /^https?:$/.test(new URL(target).protocol)) {
-        this.newBrowserTab(home, target)
+      if (home && isWebUrl(target)) {
+        // ctrl/middle-click asks for a background tab; honour that rather than
+        // stealing focus on every popup.
+        this.newBrowserTab(home, target, disposition !== 'background-tab')
       }
       return { action: 'deny' }
     })
     // A web page may only ever navigate to another web page: no file://,
     // no custom app schemes, nothing that could reach local resources.
-    wc.on('will-navigate', (event, target) => {
-      if (!/^https?:$/.test(new URL(target).protocol)) {
+    const guardNavigation = (event: Electron.Event, target: string): void => {
+      if (isIdentityUrl(target)) {
         event.preventDefault()
-        log('blocked navigation to non-web scheme', target.slice(0, 80))
+        handOffToBrowser(target, 'navigation')
+        return
       }
+      if (isWebUrl(target)) return
+      event.preventDefault()
+      const proto = parseUrl(target)?.protocol ?? ''
+      // mailto:/tel:/sms: are user-facing links, not an attack surface — a
+      // browser hands them to the OS rather than swallowing them silently.
+      if (/^(mailto|tel|sms):$/.test(proto)) shell.openExternal(target)
+      else log('blocked navigation to non-web scheme', target.slice(0, 80))
+    }
+    wc.on('will-navigate', guardNavigation)
+    // will-navigate is main-frame-only and does NOT fire for server-side
+    // redirects — and a real Google sign-in is reached by redirect far more
+    // often than by a typed URL, so without this the handoff would miss the
+    // common case and the invariant in the comment above would be untrue.
+    wc.on('will-redirect', guardNavigation)
+    // Without this every failed navigation is an unexplained blank dark
+    // rectangle: DNS failure, TLS interception and a blocked response all look
+    // identical to "the app is broken".
+    wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+      if (!isMainFrame || code === -3) return // -3 is ERR_ABORTED: user action
+      log('navigation failed', code, desc, String(url).slice(0, 80))
+    })
+
+    // A page's own errors, in OUR log, with no debugger attached.
+    //
+    // This exists because opening DevTools is not a neutral act: bot-detection
+    // bundles ship `debugger` statements on a timer specifically to punish it,
+    // and each one pauses the renderer and yanks DevTools to the Sources panel
+    // (measured on Cloudflare's login, 2026-08-04). Reading the console from
+    // the main process attaches no debugger, so the traps never fire and the
+    // page behaves exactly as it would unobserved — which is also the only way
+    // to see what a page does when a debugger WOULD change its behaviour.
+    // Warnings and errors only; a chatty SPA would otherwise bury the log.
+    wc.on('console-message', (_event, level, message) => {
+      if (level < 2) return // 0 verbose, 1 info, 2 warning, 3 error
+      log(level >= 3 ? 'page error' : 'page warn', parsed.hostname,
+          String(message).slice(0, 300))
     })
     const sync = () => {
       tab.title = wc.getTitle() || parsed.hostname

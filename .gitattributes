@@ -1,0 +1,22 @@
+# Line endings, pinned where they are load-bearing.
+#
+# This machine has core.autocrlf=true, and a contributor's may not. Anything
+# below is checked out byte-for-byte the same way on every platform.
+
+# A shell script with CRLF fails at the shebang, on macOS and Linux, with the
+# famously unhelpful "bad interpreter: /usr/bin/env bash^M".
+*.sh        text eol=lf
+*.command   text eol=lf
+
+# cmd.exe is the mirror image: a batch file with LF endings mis-parses labels
+# and multi-line blocks.
+*.cmd       text eol=crlf
+*.bat       text eol=crlf
+
+# Binary assets git must never inspect or convert.
+*.ico       binary
+*.icns      binary
+*.png       binary
+*.jpg       binary
+*.db        binary
+*.npz       binary

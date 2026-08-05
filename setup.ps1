@@ -1,59 +1,23 @@
-# One-command setup from a fresh clone (Windows PowerShell).
+# Unattended setup from a fresh clone (Windows PowerShell).
 #
 #   git clone https://github.com/KadePrice123/Grindstone.git
 #   cd Grindstone
 #   powershell -ExecutionPolicy Bypass -File setup.ps1
 #
-# Prerequisites it checks but does not install: Python 3.12+ and Node 20+.
-# Everything it creates lives INSIDE the clone (.venv, code/app/node_modules).
-
+# This is the no-window, no-shortcuts path, kept for scripts and CI. To install
+# normally, double-click Install.cmd instead: same work, plus the desktop and
+# Start Menu shortcuts.
+#
+# Missing prerequisites (Python 3.12+, Node 20+) are installed for you.
+# Everything else lives INSIDE the clone: .venv, code/app/node_modules,
+# code/app/out.
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-function Need($cmd, $hint) {
-  try { Get-Command $cmd -ErrorAction Stop | Out-Null }
-  catch { Write-Host "MISSING: $cmd - $hint" -ForegroundColor Red; exit 1 }
-}
-Need python 'install Python 3.12+ from python.org or the Microsoft Store'
-Need npm    'install Node.js 20+ (LTS) from nodejs.org'
-
-$py = (python --version) 2>&1
-Write-Host "Python: $py"
-Write-Host "Node:   $(node --version)  npm: $(npm --version)"
-
-# 1. Python venv inside the clone
-if (-not (Test-Path "$here\.venv")) {
-  Write-Host "Creating .venv ..."
-  python -m venv "$here\.venv"
-}
-& "$here\.venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q -r "$here\requirements.txt"
-if (-not $?) { Write-Host 'pip install failed' -ForegroundColor Red; exit 1 }
-Write-Host "Python deps installed."
-
-# 2. Frontend deps
-Push-Location "$here\code\app"
-npm install --no-fund --no-audit
-$npmOk = $?
-if ($npmOk -and -not (Test-Path "node_modules\electron\dist\electron.exe")) {
-  # Electron's postinstall can silently skip the binary download; without
-  # this the app later dies with an opaque spawn ENOENT (fresh-clone test).
-  Write-Host 'Electron binary missing - fetching it now ...'
-  node node_modules\electron\install.js
-  $npmOk = (Test-Path "node_modules\electron\dist\electron.exe")
-}
-Pop-Location
-if (-not $npmOk) { Write-Host 'npm install failed' -ForegroundColor Red; exit 1 }
-
-# 3. The offline verification gate - proves the install is complete.
-Push-Location "$here\code"
-& "$here\.venv\Scripts\python.exe" selftest.py
-$gateOk = $?
-Pop-Location
-if (-not $gateOk) {
-  Write-Host 'The verification gate FAILED - see the FAIL lines above.' -ForegroundColor Red
-  exit 1
-}
+# Throws on any failure ($ErrorActionPreference above), so reaching the next
+# line means the install and the gate both succeeded.
+& "$here\tools\installer\windows\Install.ps1" -NoUi -NoShortcuts @args
 
 Write-Host ''
-Write-Host 'Setup complete. Run the app with:' -ForegroundColor Green
+Write-Host 'Run the app with:' -ForegroundColor Green
 Write-Host '  cd code\app; npm run start'

@@ -12,6 +12,12 @@ import { Sidecar } from './sidecar'
 import { TabManager } from './tabs'
 import { WheelManager } from './wheel'
 
+// Windows identifies taskbar buttons and pinned shortcuts by AppUserModelID.
+// Without it the shell treats a pinned shortcut and the running process as two
+// different apps: pinning appears to work, then launching produces a SECOND,
+// unpinned taskbar button. The installer writes the same id onto the shortcut.
+if (process.platform === 'win32') app.setAppUserModelId('com.grindstone.app')
+
 const sidecar = new Sidecar()
 let tabs: TabManager | null = null
 

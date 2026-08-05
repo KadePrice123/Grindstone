@@ -16,46 +16,67 @@ full requirements document. Research backing its technical decisions:
 | `code/docs/` | requirements + research docs | yes |
 | `code/assets/branding/` | logos, icons, branding.json, preview.html | yes |
 | `code/` | app source (shell, sidecar, tools) | yes |
+| `tools/installer/` | the double-click installers, per platform | yes |
+| `tools/icons/` | regenerates `app.ico` / `app.icns` / PNGs from `logo.svg` | yes |
 | `data/` | bars cache, news store, vector DB | no — Drive-backed |
 | `env/` | broker keys (`alpaca.env`, …) | no — never leaves this machine |
-| `../../venvs/dashboard/` | virtualenv | no — rebuild from requirements.txt |
+| `.venv/` | virtualenv, created by the installer | no — rebuild from requirements.txt |
 
-## Setup from a fresh clone
+## Install
 
-Prerequisites (install these first, everything else is automatic):
+Clone the repo, then **double-click the installer in the repo root**:
 
-- **Python 3.12+** — python.org or the Microsoft Store
-- **Node.js 20+ (LTS)** — nodejs.org
+| | |
+|---|---|
+| **Windows** | `Install.cmd` |
+| **macOS** | `Install.command` |
+| **Linux** | `./install.sh` (most file managers will not run a `.sh` on double-click) |
 
-Then one command from the repo root:
+A window opens, asks which shortcuts you want, and does the rest: it installs
+**Python 3.12+ and Node.js 20+ if they are missing**, creates `.venv/` inside
+the clone, installs the Python and frontend dependencies, builds the app, runs
+the verification gate, and creates the shortcuts you ticked. Nothing needs to
+be installed beforehand — the installer is built on what each OS already ships
+(WinForms, `osascript`, `zenity`/`kdialog`, or a plain terminal prompt).
+
+Afterwards Grindstone launches from its desktop icon or your applications menu
+like any other program: no terminal, no `npm`. The shortcut points straight at
+the Electron binary in the clone, so the app stays wherever you cloned it —
+move the clone and you will need to rerun the installer.
+
+<details><summary>Unattended / CI</summary>
+
+The same work with no window and no shortcuts:
 
 ```powershell
-# Windows
-powershell -ExecutionPolicy Bypass -File setup.ps1
+powershell -ExecutionPolicy Bypass -File setup.ps1   # Windows
 ```
 
 ```bash
-# Linux / macOS
-./setup.sh
+./setup.sh                                           # Linux / macOS
 ```
 
-That creates `.venv/` inside the clone, installs the Python and frontend
-dependencies, and finishes by running the offline verification gate — if its
-last line is `SELFTEST OK …`, the install is complete and correct.
+`Install.cmd -NoUi` and `./install.sh --no-ui` do the same but keep the
+shortcuts. Both paths write a full log to your temp directory
+(`grindstone-setup.log`).
+</details>
 
-<details><summary>Manual steps (what the script does)</summary>
+<details><summary>What it does, by hand</summary>
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 cd code\app
 npm install
+npm run build          # `npm run start` is preview: it serves out/, never builds it
 cd ..
 ..\.venv\Scripts\python.exe selftest.py
 ```
 </details>
 
 ## Run the app
+
+From the desktop shortcut or applications menu, or from a terminal:
 
 ```bash
 cd code/app
@@ -85,19 +106,36 @@ check. Covered today: secret hygiene, envelope-encryption round-trip with AAD
 tamper detection, the full offline auth+accounts API flow with a stolen-DB
 plaintext scan, broker parser fixtures, the read-only Alpaca invariant,
 session expiry/wipe, search ranking, the gesture-wheel system, split view,
-the chart tool engine, and the frontend typecheck. Live connectivity stays a
-separate diagnostic (`cd code/app && npm run e2e`), never part of the gate.
+the chart tool engine, the installer surface (shebangs, exec bits, line
+endings, icon integrity, and that the shortcut target matches what the build
+produces), and the frontend typecheck. Live connectivity stays a separate
+diagnostic (`cd code/app && npm run e2e`), never part of the gate.
 
 ## Troubleshooting a fresh install
 
-- **`MISSING: python` / `MISSING: npm`** — install the prerequisites above,
-  reopen the terminal so PATH refreshes, rerun the script.
+Every install writes `grindstone-setup.log` to the temp directory; it has the
+full output of every step.
+
+- **"Python installed but is still not on PATH"** — a new interpreter is not
+  visible to already-running processes. Sign out and back in, then rerun.
 - **The window opens but says "backend not running"** — the sidecar could not
-  find a Python with the dependencies. Run the setup script (it creates
-  `.venv` where the app looks first), or activate your own venv before
-  `npm run start`.
-- **Gate fails** — the FAIL lines name the exact check and reason; the
-  install is incomplete until it passes.
+  find a Python with the dependencies. Rerun the installer (it creates `.venv`
+  where the app looks first), or activate your own venv before `npm run start`.
+- **Gate fails** — the FAIL line names the exact check and reason; the install
+  is incomplete until it passes.
+- **The gate is skipped** — it shells out to `git ls-files` to scan tracked
+  files for secrets, so it needs git and a real clone. A ZIP download runs the
+  app fine but cannot run the gate.
+- **macOS: "Grindstone.app cannot be opened"** — the wrapper bundle is
+  unsigned. Right-click it and choose Open once, or `xattr -dr
+  com.apple.quarantine ~/Applications/Grindstone.app`. The Dock tile may read
+  "Electron": the wrapper runs Electron's own binary, and only real packaging
+  (REQUIREMENTS.md §6.8) fixes that.
+- **Linux: the desktop icon does nothing** — GNOME will not run a launcher it
+  does not trust. Right-click it and choose "Allow launching".
+- **Windows: "Pin to taskbar" did not happen** — Windows 10 1809 removed the
+  API that let installers do it. The Start Menu shortcut is created; right-click
+  it and pin from there.
 
 ## Distribution
 

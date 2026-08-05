@@ -1025,6 +1025,97 @@ def _tab_system():
     assert "e2e" in pkg["scripts"], "npm run e2e is not wired"
 
 
+@check("browsing: sign-in leaves for the real browser, one honest identity")
+def _browsing_identity():
+    """REGRESSION (2026-08-04): Google answered every sign-in with "Couldn't
+    sign you in - this browser or app may not be secure", and ordinary sites
+    misbehaved in ways that looked unrelated. Two distinct causes, and the fix
+    must keep them apart.
+
+    1. IDENTITY FLOWS. Google blocks sign-in in any embedded view as policy,
+       and its published criteria say a browser "must not use another browser's
+       User-Agent string, such as Chrome" on accounts.google.com - which is
+       exactly what our compatibility UA does. Unfixable in-app; RFC 8252 says
+       hand it to the system browser. Three doors lead to a sign-in page and
+       all three must hand off, including will-redirect: a real Google entry
+       arrives by redirect far more often than by a typed URL.
+    2. SELF-CONTRADICTION. setUserAgent() overrides the UA string only;
+       Chromium keeps client-hint brands in a separate struct no Electron API
+       writes. Measured: this session sent NO Sec-CH-UA headers at all while
+       claiming Chrome/150, where real Chrome 150 sent the full triple to the
+       same URL, and navigator.userAgentData.brands lacked "Google Chrome".
+       Fixing it needs BOTH mechanisms - webRequest reaches the wire, the CDP
+       override reaches the JS object, and neither reaches the other.
+    """
+    tabs = (CODE / "app/src/main/tabs.ts").read_text(encoding="utf-8")
+    # "must not appear" assertions run against CODE ONLY. Twice now a check
+    # here has failed on the comment explaining why the thing it forbids was
+    # removed — the prose names it, so a naive substring test sees it.
+    # Line-based on purpose. A `/\* … \*/` regex latched onto a stray comment
+    # opener and swallowed a real line of code, silently under-counting.
+    code = "\n".join(
+        ln for ln in tabs.splitlines()
+        if not ln.lstrip().startswith(("//", "*", "/*", "*/"))
+    )
+    code = re.sub(r"\s+//.*$", "", code, flags=re.M)
+
+    # -- 1. the handoff, at every door -------------------------------------
+    assert "IDENTITY_HOSTS" in tabs and "accounts.google.com" in tabs, \
+        "the identity host list is gone - sign-in would load in-app again"
+    assert tabs.count("isIdentityUrl(") >= 3, \
+        "an identity door is unguarded: popup, navigation and direct-open must all hand off"
+    assert "handOffToBrowser" in tabs and "shell.openExternal" in tabs, \
+        "nothing hands the sign-in URL to the real browser"
+    assert "will-redirect" in tabs, \
+        "will-navigate is main-frame-only and never fires for server-side " \
+        "redirects, which is how a real Google sign-in is usually reached"
+
+    # -- 2. one identity, told the same way three times ---------------------
+    assert "process.platform" in tabs and "uaPlatformToken" in tabs, \
+        "the UA hardcodes an OS again - it would claim Windows on the mac build " \
+        "while Sec-CH-UA-Platform, which Chromium derives from the real OS, says macOS"
+    assert "onBeforeSendHeaders" in tabs and "Sec-CH-UA" in tabs, \
+        "no client-hint headers: the request claims Chrome and sends none of " \
+        "the hints every real Chrome has sent since v89"
+    # The CDP metadata override (webContents.debugger + setUserAgentOverride)
+    # is deliberately NOT here: it makes DevTools unusable on every browser tab
+    # and an A/B against Cloudflare Turnstile measured no benefit at all
+    # (baseline 0/4 verified, headers-only 2/4, CDP attached 0/4). Re-adding it
+    # should have to survive that same measurement again.
+    assert "debugger.attach" not in code, \
+        "the CDP client-hint override is back: it costs DevTools on every " \
+        "browser tab and measured zero benefit - re-run the A/B before keeping it"
+
+    # -- 3. hardening that stayed, and hardening that was too blunt ---------
+    assert "disableDialogs: true" not in code, \
+        "disableDialogs makes window.confirm() return false unconditionally, " \
+        "so confirm-gated buttons on ordinary sites silently do nothing"
+    assert "safeDialogs: true" in tabs, "dialog-spam protection was dropped entirely"
+    assert "AUTO_GRANT" in tabs, "the blanket permission deny is back"
+    for perm in ("storage-access", "clipboard-sanitized-write", "fullscreen"):
+        assert perm in tabs, f"{perm} is denied again - Chrome never prompts for it"
+    # storage-access is the one that matters most: denying it puts any site
+    # using an embedded SSO iframe into an endless login loop.
+    grant_block = tabs.split("AUTO_GRANT")[1].split("])")[0]
+    for banned in ("geolocation", "'media'", "notifications"):
+        assert banned not in grant_block, \
+            f"{banned} must never be auto-granted to an untrusted page"
+    assert "(_wc, _perm, cb) => cb(false)" not in code, "blanket deny restored"
+
+    # A frameless BaseWindow gets no application menu, so Electron's built-in
+    # DevTools accelerator never applies: without an explicit binding there is
+    # no way to see any page's console, and "the site renders blank" can never
+    # be diagnosed. Both view kinds must have it.
+    assert "enableDevToolsShortcut" in code, "no way to open DevTools anywhere in the app"
+    assert code.count("enableDevToolsShortcut(") >= 3, \
+        "DevTools must be wired on BOTH app views and browser tabs (plus its definition)"
+
+    # The boundary these tabs exist behind is unchanged.
+    for must in ("nodeIntegration: false", "contextIsolation: true", "sandbox: true",
+                 "webviewTag: false"):
+        assert must in tabs, f"browser-tab hardening lost {must}"
+
+
 @check("gesture wheels: spec layout, honest validation, safe browser preload")
 def _gesture_wheels():
     import tempfile
@@ -1415,7 +1506,6 @@ def _help_system():
 
 # ----------------------------------------------------- backtest engine checks
 
-@check("bt engine unit tests (120 known-answer tests from the tastytrade refs)")
 @check("favorites: store honesty, wheels v4, mirrored page lists")
 def _favorites_system():
     import re as re_mod
@@ -1588,7 +1678,16 @@ def _favorites_system():
         "the picker offers favorites, not a free-typed ticker"
 
 
+@check("bt engine unit tests (120 known-answer tests from the tastytrade refs)")
 def _bt_engine():
+    # REGRESSION (2026-08-04): this decorator was stacked on _favorites_system
+    # instead, ~170 lines up. check() appends (name, fn) and returns fn
+    # unchanged, so BOTH names registered against the favorites function: the
+    # gate printed "ok bt engine unit tests" while running the favorites check
+    # twice, the count still read 40/40, and the engine's known-answer suite
+    # had silently not run since it was vendored. A duplicate-function-object
+    # assertion in main() now makes that shape impossible to reintroduce.
+    #
     # The vendored engine ships its own suite: fees, buying power, profit
     # definition, selection ties, sandboxing — every number read off the real
     # reference exports. A subprocess so numpy never enters THIS process.
@@ -1899,6 +1998,96 @@ def _backtest_page():
     assert "backtest_presets" in app_db._SCHEMA, "backtest_presets missing from app.db"
 
 
+@check("installer: entry points, endings, icons and launch target agree")
+def _installer():
+    """The install path is the first thing a new machine runs, and every way it
+    can break is silent: a CRLF shebang, a missing exec bit, one non-ASCII byte
+    in a PowerShell file, an icon that is declared but absent, a shortcut
+    pointing at a build step nobody runs."""
+    for rel in ("Install.cmd", "Install.command", "install.sh",
+                "setup.ps1", "setup.sh", ".gitattributes",
+                "tools/installer/windows/Install.ps1",
+                "tools/installer/windows/Steps.ps1",
+                "tools/installer/posix/install.sh",
+                "tools/installer/posix/ui.sh",
+                "tools/installer/posix/shortcuts.sh",
+                "tools/icons/make-icons.ps1"):
+        assert (ROOT / rel).is_file(), f"installer file missing: {rel}"
+
+    posix = ["Install.command", "install.sh", "setup.sh",
+             "tools/installer/posix/install.sh",
+             "tools/installer/posix/ui.sh",
+             "tools/installer/posix/shortcuts.sh"]
+    windows = ["Install.cmd", "tools/installer/windows/Install.ps1",
+               "tools/installer/windows/Steps.ps1", "tools/icons/make-icons.ps1"]
+
+    # Shebang, LF, and the exec bit as git records it. A .command without mode
+    # 755 does nothing whatsoever when double-clicked in Finder, and CRLF turns
+    # the shebang into "bad interpreter: /usr/bin/env bash^M".
+    modes = {}
+    for line in subprocess.run(["git", "ls-files", "-s"], cwd=ROOT,
+                               capture_output=True, text=True, check=True).stdout.splitlines():
+        meta, _, name = line.partition("\t")
+        modes[name] = meta.split()[0]
+    for rel in posix:
+        raw = (ROOT / rel).read_bytes()
+        assert raw.startswith(b"#!"), f"{rel}: no shebang"
+        assert b"\r\n" not in raw, f"{rel}: CRLF endings break the shebang on macOS/Linux"
+        assert modes.get(rel) == "100755", \
+            f"{rel}: git mode is {modes.get(rel)}, not 100755 - it will not be executable in a clone"
+
+    # PowerShell 5.1 reads a BOM-less UTF-8 script as ANSI: a single em-dash in
+    # a comment broke setup.ps1's parse (fresh-clone test, 2026-08-02).
+    for rel in posix + windows:
+        raw = (ROOT / rel).read_bytes()
+        bad = [i for i, byte in enumerate(raw) if byte > 127]
+        assert not bad, f"{rel}: non-ASCII byte at offset {bad[0]} - keep installer scripts pure ASCII"
+
+    ga = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    for rule in ("*.sh", "*.command", "eol=lf"):
+        assert rule in ga, f".gitattributes must pin {rule} or another machine's autocrlf will undo it"
+
+    # Icons: declared in branding, present, and genuinely parseable.
+    brand = json.loads((CODE / "assets/branding/branding.json").read_text(encoding="utf-8"))
+    ico = CODE / brand["logo"]["windowIcon"]
+    assert ico.is_file(), f"branding declares {brand['logo']['windowIcon']} but it is not there"
+    raw = ico.read_bytes()
+    assert raw[:4] == b"\x00\x00\x01\x00", "app.ico is not an icon file"
+    count = int.from_bytes(raw[4:6], "little")
+    assert count >= 4, f"app.ico carries only {count} sizes"
+    for i in range(count):
+        off = 6 + 16 * i
+        length = int.from_bytes(raw[off + 8:off + 12], "little")
+        start = int.from_bytes(raw[off + 12:off + 16], "little")
+        assert start + length <= len(raw), f"app.ico entry {i} runs past the end of the file"
+        assert raw[start:start + 4] == b"\x89PNG", f"app.ico entry {i} is not the PNG it claims to be"
+    assert (CODE / "assets/branding/app.icns").read_bytes()[:4] == b"icns", "app.icns malformed"
+    assert (CODE / "assets/branding/icon-256.png").read_bytes()[:4] == b"\x89PNG", "icon-256.png malformed"
+
+    # The shortcuts launch Electron directly, so out/ must exist by then: the
+    # installers have to run the build, which `npm run start` never does.
+    pkg = json.loads((CODE / "app/package.json").read_text(encoding="utf-8"))
+    assert pkg["main"] == "out/main/index.js", "shortcut target assumes out/main/index.js"
+    assert "build" in pkg["scripts"], "no build script, but preview only serves an existing out/"
+    steps = (ROOT / "tools/installer/windows/Steps.ps1").read_text(encoding="utf-8")
+    assert "node_modules\\electron\\dist\\electron.exe" in steps, "Windows shortcut target changed"
+    assert "'run', 'build'" in steps, "the Windows installer never builds out/"
+    posix_main = (ROOT / "tools/installer/posix/install.sh").read_text(encoding="utf-8")
+    assert "run build" in posix_main, "the posix installer never builds out/"
+    shortcuts = (ROOT / "tools/installer/posix/shortcuts.sh").read_text(encoding="utf-8")
+    assert "Electron.app/Contents/MacOS/Electron" in shortcuts, "mac launch path missing"
+
+    # Window icon wired in, and both sides naming the SAME AppUserModelID -
+    # if they drift, a pinned shortcut and the live window become two buttons.
+    tabs_src = (CODE / "app/src/main/tabs.ts").read_text(encoding="utf-8")
+    assert "app.ico" in tabs_src and "icon-256.png" in tabs_src, \
+        "tabs.ts no longer resolves a window icon"
+    index_src = (CODE / "app/src/main/index.ts").read_text(encoding="utf-8")
+    assert "com.grindstone.app" in index_src, "main never sets the AppUserModelID"
+    assert "com.grindstone.app" in steps, \
+        "installer and app disagree on the AppUserModelID - pinning would show two taskbar buttons"
+
+
 @check("frontend: sources present; typecheck when toolchain available")
 def _frontend():
     app_dir = CODE / "app"
@@ -1923,6 +2112,22 @@ def _frontend():
 def main() -> int:
     passed = 0
     total = len(CHECKS)
+
+    # Two @check decorators stacked on one function register two NAMES against
+    # one BODY: the count still adds up, every line still prints ok, and the
+    # check whose decorator drifted silently stops running. That happened to
+    # the bt engine suite (see _bt_engine). A name is only a real check if it
+    # has a body of its own.
+    seen: dict[object, str] = {}
+    for name, fn in CHECKS:
+        if fn in seen:
+            print(f"FAIL  {name}: shares its body with {seen[fn]!r} — a @check "
+                  f"decorator is stacked on the wrong function, so one of the "
+                  f"two never runs")
+            print(f"SELFTEST FAILED 0/{total}")
+            return 1
+        seen[fn] = name
+
     for name, fn in CHECKS:
         try:
             fn()
