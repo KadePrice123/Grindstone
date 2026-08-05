@@ -5,6 +5,11 @@ gate count it is stale — **the gate is 44/44** as of 2026-08-05. (The 41/41
 this line used to claim was itself stale by two: bump BOTH this line and
 `checkpoint.json` when you add a check.)
 
+> **Options-on-chart has its own document: [OPTIONS.md](OPTIONS.md)** — legs,
+> zones, presets, the chain panel, the workstation layout, and what remains
+> (Stage 5 polish, minting, accordion, gang drag, combo view). The gate is
+> **46/46** as of this session; `checkpoint.json` is the truth.
+>
 > **Constraints have their own document now: [CONSTRAINTS.md](CONSTRAINTS.md).**
 > It is the settled architecture for the whole D1–D5 family — model, solver,
 > interaction, staging, and the three product calls Kade closed on 2026-08-05.
