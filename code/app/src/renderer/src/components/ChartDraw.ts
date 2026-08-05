@@ -691,6 +691,50 @@ export function chartMinutePrefix(times: number[], per: number): number[] {
   return out
 }
 
+/** Trading days from one calendar date to another — the arithmetic that maps
+ *  an option EXPIRATION into the chart's bar-index space, where a leg object
+ *  past the last candle has to live.
+ *
+ *  Weekends are skipped; market holidays are NOT modelled, so a holiday inside
+ *  the span costs one bar of error. That is the honest trade: a real exchange
+ *  calendar is a data dependency this file must not grow (it runs under plain
+ *  node in the gate), and one bar at 30 DTE is smaller than the acceptance
+ *  window it positions. Signed: a target before the base counts negative.
+ *
+ *  Dates are 'YYYY-MM-DD', compared in UTC — the same convention the OCC
+ *  parser and the chain endpoint already use. A weekend target contributes no
+ *  weekdays beyond the Friday before it, so a Saturday expiration (legacy
+ *  contracts) lands on Friday's bar, which is where it trades. */
+export function tradingDayOffset(fromDate: string, toDate: string): number | null {
+  const a = Date.parse(fromDate + 'T00:00:00Z')
+  const b = Date.parse(toDate + 'T00:00:00Z')
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null
+  const sign = b >= a ? 1 : -1
+  const [lo, hi] = b >= a ? [a, b] : [b, a]
+  let n = 0
+  for (let t = lo + 86400_000; t <= hi; t += 86400_000) {
+    const dow = new Date(t).getUTCDay()
+    if (dow !== 0 && dow !== 6) n++
+  }
+  return sign * n
+}
+
+/** The calendar date N trading days after (or before, negative) a base date —
+ *  the inverse of tradingDayOffset, used when a leg is DRAGGED along the time
+ *  axis and its pixel position has to become an expiration again. */
+export function dateAtTradingOffset(fromDate: string, offset: number): string | null {
+  let t = Date.parse(fromDate + 'T00:00:00Z')
+  if (!Number.isFinite(t) || !Number.isFinite(offset)) return null
+  const step = offset >= 0 ? 86400_000 : -86400_000
+  let left = Math.round(Math.abs(offset))
+  while (left > 0) {
+    t += step
+    const dow = new Date(t).getUTCDay()
+    if (dow !== 0 && dow !== 6) left--
+  }
+  return new Date(t).toISOString().slice(0, 10)
+}
+
 /** Where a FRACTIONAL bar index lands on the loaded lattice, or which side it
  *  fell off and by how much.
  *

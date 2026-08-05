@@ -2365,7 +2365,8 @@ def _chart_time():
         f"The installers pin v22.20; update node or rerun the installer.")
 
     probe = r"""
-import { TF_MINUTES, slopePerHour, ChartDraw, chartMinutePrefix, barIndexOf }
+import { TF_MINUTES, slopePerHour, ChartDraw, chartMinutePrefix, barIndexOf,
+         tradingDayOffset, dateAtTradingOffset }
   from './src/renderer/src/components/ChartDraw.ts'
 const out = []
 const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail })
@@ -2475,6 +2476,30 @@ const asFive = ChartDraw.prototype.chartMinutes.call(s2, sec(shared[0]), sec(sha
 ok('the prefix sum follows a timeframe change on the same bar array',
    asHour === 240 && asFive === 20, `${asHour} then ${asFive}`)
 
+// ---- trading-day arithmetic: expirations into bar space --------------------
+// A leg object's expiration is a FUTURE calendar date; the chart's axis is
+// trading days. This mapping is what places a zone past the last candle, so
+// its edges are pinned on known dates: 2024-01-05 was a Friday.
+ok('one trading day across a weekend is one bar',
+   tradingDayOffset('2024-01-05', '2024-01-08') === 1, tradingDayOffset('2024-01-05', '2024-01-08'))
+ok('a calendar week is five bars',
+   tradingDayOffset('2024-01-05', '2024-01-12') === 5, tradingDayOffset('2024-01-05', '2024-01-12'))
+ok('a Saturday target lands on the Friday before it (where it trades)',
+   tradingDayOffset('2024-01-05', '2024-01-06') === 0, tradingDayOffset('2024-01-05', '2024-01-06'))
+ok('the offset is signed', tradingDayOffset('2024-01-08', '2024-01-05') === -1, '')
+ok('same day is zero', tradingDayOffset('2024-01-05', '2024-01-05') === 0, '')
+ok('garbage dates degrade to null, not NaN', tradingDayOffset('junk', '2024-01-05') === null, '')
+// The inverse, which turns a dragged pixel position back into an expiration.
+ok('the inverse recovers the date across the weekend',
+   dateAtTradingOffset('2024-01-05', 1) === '2024-01-08', dateAtTradingOffset('2024-01-05', 1))
+ok('five bars forward is the next Friday',
+   dateAtTradingOffset('2024-01-05', 5) === '2024-01-12', dateAtTradingOffset('2024-01-05', 5))
+ok('and the round trip closes', (() => {
+  const target = '2024-02-16' // 30 trading days out, another Friday
+  const off = tradingDayOffset('2024-01-05', target)
+  return dateAtTradingOffset('2024-01-05', off) === target
+})(), '')
+
 // ---- barIndexOf reports instead of clamping --------------------------------
 // nearestBarTime pins to the first/last bar and never says so. Fine for the
 // handle it places; wrong for anything a constraint must satisfy.
@@ -2502,7 +2527,7 @@ console.log(JSON.stringify(out))
     bad = [x for x in results if not x["cond"]]
     assert not bad, "chart-time arithmetic is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad)
-    assert len(results) >= 22, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 31, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart objects persist: strict store, one vocabulary, engine round-trip")
