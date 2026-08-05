@@ -282,8 +282,9 @@ Branding is swappable: every name, colour and icon resolves through
   requirements document and roadmap.
 - [`code/docs/RESEARCH.md`](code/docs/RESEARCH.md) — the research and sources
   behind the technical decisions.
-- [`code/docs/NOTES.md`](code/docs/NOTES.md) — working notes on in-flight work
-  and known gaps.
+- [`code/docs/NOTES.md`](code/docs/NOTES.md) — **the open-work list** (every
+  known issue in one table at the top), plus session-by-session working notes
+  and the gotchas worth not rediscovering.
 
 ## License
 

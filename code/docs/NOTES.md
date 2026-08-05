@@ -1,7 +1,46 @@
 # Pickup notes — installers tested on real clean machines (2026-08-05)
 
-Newest session first. The backtest section below is still accurate history but
-its gate number is stale: the gate is **42/42** now, not 38/38.
+Newest session first. Older sections are accurate history; where they quote a
+gate count it is stale — **the gate is 41/41** as of 2026-08-05.
+
+## Open work — the whole list
+
+Every open item, in one place. Details live in the dated sections below.
+
+**Charting** (details: [Not done yet — charting](#not-done-yet--pick-up-here-charting))
+
+| # | Item | Size |
+|---|---|---|
+| C1 | **Measure boxes still not clickable** — needs runtime diagnosis with F12, not more code review | unknown |
+| C2 | Plain left-click should select (Phase 3, never implemented) — needs a `hoverId` early-out or it breaks "nothing repaints at rest" | medium |
+| C3 | Drag to move — genuinely unimplemented, the largest remaining piece | ~140 lines |
+| C4 | Per-drawing colour — `Drawing` has no style field | medium |
+| C5 | Tickers wheel does nothing — three stacked causes | medium |
+| C6 | No candle/line toggle — indicators are built inside the candlestick branch | medium |
+
+**Backtesting** (details: [Not done yet — backtest](#not-done-yet--pick-up-here))
+
+| # | Item | Size |
+|---|---|---|
+| B1 | Multi-underlying UI — backend already takes `underlying`; only the card's buttons are hardwired to SPY | small |
+| B2 | TastyTrade / other recording adapters — anything writing `rec_chain`/`rec_bars` feeds backtests free | medium |
+| B3 | Recorded-data quality guards — no holiday filter, no minimum-contract sanity check | small |
+| B4 | Form coverage — params, sizing ladders, calendars are JSON-only; `/api/backtests/vocab` is unused | medium |
+| B5 | Sweeps — engine vendored and tested, no API/UI | medium |
+| B6 | Packaged build — runner needs its own entry point in the frozen exe (501 today) | medium |
+| B7 | Timezone edge — fixed-EST fallback mislabels one hour around DST | small |
+
+**Platform and tooling** (found 2026-08-05, details in this section)
+
+| # | Item | Size |
+|---|---|---|
+| P1 | **The gate is not offline** — it makes a live Alpaca call every run. Stub the transport, or no-op `kick_market_refresh` behind a test flag | small |
+| P2 | **macOS is untested** — add a GitHub Actions matrix (`macos-latest` is free) so it is built and gated every push | small |
+| P3 | Regenerate an Alpaca paper key and add it via Accounts — the old one was deleted with `env/` | trivial |
+| P4 | Order entry — every adapter is `order_entry: False`; the trading milestone flips it | large |
+
+Roadmap-level work (AI layer, TastyTrade adapter, session restore, sidebar
+rail) is REQUIREMENTS.md §10, not this list.
 
 Both installers were run end to end against genuinely clean machines, and the
 test found three defects that a re-run on a working machine never would.
@@ -210,7 +249,7 @@ after it is the honest remainder.
   see comment in app.py).
 - **Form editor**: `BacktestSpecForm.tsx` compiles to the same spec JSON the
   validator/AI path uses; `tryDecompile` refuses (→ JSON mode) rather than
-  drop features. Gate at the time: `SELFTEST OK 38/38` (42/42 now), incl. an end-to-end check that
+  drop features. Gate at the time: `SELFTEST OK 38/38` (41/41 now), incl. an end-to-end check that
   builds synthetic arbitrage-clean chains in rec_chain, syncs, and runs the
   REAL runner subprocess on the result.
 
@@ -252,5 +291,6 @@ after it is the honest remainder.
   backtests.py comment) and never a piped stderr nobody drains.
 - Push failures with `curl 55` on this workspace's machines:
   `git config http.sslBackend openssl` (endpoint AV kills schannel uploads).
-- Adding a selftest check = bump `checkpoint.json` expect string in the SAME
-  commit (currently 38/38).
+- Adding OR removing a selftest check = bump `checkpoint.json`'s expect string
+  in the SAME commit (currently **41/41**). The count is a sentinel: it exists
+  so a crash mid-run cannot look like a pass.
