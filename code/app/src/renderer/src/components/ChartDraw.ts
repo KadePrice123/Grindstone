@@ -344,6 +344,21 @@ export class ChartDraw {
   private downAt: XY | null = null
   /** Was a modifier held on the mousedown that started this click? */
   private downAdditive = false
+  /** A drag, PRIMED on mousedown over a drawing and only `live` once the
+   *  pointer has travelled past CLICK_SLOP_PX. Priming without going live is
+   *  what keeps a plain click a click: same gesture, and the distance decides.
+   *  `orig` snapshots the points at grab time so every frame translates from
+   *  the original rather than accumulating rounding. */
+  private drag: {
+    ids: string[]
+    orig: Map<string, Pt[]>
+    from: XY
+    live: boolean
+  } | null = null
+  /** The library fires a click on the mouseup that ends a drag. The 4px guard
+   *  in handleClick does not cover it (a 2px drag still moved something), so a
+   *  real drag says so explicitly and the next click is swallowed. */
+  private justDragged = false
   private teardown: (() => void)[] = []
 
   // bars index cache, keyed by array identity — pages hand the same array
@@ -437,14 +452,62 @@ export class ChartDraw {
     // pan-end while a tool is armed.
     const onDown = (e: MouseEvent) => {
       const r = this.host.getBoundingClientRect()
-      this.downAt = { x: e.clientX - r.left, y: e.clientY - r.top }
+      const at = { x: e.clientX - r.left, y: e.clientY - r.top }
+      this.downAt = at
       // The library's click params carry no modifier keys, and this mousedown
       // is the only place a REAL MouseEvent reaches us before the click. Held
       // here so clickSelect can tell "add to the selection" from "replace it".
       this.downAdditive = e.shiftKey || e.ctrlKey || e.metaKey
+      this.endDrag(false)
+      // Only pointer grabs. Any armed tool is placing geometry, and a modifier
+      // means "extend the selection", never "move it".
+      if (e.button !== 0 || this.tool !== 'pointer' || this.downAdditive) return
+      const hit = this.hitAny(at.x, at.y)
+      if (!hit || hit.kind !== 'drawing') return // measures/pins move in a later stage
+      // Grabbing something already selected moves the WHOLE selection - the
+      // same rule clickDelete uses, so "what will this act on" has one answer.
+      const b = this.bucket()
+      const ids = this.selected.includes(hit.id)
+        ? this.selected.filter((id) => b.drawings.some((d) => d.id === id))
+        : [hit.id]
+      const orig = new Map<string, Pt[]>()
+      for (const id of ids) {
+        const d = b.drawings.find((x) => x.id === id)
+        if (d) orig.set(id, d.points.map((p) => ({ ...p })))
+      }
+      if (orig.size === 0) return
+      this.drag = { ids, orig, from: at, live: false }
+      // Suspend pan/zoom NOW, not at the slop threshold: the chart pans on its
+      // own mousemove, so waiting would let it slide a few pixels before we
+      // decide this was a drag. Restored on mouseup whether or not it went live.
+      try {
+        this.chart.applyOptions({ handleScroll: false, handleScale: false })
+      } catch { /* older builds: the drag still works, the chart just pans too */ }
     }
     this.host.addEventListener('mousedown', onDown)
     this.teardown.push(() => this.host.removeEventListener('mousedown', onDown))
+
+    // move/up live on WINDOW: a drag that leaves the chart (or ends over the
+    // price scale) must still track and still commit, or the drawing sticks to
+    // the cursor after the button is already up.
+    const onDragMove = (e: MouseEvent) => {
+      if (!this.drag) return
+      const r = this.host.getBoundingClientRect()
+      const x = e.clientX - r.left
+      const y = e.clientY - r.top
+      const dx = x - this.drag.from.x
+      const dy = y - this.drag.from.y
+      if (!this.drag.live) {
+        if (Math.hypot(dx, dy) <= CLICK_SLOP_PX) return // still a click
+        this.drag.live = true
+      }
+      this.moveDragged(dx, dy)
+    }
+    const onDragUp = () => this.endDrag(true)
+    window.addEventListener('mousemove', onDragMove)
+    window.addEventListener('mouseup', onDragUp)
+    this.teardown.push(() => window.removeEventListener('mousemove', onDragMove))
+    this.teardown.push(() => window.removeEventListener('mouseup', onDragUp))
 
     // Escape cancels an in-progress placement, then clears selection.
     // Delete/Backspace removes the selection. Both ignore typing targets so
@@ -1179,6 +1242,12 @@ export class ChartDraw {
   // ---- click handling -----------------------------------------------------
 
   private handleClick(p: MouseEventParams): void {
+    // A drag just ended: the library fires a click on that same mouseup, and
+    // acting on it would re-select (or worse, place) at the drop point.
+    if (this.justDragged) {
+      this.justDragged = false
+      return
+    }
     // 'pointer' no longer returns here: it IS the select tool now, so it needs
     // the pan guard and pane check below just as much as a placement does — a
     // drag-pan that ends over a drawing must not select it.
@@ -1277,6 +1346,53 @@ export class ChartDraw {
     else this.selected.push(id)
     this.render()
     this.emit()
+  }
+
+  /** Translate every dragged drawing by a PIXEL delta, from its grab-time
+   *  snapshot. Pixels, not data: the x axis is affine in bar INDEX, so a
+   *  constant Δtime is not a constant Δx across a weekend. Projecting each
+   *  original point, shifting it on screen and converting back is the only
+   *  translation that follows the cursor everywhere on the axis. */
+  private moveDragged(dx: number, dy: number): void {
+    if (!this.drag) return
+    const b = this.bucket()
+    let moved = false
+    for (const id of this.drag.ids) {
+      const d = b.drawings.find((x) => x.id === id)
+      const orig = this.drag.orig.get(id)
+      if (!d || !orig) continue
+      const next: Pt[] = []
+      for (const p of orig) {
+        const px = this.project(p)
+        if (!px) break // unprojectable (scrolled off): leave this one alone
+        const t = this.timeAtX(px.x + dx)
+        const price = this.priceAtY(px.y + dy)
+        if (t === null || price === null) break
+        next.push({ time: (this.nearestBarTime(t) ?? t) as UTCTimestamp, price })
+      }
+      if (next.length !== orig.length) continue // partial move would deform it
+      d.points = next
+      moved = true
+    }
+    if (moved) this.render()
+  }
+
+  /** End a drag. `commit` distinguishes mouseup from a fresh mousedown that
+   *  supersedes an abandoned one. Pan/zoom is always restored - leaving the
+   *  chart unpannable because a drag ended oddly would be far worse than a
+   *  drawing landing a pixel out. */
+  private endDrag(commit: boolean): void {
+    const wasLive = this.drag?.live === true
+    if (this.drag) {
+      try {
+        this.chart.applyOptions({ handleScroll: true, handleScale: true })
+      } catch { /* see onDown */ }
+    }
+    this.drag = null
+    if (commit && wasLive) {
+      this.justDragged = true // swallow the click the library fires on mouseup
+      this.emit()
+    }
   }
 
   private clickSelect(x: number, y: number): void {

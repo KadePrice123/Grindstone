@@ -1485,6 +1485,36 @@ def _chart_selection():
         "clickSelect toggles on every plain click again - selections accumulate " \
         "invisibly and Delete takes more than the editor is showing"
 
+    # -- drag to move (2026-08-05) -----------------------------------------
+    # A drag has three failure modes that all LOOK like it works, so each gets
+    # its own assertion. The behaviour itself is proved by the e2e, which drags
+    # an h-line with held-button CDP input and reads the price back out of the
+    # editor - source greps alone would not have caught any of these.
+    assert "private moveDragged(" in draw and "private endDrag(" in draw, \
+        "drag-to-move is gone"
+    mv = draw.split("private moveDragged(")[1][:900]
+    assert "timeAtX" in mv and "priceAtY" in mv, \
+        "moveDragged translates in DATA units again - the x axis is affine in " \
+        "bar index, so a constant time delta is not a constant pixel delta " \
+        "across a weekend and the drawing would drift from the cursor"
+    assert "nearestBarTime" in mv, \
+        "a dragged point is no longer snapped to a bar, so it can land between " \
+        "bars and stop being projectable"
+    assert "justDragged" in draw, \
+        "the trailing click after a drag is unguarded: the library fires a " \
+        "click on the mouseup that ends one, and it lands at the DROP point"
+    # Bounded by the end of the function, not a character count: the first
+    # version of this check sliced [:1400] and failed on a correct engine
+    # because the line it wants sits at 1780. A window that has to be re-tuned
+    # whenever a comment grows is a check that will cry wolf.
+    down = draw.split("const onDown = (")[1].split("this.host.addEventListener('mousedown'")[0]
+    assert "handleScroll: false" in down, \
+        "grabbing a drawing no longer suspends the chart's own pan, so a drag " \
+        "moves the drawing AND scrolls the chart under it"
+    endd = draw.split("private endDrag(")[1][:700]
+    assert "handleScroll: true" in endd, \
+        "pan/zoom is never restored after a drag - the chart would be frozen"
+
     # The repaint guard. Pointer is the app's RESTING tool and it now has to
     # follow the crosshair to know what is under it; rendering unconditionally
     # there is a full overlay rebuild at mouse-move rate. Only an id CHANGE may

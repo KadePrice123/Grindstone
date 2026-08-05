@@ -982,6 +982,48 @@ try {
   const cx = (fx) => chartRect.x + chartRect.w * fx
   const cy = (fy) => chartRect.y + chartRect.h * fy
 
+  /** A real drag: streamed approach, press, several HELD moves, release.
+   *  `buttons: 1` on the moves is what makes them a drag — without it the page
+   *  sees the button as up and nothing tracks. Same streamed approach as
+   *  click() for the same reason: lightweight-charts derives coordinates from
+   *  its crosshair, and a press with no prior move is point-less and dropped. */
+  const chartDrag = async (fx1, fy1, fx2, fy2) => {
+    const r = await chartView.eval(
+      `(() => { const el = document.querySelector('[data-draw-tool]');
+         el.scrollIntoView({ block: 'center' });
+         const b = el.getBoundingClientRect();
+         return { x: b.x, y: b.y, w: b.width, h: b.height } })()`
+    )
+    await sleep(120)
+    const x1 = Math.round(r.x + r.w * fx1), y1 = Math.round(r.y + r.h * fy1)
+    const x2 = Math.round(r.x + r.w * fx2), y2 = Math.round(r.y + r.h * fy2)
+    for (const dx of [-24, -9, 0]) {
+      await chartView.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x1 + dx, y: y1 })
+      await sleep(30)
+    }
+    await chartView.send('Input.dispatchMouseEvent',
+      { type: 'mousePressed', x: x1, y: y1, button: 'left', buttons: 1, clickCount: 1 })
+    await sleep(80)
+    for (let i = 1; i <= 6; i++) {
+      await chartView.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', button: 'left', buttons: 1,
+        x: Math.round(x1 + ((x2 - x1) * i) / 6),
+        y: Math.round(y1 + ((y2 - y1) * i) / 6),
+      })
+      await sleep(40)
+    }
+    await chartView.send('Input.dispatchMouseEvent',
+      { type: 'mouseReleased', x: x2, y: y2, button: 'left', buttons: 0, clickCount: 1 })
+    await sleep(350)
+  }
+  /** The exact-value editor's first field, as a number. It is the only place
+   *  the engine's stored geometry is visible to the DOM. */
+  const editorValue = () =>
+    chartView.eval(
+      `(() => { const i = document.querySelector('.draw-editor-float input');
+         return i ? parseFloat(i.value) : null })()`
+    )
+
   // Candle depth: the default setting is ALL history — a keyless profile
   // gets Yahoo 'max', which for SPY is decades of dailies, not one year.
   const allBars = await chartView.eval(
@@ -1069,6 +1111,43 @@ try {
     6000
   ).catch(() => null)
   check(deleted === 'ok', 'tools: Delete removes the selected drawing')
+
+  // ---- drag to move -------------------------------------------------------
+  // Until now a drawing could only be moved by typing coordinates into the
+  // editor. Uses an h-line because its stored price is exactly what the editor
+  // shows, so "did it move, and the right way" is one number, not a guess.
+  await toolBtn('Horizontal price line')
+  const placedDrag = await placeOne(0.5, 0.42, '1')
+  await toolBtn('Pointer')
+  await waitFor(async () => (await attr('data-draw-tool')) === 'pointer', 'pointer armed', 5000)
+  const grabbed = await fanClick(0.5, 0.42, 'data-draw-selected', '1')
+  const priceBefore = await editorValue()
+  check(placedDrag && grabbed && typeof priceBefore === 'number',
+    'tools: an h-line is placed and picked, and the editor shows its price',
+    `placed=${placedDrag} picked=${grabbed} price=${priceBefore}`)
+
+  // Drag DOWN the chart, which on a price axis means a LOWER price.
+  await chartDrag(0.5, 0.42, 0.5, 0.62)
+  const priceAfter = await editorValue()
+  check(
+    typeof priceAfter === 'number' && typeof priceBefore === 'number' &&
+      priceAfter < priceBefore - 0.01,
+    'tools: dragging a drawing moves it, and downward means a lower price',
+    `before=${priceBefore} after=${priceAfter}`
+  )
+  // The library fires a click on the mouseup that ends a drag. If that click
+  // is not swallowed it lands at the DROP point: on empty chart it would clear
+  // the selection, and with a tool armed it would place geometry there.
+  const afterDragCount = await attr('data-draw-count')
+  const afterDragSel = await attr('data-draw-selected')
+  check(afterDragCount === '1' && afterDragSel === '1',
+    'tools: the click ending a drag is swallowed (nothing placed, nothing deselected)',
+    `count=${afterDragCount} selected=${afterDragSel}`)
+
+  // Leave the chart empty for the trim block, which counts from zero.
+  await toolBtn('Delete')
+  await waitFor(async () => ((await attr('data-draw-count')) === '0' ? 'ok' : null),
+    'the dragged h-line to delete', 6000).catch(() => null)
 
   // H-line + a crossing trend, then TRIM the trend's lower-left span:
   // the trend splits at the intersection (clicked span dies), the h-line
