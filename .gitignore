@@ -3,9 +3,9 @@
 /env/
 /data/
 
-# Belt and braces.
+# Belt and braces. No template is tracked: the app reads credentials from the
+# encrypted user DB, never from env/, so there is nothing to show an example of.
 *.env
-!.env.example
 *.db
 *.db-journal
 *.npz
@@ -22,15 +22,7 @@ __pycache__/
 *.pyo
 *.egg-info/
 
-# Saved sessions (tools/savesession.py). COMMIT the summaries — ~12 KB each,
-# readable and diffable, the part worth keeping in history. Skip the
-# conversations: ~5 MB per session, and Google Drive backs them up anyway.
-context/*/raw.jsonl.orig
-context/*/convo.jsonl.conv
-context/*/digest.txt
-
-# Node / Electron (node_modules is a junction into Claude/venvs/ so Drive
-# never mirrors it — see README)
+# Node / Electron
 node_modules/
 code/app/out/
 code/app/dist/

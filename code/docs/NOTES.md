@@ -59,10 +59,15 @@ live connectivity belongs to `npm run e2e`, never the gate. Not yet fixed;
 the honest options are to stub the transport under the gate or to have
 `kick_market_refresh` no-op when a test flag is set.
 
-Related: nothing in `code/` reads `env/alpaca.env` at all — credentials come
-from the encrypted DB (`accounts` + `secrets`, decrypted with the profile
-DEK) via `market.alpaca_creds_for`. The env file is a leftover from before
-Accounts existed.
+Related, and now acted on: nothing in `code/` ever read `env/alpaca.env` —
+credentials come from the encrypted DB (`accounts` + `secrets`, decrypted with
+the profile DEK) via `market.alpaca_creds_for`. It was a leftover from before
+Accounts existed, so **`env/`, `.env.example` and the gate's env-template
+check were all removed on 2026-08-05** (gate 42 → **41**; `checkpoint.json`
+follows). `_secrets()` still scans every tracked file for credential-shaped
+strings, which is the guarantee that actually mattered. The Alpaca paper key
+that lived there is gone with it — regenerate one from Alpaca's dashboard and
+add it through Accounts, which is the only path the app supports.
 
 Untested and should not be claimed otherwise: **macOS**. No Mac here. The
 right fix is a GitHub Actions matrix (`macos-latest` runners are free) rather

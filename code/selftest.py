@@ -101,14 +101,12 @@ def _secrets():
         assert not m, f"credential-shaped string in tracked file {rel}: {m.group(0)[:12]}..."
 
 
-@check("env template carries key names only, no values")
-def _env_example():
-    for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
-        line = line.strip().lstrip("#").strip()
-        if "=" in line:
-            _, _, value = line.partition("=")
-            assert len(value.strip()) == 0 or value.strip().startswith("https://") or value.strip() in ("sandbox",), \
-                f".env.example line carries a value: {line!r}"
+# Removed 2026-08-05 with .env.example itself: the app never read env/, so a
+# tracked template for it was documentation of a path that does not exist.
+# Nothing is lost by dropping this check — _secrets() above scans EVERY tracked
+# file for credential-shaped strings, which is the guarantee that mattered.
+# Keeping a check whose subject is gone would be the no-op-that-reports-ok
+# failure this suite exists to prevent.
 
 
 # ----------------------------------------------------------------- M1 checks

@@ -121,8 +121,8 @@ Everything stays on your machine. There is no telemetry and no account system.
   (envelope encryption; each secret is bound to its user, account and field, so
   rows can't be swapped between accounts). The database is scanned in the test
   suite to prove no plaintext key is recoverable from the file.
-- **`env/` is not read by the app.** It exists for scripts that run outside it.
-  You do not need to create it.
+- **There is no config file to edit and no environment variable to set.**
+  Credentials go in through Accounts, nowhere else.
 
 ## Updating
 
@@ -270,7 +270,6 @@ cd ..
 | `tools/installer/` | the double-click installers, per platform | yes |
 | `tools/icons/` | regenerates `app.ico` / `app.icns` / PNGs from `logo.svg` | yes |
 | `data/` | databases: quotes cache, news, backtest data | no |
-| `env/` | optional secrets for external scripts — **not read by the app** | no |
 | `.venv/` | Python virtualenv, created by the installer | no |
 
 Branding is swappable: every name, colour and icon resolves through
