@@ -18,6 +18,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
+import { PALETTE } from '../palette'
 import { makeChartStore } from '../chartStore'
 import { Bar, Chart, ChartReadyApi, CompareLine } from '../components/Chart'
 import { ChartDraw, DrawTool } from '../components/ChartDraw'
@@ -79,19 +80,8 @@ const ARMABLE = [
   'inspect',
 ] as const
 
-/** Eight distinguishable series colors on the dark surface. Assignment is by
- *  slot (index in the symbols list), so colors shift when an earlier symbol
- *  is removed — stable identity would cost a persisted map for no real gain. */
-const PALETTE = [
-  '#d98324',
-  '#6ba4e8',
-  '#2ebd85',
-  '#c77dd6',
-  '#e5484d',
-  '#e8c55b',
-  '#5bc8c8',
-  '#9aa0a6',
-]
+// Shared ramp (palette.ts): compare lines here, options legs on the symbol
+// page — one vocabulary of "this color means this thing" across the app.
 
 const DEFAULT_STATE: MultiChartState = {
   symbols: ['SPY'],

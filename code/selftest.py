@@ -2992,6 +2992,213 @@ def _options_chain():
             "boundless chain request was accepted — that is a 10k-row payload"
 
 
+@check("option legs: expiration is the primitive, hosts drive, snapshots survive")
+def _chart_legs():
+    """A leg is a point (expiration, strike) with an acceptance window, drawn
+    on the chart and used to FILTER a chain — never to place an order. The
+    claims that keep it honest:
+
+      - The EXPIRATION DATE is the primitive. Deriving it from a host-relative
+        fraction would make the expiration drift when the host's endpoints
+        move in time, which is never what moving a trend means.
+      - A trend host drives the strike AT the leg's expiration, segment
+        EXTRAPOLATED — chart time is linear in bar index, so this is exact.
+      - A dangling hostId is LEGAL (the measures policy): the leg degrades to
+        its stored snapshot instead of vanishing with its host. Which also
+        makes a legs-only document REACHABLE, so is_empty must count legs or
+        the next autosave deletes the row.
+      - Scalars round-trip. The enum drift check cannot see a dropped number,
+        and validate()'s whitelist rebuild is exactly how one goes missing.
+    """
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from fastapi.testclient import TestClient
+
+    from backend import chartobjects as co
+    from backend.app import State, create_app
+
+    KEY = "SPY|1Day"
+    LEG = {"id": "lg9", "side": "short", "right": "P", "expiration": "2026-09-18",
+           "strike": 560.0, "dteTol": 3, "strikeTol": 5.0, "slot": 1,
+           "hostId": "gone-with-the-trend"}
+
+    # -- 1. store: round-trip, reachable legs-only doc, refusals -------------
+    with tempfile.TemporaryDirectory() as tmp:
+        state = State("boot-token-for-tests", db_path=Path(tmp) / "app.db")
+        client = TestClient(create_app(state), base_url="http://127.0.0.1")
+        B = {"X-App-Token": "boot-token-for-tests"}
+        token = client.post("/api/auth/setup", headers=B,
+                            json={"username": "t", "password": "longenough1"}).json()["token"]
+        A = {**B, "Authorization": f"Bearer {token}"}
+
+        r = client.put("/api/chart-objects", headers=A,
+                       json={"key": KEY, "doc": {"legs": [LEG]}})
+        assert r.status_code == 200, r.text
+        back = client.get("/api/chart-objects", headers=A,
+                          params={"key": KEY}).json()["doc"]
+        assert back["legs"] == [LEG], f"a leg did not round-trip intact: {back['legs']}"
+        # Scalar-blind-spot insurance: each number individually.
+        got = back["legs"][0]
+        assert got["strike"] == 560.0 and got["dteTol"] == 3 \
+            and got["strikeTol"] == 5.0 and got["slot"] == 1, got
+        # The dangling hostId SURVIVED — measures policy, not constraints.
+        assert got["hostId"] == "gone-with-the-trend", got
+
+        # A legs-only doc is NOT empty: the row must exist after the save above.
+        keys = client.get("/api/chart-objects/keys", headers=A).json()["charts"]
+        assert [k["key"] for k in keys] == [KEY], \
+            f"a legs-only chart lost its row: {keys}"
+        assert not co.is_empty(back), "a legs-only document read as empty"
+
+        bad = {
+            "unknown side": {**LEG, "side": "hedged"},
+            "unknown right": {**LEG, "right": "put"},
+            "garbage expiration": {**LEG, "expiration": "Sep 18"},
+            "negative strike": {**LEG, "strike": -5},
+            "absurd dteTol": {**LEG, "dteTol": 400},
+            "negative strikeTol": {**LEG, "strikeTol": -1},
+            "float slot": {**LEG, "slot": 1.5},
+        }
+        for name, leg in bad.items():
+            rr = client.put("/api/chart-objects", headers=A,
+                            json={"key": KEY, "doc": {"legs": [leg]}})
+            assert rr.status_code == 422, \
+                f"{name}: expected 422, got {rr.status_code} {rr.text[:160]}"
+
+    # -- 2. vocabulary lockstep ----------------------------------------------
+    draw_src = (CODE / "app/src/renderer/src/components/ChartDraw.ts").read_text(
+        encoding="utf-8")
+    sides = set(re.findall(r"'(\w+)'",
+                re.search(r"export type LegSide =([^\n]+)", draw_src).group(1)))
+    rights = set(re.findall(r"'(\w+)'",
+                 re.search(r"export type LegRight =([^\n]+)", draw_src).group(1)))
+    assert sides == set(co.LEG_SIDES), \
+        f"leg sides drifted: engine {sorted(sides)} vs backend {sorted(co.LEG_SIDES)}"
+    assert rights == set(co.LEG_RIGHTS), \
+        f"leg rights drifted: engine {sorted(rights)} vs backend {sorted(co.LEG_RIGHTS)}"
+
+    # -- 3. the engine's own arithmetic --------------------------------------
+    app_dir = CODE / "app"
+    if not (app_dir / "node_modules" / "typescript").exists():
+        print("      (node_modules absent — npm install enables the leg probe)")
+        return
+    exe = _node_exe()
+    assert exe, "no node runtime on PATH — the leg arithmetic cannot be run"
+
+    probe = r"""
+import { ChartDraw, legStrikeOnTrend, legWindow }
+  from './src/renderer/src/components/ChartDraw.ts'
+const out = []
+const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail })
+
+// EXTRAPOLATION IS EXACT: a trend from (bar 10, $600) to (bar 18, $604) is
+// $0.50/bar, so at bar 30 — twelve bars past the segment's end — it reads
+// $610. Inside the segment it interpolates; before it, it extends backwards.
+ok('a trend extrapolates past its end', legStrikeOnTrend(10, 600, 18, 604, 30) === 610,
+   legStrikeOnTrend(10, 600, 18, 604, 30))
+ok('and interpolates within', legStrikeOnTrend(10, 600, 18, 604, 14) === 602, '')
+ok('and extends backwards', legStrikeOnTrend(10, 600, 18, 604, 2) === 596, '')
+ok('a vertical segment has no price elsewhere — null, not a guess',
+   legStrikeOnTrend(10, 600, 10, 604, 30) === null, '')
+
+// The acceptance window in the chain's own units.
+const w = legWindow('2026-09-18', 560, 3, 5)
+ok('±3 DTE is calendar days on both sides',
+   w.expFrom === '2026-09-15' && w.expTo === '2026-09-21', JSON.stringify(w))
+ok('±$5 both sides', w.strikeLo === 555 && w.strikeHi === 565, '')
+ok('zero tolerance is a single expiration and strike', (() => {
+  const z = legWindow('2026-09-18', 560, 0, 0)
+  return z.expFrom === '2026-09-18' && z.expTo === '2026-09-18' &&
+         z.strikeLo === 560 && z.strikeHi === 560
+})(), '')
+ok('garbage degrades to null', legWindow('junk', 560, 3, 5) === null, '')
+
+// ---- the engine: hosts drive, snapshots survive ---------------------------
+const day = (i) => Math.floor(Date.UTC(2024, 0, 2 + i, 14, 30) / 1000)
+const bars = Array.from({ length: 40 }, (_, i) => ({ ts: new Date(day(i) * 1000).toISOString() }))
+const mkEngine = (key) => Object.assign(Object.create(ChartDraw.prototype), {
+  key, saveTimer: null, destroyed: false, changeCb: null, issue: null,
+  tool: 'pointer', selected: [], hidden: false, barsOpt: () => bars,
+  render() {}, applyCursor() {},
+})
+const e = mkEngine('LEGS|1Day')
+const b = e.bucket()
+b.drawings.push(
+  { id: 'h1', kind: 'hline', points: [{ time: day(0), price: 580 }] },
+  { id: 'tr', kind: 'trend',
+    points: [{ time: day(10), price: 600 }, { time: day(18), price: 604 }] }
+)
+// Note 2024-01-02 is a Tuesday, so day() indices ARE calendar days here only
+// while inside the same week; the resolution below uses in-range dates, where
+// the real lattice answers, not the weekday extrapolation.
+b.legs.push({ id: 'lg1', side: 'short', right: 'P',
+  expiration: new Date(day(30) * 1000).toISOString().slice(0, 10),
+  strike: 550, dteTol: 3, strikeTol: 5, slot: 0, hostId: 'tr' })
+
+const r1 = e.legResolved(b.legs[0])
+ok('a trend host drives the strike at the LEG\'S expiration',
+   Math.abs(r1.strike - 610) < 1e-9, r1.strike)   // bar 30 on the $0.50/bar line
+ok('and reports what is hosting it', r1.hosted === 'trend', r1.hosted)
+
+// Move the trend (as constraint propagation or a drag would): the leg follows.
+b.drawings[1].points[1].price = 608   // now $1/bar
+const r2 = e.legResolved(b.legs[0])
+ok('moving the trend re-derives the strike', Math.abs(r2.strike - 620) < 1e-9, r2.strike)
+
+// syncLegs folds the resolved values into the snapshot at commit time…
+e.commit()
+ok('commit folds the resolved strike into the snapshot',
+   Math.abs(b.legs[0].strike - 620) < 1e-9, b.legs[0].strike)
+// …which is what the leg lives on when the host dies.
+b.drawings = b.drawings.filter((d) => d.id !== 'tr')
+e.commit()
+const r3 = e.legResolved(b.legs[0])
+ok('a deleted host leaves the leg exactly where it was',
+   Math.abs(r3.strike - 620) < 1e-9 && r3.hosted === null, JSON.stringify(r3))
+ok('and the leg itself SURVIVES the deletion — measures policy, not pruning',
+   b.legs.length === 1, b.legs.length)
+
+// An hline host drives the strike and leaves expiration alone.
+b.legs[0].hostId = 'h1'
+const r4 = e.legResolved(b.legs[0])
+ok('an hline host drives the strike', r4.strike === 580, r4.strike)
+ok('and does not touch the expiration', r4.expiration === b.legs[0].expiration, '')
+
+// Typing a strike into a hosted leg means "stop riding the line".
+e.updateLeg('lg1', { strike: 555 })
+ok('typing a strike unbinds a strike-driven leg',
+   b.legs[0].hostId === undefined && b.legs[0].strike === 555,
+   JSON.stringify({ hostId: b.legs[0].hostId, strike: b.legs[0].strike }))
+
+// Slots: first free slot is reused so the palette does not drift.
+e.addLeg({ side: 'long', right: 'C', expiration: '2026-09-18', strike: 600,
+           dteTol: 3, strikeTol: 5 })
+ok('a second leg takes the next free color slot',
+   b.legs[1].slot === 1, b.legs[1].slot)
+e.deleteLeg(b.legs[0].id)
+e.addLeg({ side: 'long', right: 'P', expiration: '2026-09-18', strike: 590,
+           dteTol: 3, strikeTol: 5 })
+ok('a freed slot is reused rather than drifting the palette',
+   b.legs.some((l) => l.slot === 0), JSON.stringify(b.legs.map((l) => l.slot)))
+
+console.log(JSON.stringify(out))
+"""
+    probe_path = app_dir / ".selftest-legs.mjs"
+    try:
+        probe_path.write_text(probe, encoding="utf-8")
+        r = subprocess.run([exe, str(probe_path)], cwd=app_dir,
+                           capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, f"leg probe crashed:\n{(r.stderr or r.stdout)[:1500]}"
+        results = json.loads(r.stdout.strip().splitlines()[-1])
+    finally:
+        probe_path.unlink(missing_ok=True)
+    bad_r = [x for x in results if not x["cond"]]
+    assert not bad_r, "the leg model is wrong:\n" + "\n".join(
+        f"  - {x['name']} (got {x['detail']})" for x in bad_r)
+    assert len(results) >= 19, f"the probe lost assertions: only {len(results)} ran"
+
+
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")
 def _chart_constraints():
     """Stage 2 of the sketch-constraint work: `lock`, and nothing that needs a

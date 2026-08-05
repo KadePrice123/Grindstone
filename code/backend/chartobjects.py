@@ -21,6 +21,7 @@ project, and a chart that will not draw is worse than a save that refuses.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import math
 import sqlite3
@@ -40,6 +41,18 @@ PLACE_AXES = ("time", "price")
 # is a worse lie than not offering it.
 CONSTRAINT_KINDS = ("lock", "on", "slope")
 ENTITY_PARTS = ("line", "a", "b")
+# Option legs — chart-side FILTERS on an options chain, never orders. The
+# expiration is the primitive (a calendar date, not a bar time: expirations
+# live past the last candle where bar times do not exist), tolerances are
+# calendar days and dollars, and hostId may reference a drawing that binds the
+# leg to a line. hostId is allowed to DANGLE (the measures policy, not the
+# constraints policy): a leg whose trend was deleted degrades to its stored
+# snapshot instead of vanishing with its host and taking the filter along.
+LEG_SIDES = ("long", "short")
+LEG_RIGHTS = ("P", "C")
+MAX_LEGS = 12          # four-leg condors twice over, with headroom
+MAX_DTE_TOL_DAYS = 60
+MAX_STRIKE_TOL = 500.0
 
 # How many points each kind carries. trend/circle are two-point (circle is
 # centre + edge); hline/vline are one — the line IS one coordinate and the
@@ -266,8 +279,56 @@ def validate(doc: Any) -> dict[str, Any]:
             _fail(f"constraint {cid}: a {kind} carries no value")
         constraints.append(out)
 
+    legs: list[dict[str, Any]] = []
+    leg_items = _list(doc, "legs")
+    if len(leg_items) > MAX_LEGS:
+        _fail(f"'legs': at most {MAX_LEGS} per chart, got {len(leg_items)}")
+    for lg in leg_items:
+        if not isinstance(lg, dict):
+            _fail("each leg must be an object")
+        lid = _id(lg.get("id"), "leg", seen)
+        side = lg.get("side")
+        if side not in LEG_SIDES:
+            _fail(f"leg {lid}: unknown side {side!r}")
+        lright = lg.get("right")
+        if lright not in LEG_RIGHTS:
+            _fail(f"leg {lid}: right must be P or C, got {lright!r}")
+        exp = lg.get("expiration")
+        if not isinstance(exp, str):
+            _fail(f"leg {lid}: expiration must be a date string")
+        try:
+            _dt.date.fromisoformat(exp)
+        except ValueError:
+            _fail(f"leg {lid}: expiration must be YYYY-MM-DD, got {exp!r}")
+        strike = _num(lg.get("strike"), f"leg {lid}.strike")
+        if strike <= 0:
+            _fail(f"leg {lid}: a strike is a positive price, got {strike!r}")
+        dte_tol = _num(lg.get("dteTol"), f"leg {lid}.dteTol")
+        if not (0 <= dte_tol <= MAX_DTE_TOL_DAYS):
+            _fail(f"leg {lid}: dteTol must be 0-{MAX_DTE_TOL_DAYS} days")
+        strike_tol = _num(lg.get("strikeTol"), f"leg {lid}.strikeTol")
+        if not (0 <= strike_tol <= MAX_STRIKE_TOL):
+            _fail(f"leg {lid}: strikeTol must be 0-{MAX_STRIKE_TOL}")
+        slot = lg.get("slot")
+        if not isinstance(slot, int) or isinstance(slot, bool) or not (0 <= slot < 64):
+            _fail(f"leg {lid}: slot must be a small integer, got {slot!r}")
+        out_leg: dict[str, Any] = {
+            "id": lid, "side": side, "right": lright, "expiration": exp,
+            "strike": strike, "dteTol": dte_tol, "strikeTol": strike_tol,
+            "slot": slot,
+        }
+        # A DANGLING hostId is legal — the measures policy. Shape-checked only:
+        # the leg runs on its stored snapshot when the drawing is gone.
+        host = lg.get("hostId")
+        if host is not None:
+            if not isinstance(host, str) or not (1 <= len(host) <= MAX_ID):
+                _fail(f"leg {lid}: hostId must be an id, got {host!r}")
+            out_leg["hostId"] = host
+        legs.append(out_leg)
+
     clean = {"version": DOC_VERSION, "drawings": drawings,
-             "measures": measures, "pins": pins, "constraints": constraints}
+             "measures": measures, "pins": pins, "constraints": constraints,
+             "legs": legs}
     size = len(json.dumps(clean))
     if size > MAX_DOC_BYTES:
         _fail(f"chart document is {size} bytes, over the {MAX_DOC_BYTES} limit")
@@ -276,7 +337,7 @@ def validate(doc: Any) -> dict[str, Any]:
 
 def empty_doc() -> dict[str, Any]:
     return {"version": DOC_VERSION, "drawings": [], "measures": [],
-            "pins": [], "constraints": []}
+            "pins": [], "constraints": [], "legs": []}
 
 
 def clean_key(key: Any) -> str:
@@ -291,8 +352,12 @@ def is_empty(doc: dict[str, Any]) -> bool:
     # non-empty constraints list implies a non-empty drawings list. Kept as the
     # belt to that pair of braces, and named here so nobody "simplifies" it
     # without noticing it is load-bearing the moment that rule relaxes.
+    # The legs term is REACHABLE, unlike constraints: a leg's hostId may
+    # dangle, so a chart can legally hold legs and nothing else. Forgetting it
+    # here means put() DELETES the row for a legs-only chart on its own next
+    # autosave.
     return not (doc["drawings"] or doc["measures"] or doc["pins"]
-                or doc["constraints"])
+                or doc["constraints"] or doc["legs"])
 
 
 def get(db: sqlite3.Connection, user_id: int, key: str) -> dict[str, Any]:

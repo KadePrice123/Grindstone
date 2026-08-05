@@ -180,6 +180,95 @@ export interface InspectPin {
 }
 
 // ---------------------------------------------------------------------------
+// Option legs
+// ---------------------------------------------------------------------------
+
+export type LegSide = 'long' | 'short'
+export type LegRight = 'P' | 'C'
+
+/** One leg of an options position, as a FILTER on the chart - never an order.
+ *
+ *  A leg is a point in the chart's own coordinate system: time = EXPIRATION,
+ *  price = STRIKE, with an acceptance window around it (+- DTE calendar days,
+ *  +- $ strike). The chain panel lists the real contracts inside the window.
+ *
+ *  THE EXPIRATION DATE IS THE PRIMITIVE - a calendar 'YYYY-MM-DD', not a bar
+ *  time and not a fraction along a host line. Expirations live in the FUTURE,
+ *  past the last candle, where bar times do not exist; and deriving the date
+ *  from a host-relative fraction would make the expiration drift when the
+ *  host's endpoints move in time, which is never what moving a trend means.
+ *
+ *  `hostId` binds the leg to a drawing, and WHAT it drives follows the host's
+ *  own nature, the same division the constraint system uses:
+ *    hline  - the leg's STRIKE is the line's price; expiration stays its own.
+ *             Drag the line, the filter follows.
+ *    trend  - the leg's STRIKE is the trend's price AT the leg's expiration,
+ *             extrapolated past the segment's end (chart time is linear in
+ *             bar index, so the extrapolation is exact, and projecting a
+ *             trend forward is precisely what a trader draws one for).
+ *    vline  - the leg's EXPIRATION is the line's time; strike stays its own.
+ *  `strike` and `expiration` always hold the LAST RESOLVED values, so a leg
+ *  whose host is deleted degrades to exactly where it was - the measures'
+ *  snapshot-fallback policy, not the constraints' prune policy, because a leg
+ *  quietly vanishing with its trend would take the user's filter with it. */
+export interface OptionLeg {
+  id: string
+  side: LegSide
+  right: LegRight
+  /** Calendar expiration, 'YYYY-MM-DD'. */
+  expiration: string
+  strike: number
+  /** +- calendar days accepted around the expiration. Calendar, not trading,
+   *  days: a trading-day tolerance would make the matched set depend on the
+   *  approximate holiday table, and a stale table silently changing which
+   *  contracts match is worse than a cosmetic mis-position. */
+  dteTol: number
+  /** +- dollars accepted around the strike. */
+  strikeTol: number
+  /** Drawing this leg rides, if any. May dangle after a delete/trim - the leg
+   *  then runs on its own stored strike/expiration. */
+  hostId?: string
+  /** Strategy-instance tag: a condor is four legs sharing one group string.
+   *  FLAT on purpose - a tag, never a container, so every existing consumer
+   *  of the legs list keeps working and a group is just a filter over it. */
+  group?: string
+  /** Color slot in the leg palette (assignment by slot, like compare lines). */
+  slot: number
+}
+
+/** Strike read off a trend at a given bar index, the segment EXTRAPOLATED.
+ *
+ *  Chart time is linear in bar index (the prefix-sum property the gate pins),
+ *  so extending the segment past its endpoints is exact, not an approximation
+ *  - and projecting a trend forward is precisely what a trader draws one for.
+ *  Null for a vertical segment: a line with no time extent has no price at a
+ *  different time, and inventing one would be a plausible-looking lie. */
+export function legStrikeOnTrend(
+  ia: number, pa: number, ib: number, pb: number, atIdx: number
+): number | null {
+  if (!Number.isFinite(atIdx) || ia === ib) return null
+  return pa + ((atIdx - ia) * (pb - pa)) / (ib - ia)
+}
+
+/** A leg's acceptance window in the chain's own units - the exact bounds the
+ *  options endpoint takes. Calendar-day arithmetic on the DTE side; plain
+ *  dollars on the strike side. Pure, so the gate can pin its edges. */
+export function legWindow(
+  expiration: string, strike: number, dteTol: number, strikeTol: number
+): { expFrom: string; expTo: string; strikeLo: number; strikeHi: number } | null {
+  const t = Date.parse(expiration + 'T00:00:00Z')
+  if (!Number.isFinite(t) || !Number.isFinite(strike)) return null
+  const day = 86400_000
+  const tol = Math.max(0, Math.round(dteTol))
+  return {
+    expFrom: new Date(t - tol * day).toISOString().slice(0, 10),
+    expTo: new Date(t + tol * day).toISOString().slice(0, 10),
+    strikeLo: strike - Math.max(0, strikeTol),
+    strikeHi: strike + Math.max(0, strikeTol),
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Constraints
 // ---------------------------------------------------------------------------
 
@@ -458,6 +547,7 @@ export interface ChartDoc {
   measures: Measure[]
   pins: InspectPin[]
   constraints: Constraint[]
+  legs?: OptionLeg[]
 }
 
 /** Persistence, INJECTED rather than imported.
@@ -484,6 +574,7 @@ export type Hit =
   | { kind: 'drawing'; id: string; drawing: Drawing; dist: number; nx: number; ny: number; u: number }
   | { kind: 'measure'; id: string; measure: Measure; dist: number }
   | { kind: 'pin'; id: string; pin: InspectPin; dist: number }
+  | { kind: 'leg'; id: string; leg: OptionLeg; dist: number }
 
 /** A chip's last drawn rectangle. Held as a {kind, id} REFERENCE rather than an
  *  object pointer: resolving through the bucket at read time means a stale rect
@@ -493,7 +584,7 @@ interface HotZone {
   top: number
   w: number
   h: number
-  kind: 'measure' | 'pin'
+  kind: 'measure' | 'pin' | 'leg'
   id: string
 }
 
@@ -512,6 +603,7 @@ export interface DrawState {
    *  consumer for no gain. */
   selectedMeasures: Measure[]
   selectedPins: InspectPin[]
+  selectedLegs: OptionLeg[]
   /** EVERY selected id, whatever kind. This — not selection.length — is the
    *  honest "is anything selected". */
   selected: string[]
@@ -529,6 +621,17 @@ export interface DrawState {
   /** The last refusal or caveat, in words. Null when the engine has nothing to
    *  say; cleared by the next successful action. */
   issue: ConstraintIssue | null
+  /** Every leg with its host applied and its acceptance window derived - what
+   *  the chain panel fetches by and what the zone renderer draws. Resolved
+   *  HERE so panel and chart can never disagree about what a leg means. */
+  legs: ResolvedLeg[]
+}
+
+/** A leg as consumers see it: stored fields plus the host-resolved values and
+ *  the exact window the options endpoint takes. */
+export interface ResolvedLeg extends OptionLeg {
+  resolved: { expiration: string; strike: number; hosted: Drawing['kind'] | null }
+  window: { expFrom: string; expTo: string; strikeLo: number; strikeHi: number } | null
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +643,7 @@ interface Bucket {
   measures: Measure[]
   pins: InspectPin[]
   constraints: Constraint[]
+  legs: OptionLeg[]
 }
 
 const sessionStore = new Map<string, Bucket>()
@@ -547,7 +651,7 @@ const sessionStore = new Map<string, Bucket>()
 function bucketFor(key: string): Bucket {
   let b = sessionStore.get(key)
   if (!b) {
-    b = { drawings: [], measures: [], pins: [], constraints: [] }
+    b = { drawings: [], measures: [], pins: [], constraints: [], legs: [] }
     sessionStore.set(key, b)
   }
   return b
@@ -557,7 +661,11 @@ const isEmptyBucket = (b: Bucket): boolean =>
   b.drawings.length === 0 &&
   b.measures.length === 0 &&
   b.pins.length === 0 &&
-  b.constraints.length === 0
+  b.constraints.length === 0 &&
+  // Forgetting a collection here is not a style slip: put() DELETES the row
+  // for an empty doc, so a chart holding only legs would be destroyed by its
+  // own next autosave.
+  b.legs.length === 0
 
 let nextId = 1
 const mkId = (prefix: string) => `${prefix}${nextId++}`
@@ -587,6 +695,7 @@ const docOf = (b: Bucket): ChartDoc => ({
   measures: b.measures,
   pins: b.pins,
   constraints: b.constraints,
+  legs: b.legs,
 })
 
 /** Move the id counter past everything we just loaded.
@@ -597,7 +706,7 @@ const docOf = (b: Bucket): ChartDoc => ({
  *  string[] matched by id, so the two would select, drag and delete as one. */
 function adoptIds(b: Bucket): void {
   let max = 0
-  for (const o of [...b.drawings, ...b.measures, ...b.pins, ...b.constraints]) {
+  for (const o of [...b.drawings, ...b.measures, ...b.pins, ...b.constraints, ...b.legs]) {
     const n = Number(/\d+$/.exec(o.id)?.[0] ?? '0')
     if (Number.isFinite(n) && n > max) max = n
   }
@@ -635,6 +744,10 @@ const STROKE_DANGER = 'var(--loss)'
 const HALO = 'color-mix(in srgb, var(--accent) 25%, transparent)'
 const HALO_DANGER = 'color-mix(in srgb, var(--loss) 30%, transparent)'
 const MEASURE_STROKE = 'var(--text-dim)'
+/** Leg identity colors. Deliberately excludes the candle reds/greens and the
+ *  accent orange (selection/hover channel) - a leg must never look selected,
+ *  profitable or losing by accident of its slot. */
+export const LEG_PALETTE = ['#6ba4e8', '#c77dd6', '#e8c55b', '#5bc8c8', '#9aa0a6', '#8ba7f9'] as const
 
 /** Nominal minutes of CHART time in one candle, per timeframe.
  *
@@ -913,6 +1026,14 @@ export class ChartDraw {
     grab: XY
     live: boolean
   } | null = null
+  /** Dragging a LEG: the acceptance window follows the cursor. Same snapshot
+   *  discipline as dimDrag - grab offset captured at mousedown. */
+  private legDrag: {
+    id: string
+    from: XY
+    grab: XY
+    live: boolean
+  } | null = null
   private teardown: (() => void)[] = []
   private store?: ChartStore
   private issue: ConstraintIssue | null = null
@@ -1034,6 +1155,26 @@ export class ChartDraw {
       // A pin's position IS its bar, so "dragging" one would mean re-pinning it
       // somewhere else — deliberately not a gesture.
       if (!hit || hit.kind === 'pin') return
+      if (hit.kind === 'leg') {
+        // Grab offset against the leg's CENTRE (expiration, strike), so the
+        // zone moves by delta instead of teleporting its centre under a
+        // cursor that grabbed the zone's corner.
+        const leg = hit.leg
+        const r0 = this.legResolved(leg)
+        const iC = this.idxForDate(r0.expiration)
+        const xC = iC === null ? null : this.xAtIdx(iC)
+        const yC = this.yForPrice(r0.strike)
+        this.legDrag = {
+          id: hit.id,
+          from: at,
+          grab: xC !== null && yC !== null ? { x: at.x - xC, y: at.y - yC } : { x: 0, y: 0 },
+          live: false,
+        }
+        try {
+          this.chart.applyOptions({ handleScroll: false, handleScale: false })
+        } catch { /* see below */ }
+        return
+      }
       if (hit.kind === 'measure') {
         // Capture where the dimension line sits RIGHT NOW so the drag moves it
         // by a delta instead of snapping it under the cursor.
@@ -1088,7 +1229,7 @@ export class ChartDraw {
     // price scale) must still track and still commit, or the drawing sticks to
     // the cursor after the button is already up.
     const onDragMove = (e: MouseEvent) => {
-      const g = this.drag ?? this.dimDrag
+      const g = this.drag ?? this.dimDrag ?? this.legDrag
       if (!g) return
       const r = this.host.getBoundingClientRect()
       const x = e.clientX - r.left
@@ -1100,6 +1241,7 @@ export class ChartDraw {
         g.live = true
       }
       if (this.drag) this.moveDragged(dx, dy)
+      else if (this.legDrag) this.moveLeg(x, y)
       else this.moveDimension(x, y)
     }
     const onDragUp = () => this.endDrag(true)
@@ -1241,6 +1383,7 @@ export class ChartDraw {
     b.drawings = b.drawings.filter((d) => !doomed.has(d.id))
     b.measures = b.measures.filter((m) => !doomed.has(m.id))
     b.pins = b.pins.filter((p) => !doomed.has(p.id))
+    b.legs = b.legs.filter((l) => !doomed.has(l.id))
     this.selected = []
     this.commit()
   }
@@ -1314,9 +1457,20 @@ export class ChartDraw {
       selectedPins: this.selected
         .map((id) => pById.get(id))
         .filter((p): p is InspectPin => p !== undefined),
+      selectedLegs: this.selected
+        .map((id) => b.legs.find((l) => l.id === id))
+        .filter((l): l is OptionLeg => l !== undefined),
       selected: [...this.selected],
       hidden: this.hidden,
       dof: degreesOfFreedom(b.drawings, b.constraints),
+      legs: b.legs.map((l) => {
+        const resolved = this.legResolved(l)
+        return {
+          ...l,
+          resolved,
+          window: legWindow(resolved.expiration, resolved.strike, l.dteTol, l.strikeTol),
+        }
+      }),
       lockedSlots: (() => {
         const a = analyze(b.drawings, b.constraints)
         return [...a.rep].filter(([, r]) => a.pinned.has(r)).map(([s]) => s)
@@ -1650,6 +1804,140 @@ export class ChartDraw {
     return issue
   }
 
+  // ---- option legs --------------------------------------------------------
+
+  /** Bar index for a calendar date in THIS bucket's timeframe - fractional and
+   *  PAST THE DATA when the date is in the future, which for an expiration is
+   *  the normal case, not an error. In-range dates resolve on the real lattice
+   *  (holidays included, because the bars are the calendar); beyond it, the
+   *  weekday count extrapolates, off by one bar around an unmodelled holiday
+   *  and honest about that in tradingDayOffset's contract. */
+  private idxForDate(date: string): number | null {
+    const idx = this.barsIdx()
+    const per = this.barMinutes()
+    if (!idx || per === null || idx.times.length === 0) return null
+    const last = idx.times.length - 1
+    const lastDate = new Date(idx.times[last] * 1000).toISOString().slice(0, 10)
+    if (date <= lastDate) {
+      const near = this.nearestBarTime(Date.parse(date + 'T12:00:00Z') / 1000)
+      const i = near === null ? undefined : idx.map.get(near)
+      return i === undefined ? null : i
+    }
+    const off = tradingDayOffset(lastDate, date)
+    if (off === null) return null
+    return last + off * (390 / per) // trading days -> bars of this timeframe
+  }
+
+  /** The inverse: a (possibly future, possibly fractional) bar index back to a
+   *  calendar date - the leg-drag path, where pixels become an expiration. */
+  private dateAtIdx(i: number): string | null {
+    const idx = this.barsIdx()
+    const per = this.barMinutes()
+    if (!idx || per === null || idx.times.length === 0) return null
+    const last = idx.times.length - 1
+    if (i <= last) {
+      const j = Math.max(0, Math.round(i))
+      return new Date(idx.times[j] * 1000).toISOString().slice(0, 10)
+    }
+    const lastDate = new Date(idx.times[last] * 1000).toISOString().slice(0, 10)
+    return dateAtTradingOffset(lastDate, Math.round(((i - last) * per) / 390))
+  }
+
+  /** A leg's effective (expiration, strike) with its host applied. The host
+   *  drives what its own nature owns - an hline its price, a vline its time, a
+   *  trend the price AT the leg's expiration, segment extrapolated. A dangling
+   *  or unresolvable host leaves the stored snapshot in charge, the measures'
+   *  degradation policy: the filter stays where it was, never vanishes. */
+  legResolved(leg: OptionLeg): { expiration: string; strike: number; hosted: Drawing['kind'] | null } {
+    const b = this.bucket()
+    const host = leg.hostId ? b.drawings.find((d) => d.id === leg.hostId) : undefined
+    let expiration = leg.expiration
+    let strike = leg.strike
+    let hosted: Drawing['kind'] | null = null
+    if (host?.kind === 'hline') {
+      strike = host.points[0].price
+      hosted = 'hline'
+    } else if (host?.kind === 'vline') {
+      expiration = new Date(host.points[0].time * 1000).toISOString().slice(0, 10)
+      hosted = 'vline'
+    } else if (host?.kind === 'trend') {
+      const idx = this.barsIdx()
+      const ia = idx?.map.get(host.points[0].time)
+      const ib = idx?.map.get(host.points[1].time)
+      const at = this.idxForDate(leg.expiration)
+      const st =
+        ia !== undefined && ib !== undefined && at !== null
+          ? legStrikeOnTrend(ia, host.points[0].price, ib, host.points[1].price, at)
+          : null
+      if (st !== null) {
+        strike = st
+        hosted = 'trend'
+      }
+    }
+    return { expiration, strike, hosted }
+  }
+
+  /** Fold every leg's resolved values back into its stored snapshot. Runs in
+   *  commit(), so whatever moved a host - drag, typed value, constraint
+   *  propagation, a slope restore - the persisted leg is the leg on screen,
+   *  and a later host deletion degrades to exactly there. */
+  private syncLegs(b: Bucket): void {
+    for (const leg of b.legs) {
+      if (!leg.hostId) continue
+      const r = this.legResolved(leg)
+      leg.strike = r.strike
+      leg.expiration = r.expiration
+    }
+  }
+
+  /** Add a leg. Slot is the first unused color slot, so removing leg 2 of 4
+   *  and adding another reuses its color rather than drifting the palette. */
+  addLeg(partial: Omit<OptionLeg, 'id' | 'slot'> & { slot?: number }): { ok: true; id: string } {
+    const b = this.bucket()
+    const used = new Set(b.legs.map((l) => l.slot))
+    let slot = partial.slot ?? 0
+    if (partial.slot === undefined) while (used.has(slot)) slot++
+    const id = mkId('lg')
+    b.legs.push({ ...partial, id, slot })
+    this.commit()
+    return { ok: true, id }
+  }
+
+  /** The type-in path. Patching strike/expiration on a HOSTED leg is answered
+   *  by the host on the next resolve, so the patch clears the binding first -
+   *  typing an exact strike into a leg that rides a line means "stop riding
+   *  the line", and silently ignoring the typed number would be worse. */
+  updateLeg(id: string, patch: Partial<Omit<OptionLeg, 'id' | 'slot'>>): void {
+    const b = this.bucket()
+    const leg = b.legs.find((l) => l.id === id)
+    if (!leg) return
+    if (leg.hostId !== undefined &&
+        (patch.strike !== undefined || patch.expiration !== undefined) &&
+        patch.hostId === undefined) {
+      const hosted = this.legResolved(leg).hosted
+      const strikeTyped = patch.strike !== undefined && (hosted === 'hline' || hosted === 'trend')
+      const expTyped = patch.expiration !== undefined && hosted === 'vline'
+      if (strikeTyped || expTyped) leg.hostId = undefined
+    }
+    Object.assign(leg, patch)
+    if (patch.hostId === undefined && 'hostId' in patch) leg.hostId = undefined
+    this.commit()
+  }
+
+  deleteLeg(id: string): void {
+    const b = this.bucket()
+    const before = b.legs.length
+    b.legs = b.legs.filter((l) => l.id !== id)
+    if (b.legs.length !== before) this.commit()
+  }
+
+  clearLegs(): void {
+    const b = this.bucket()
+    if (b.legs.length === 0) return
+    b.legs = []
+    this.commit()
+  }
+
   /** Which of the wanted drawings a drag may actually move, and why not if not.
    *
    *  A named method rather than four lines inside the mousedown closure, because
@@ -1762,6 +2050,7 @@ export class ChartDraw {
           b.measures = doc?.measures ?? []
           b.pins = doc?.pins ?? []
           b.constraints = doc?.constraints ?? []
+          b.legs = doc?.legs ?? []
           adoptIds(b)
           // Now in sync with the store, so the emit below is not a write.
           savedDocs.set(key, JSON.stringify(docOf(b)))
@@ -1819,6 +2108,10 @@ export class ChartDraw {
    *  something. */
   private commit(): void {
     this.pruneConstraints(this.bucket())
+    // After pruning, before painting: a leg whose host just died keeps the
+    // values it last resolved to, and a leg whose host just moved persists
+    // where it now sits.
+    this.syncLegs(this.bucket())
     this.render()
     this.emit()
   }
@@ -2131,12 +2424,16 @@ export class ChartDraw {
     // the ellipse sampler. Pointer is the resting tool and calls this on every
     // crosshair move, so the empty chart - the state the app spends most of
     // its life in - must cost three length checks and no allocation.
-    if (b.drawings.length === 0 && b.measures.length === 0 && b.pins.length === 0) return null
+    if (b.drawings.length === 0 && b.measures.length === 0 && b.pins.length === 0 &&
+        b.legs.length === 0) return null
     for (const z of this.hotZones) {
       if (x < z.left || x > z.left + z.w || y < z.top || y > z.top + z.h) continue
       if (z.kind === 'measure') {
         const m = b.measures.find((v) => v.id === z.id)
         if (m) return { kind: 'measure', id: m.id, measure: m, dist: 0 }
+      } else if (z.kind === 'leg') {
+        const l = b.legs.find((v) => v.id === z.id)
+        if (l) return { kind: 'leg', id: l.id, leg: l, dist: 0 }
       } else {
         const p = b.pins.find((v) => v.id === z.id)
         if (p) return { kind: 'pin', id: p.id, pin: p, dist: 0 }
@@ -2651,14 +2948,16 @@ export class ChartDraw {
    *  chart unpannable because a drag ended oddly would be far worse than a
    *  drawing landing a pixel out. */
   private endDrag(commit: boolean): void {
-    const wasLive = this.drag?.live === true || this.dimDrag?.live === true
-    if (this.drag || this.dimDrag) {
+    const wasLive =
+      this.drag?.live === true || this.dimDrag?.live === true || this.legDrag?.live === true
+    if (this.drag || this.dimDrag || this.legDrag) {
       try {
         this.chart.applyOptions({ handleScroll: true, handleScale: true })
       } catch { /* see onDown */ }
     }
     this.drag = null
     this.dimDrag = null
+    this.legDrag = null
     if (commit && wasLive) {
       this.justDragged = true // swallow the click the library fires on mouseup
       // commit(), not a bare emit(): this is where the solver's quantization
@@ -2702,6 +3001,7 @@ export class ChartDraw {
     b.drawings = b.drawings.filter((d) => !doomed.has(d.id))
     b.measures = b.measures.filter((m) => !doomed.has(m.id))
     b.pins = b.pins.filter((p) => !doomed.has(p.id))
+    b.legs = b.legs.filter((l) => !doomed.has(l.id))
     this.selected = this.selected.filter((id) => !doomed.has(id))
     this.commit()
   }
@@ -2908,6 +3208,7 @@ export class ChartDraw {
       // After every drawing, so a joint is never buried under the lines that
       // meet at it — which is exactly where it is least visible and most needed.
       this.renderJoints(b)
+      for (const leg of b.legs) this.renderLeg(pane, leg)
       for (const m of b.measures) this.renderMeasure(pane, m)
       for (const pin of b.pins) this.renderPin(pane, pin)
     }
@@ -2948,6 +3249,132 @@ export class ChartDraw {
       ...(live ? { 'stroke-dasharray': '3 2' } : {}),
     })
     this.el('circle', { cx: x, cy: y, r: 1.8, fill: STROKE })
+  }
+
+  /** One leg's acceptance zone, chip and centre mark.
+   *
+   *  Colors come from LEG_PALETTE, not the drawing stroke: red and green
+   *  belong to the candles and the accent belongs to selection/hover, so leg
+   *  identity gets its own hues. Same-strike legs (a straddle's pair) offset
+   *  their chips vertically by slot so the second is never buried unclickable
+   *  under the first. */
+  private renderLeg(pane: { width: number; height: number }, leg: OptionLeg): void {
+    const r = this.legResolved(leg)
+    const w = legWindow(r.expiration, r.strike, leg.dteTol, leg.strikeTol)
+    if (!w) return
+    const iC = this.idxForDate(r.expiration)
+    const iF = this.idxForDate(w.expFrom)
+    const iT = this.idxForDate(w.expTo)
+    if (iC === null || iF === null || iT === null) return
+    const xC = this.xAtIdx(iC)
+    // The zone's own edges, clamped to the pane so a half-scrolled zone still
+    // shows its visible part instead of vanishing whole.
+    let xF = this.xAtIdx(iF)
+    let xT = this.xAtIdx(iT)
+    if (xC === null && xF === null && xT === null) return
+    xF = xF ?? 0
+    xT = xT ?? pane.width
+    const yLo = this.yForPrice(w.strikeHi) // high strike = smaller y
+    const yHi = this.yForPrice(w.strikeLo)
+    if (yLo === null || yHi === null) return
+    const color = LEG_PALETTE[leg.slot % LEG_PALETTE.length]
+    const picked = this.selected.includes(leg.id)
+    const hot = this.hoverId === leg.id
+    const left = Math.min(xF, xT)
+    const wpx = Math.max(Math.abs(xT - xF), 6)
+    const top = Math.min(yLo, yHi)
+    const hpx = Math.max(Math.abs(yHi - yLo), 6)
+    this.el('rect', {
+      class: 'cd-leg-zone',
+      x: left, y: top, width: wpx, height: hpx, rx: 3,
+      fill: color, 'fill-opacity': picked || hot ? 0.16 : 0.09,
+      stroke: color, 'stroke-width': picked ? 2 : 1.25,
+      'stroke-opacity': picked || hot ? 0.9 : 0.55,
+      ...(leg.side === 'short' ? { 'stroke-dasharray': '5 3' } : {}),
+    })
+    // Centre mark on the exact (expiration, strike) - the point the window is
+    // +- around, and the thing a drag moves.
+    if (xC !== null) {
+      const yC = this.yForPrice(r.strike)
+      if (yC !== null) {
+        this.el('line', { x1: xC - 5, y1: yC, x2: xC + 5, y2: yC, stroke: color, 'stroke-width': 1.5 })
+        this.el('line', { x1: xC, y1: yC - 5, x2: xC, y2: yC + 5, stroke: color, 'stroke-width': 1.5 })
+      }
+    }
+    // Chip above the zone; slot-stepped so stacked same-strike legs interleave.
+    const rows: ChipRow[] = [
+      {
+        text: `${leg.side === 'short' ? 'SELL' : 'BUY'} ${leg.right === 'P' ? 'PUT' : 'CALL'} ${fmtNum(r.strike)}`,
+        cls: 'em',
+      },
+      { text: `${r.expiration} \u00b1${Math.round(leg.dteTol)}d \u00b1$${fmtNum(leg.strikeTol)}`, cls: 'dim' },
+    ]
+    const chipX = Math.max(left + 4, Math.min((xC ?? left + wpx / 2), left + wpx - 4))
+    const box = this.chip(
+      chipX, top - 6 - (leg.slot % 4) * 30, rows,
+      `cd-leg${picked ? ' cd-sel' : hot ? ' cd-hot' : ''}`, 0.5, 1, pane
+    )
+    this.el('line', {
+      x1: chipX, y1: box.top + box.h, x2: chipX, y2: top,
+      stroke: color, 'stroke-width': 1, 'stroke-opacity': 0.6,
+    })
+    this.zoneDraft.push({ ...box, kind: 'leg', id: leg.id })
+    // The zone rectangle is itself grabbable - a chip alone is a small target
+    // for what Kade called drag-and-drop stuff.
+    this.zoneDraft.push({ left, top, w: wpx, h: hpx, kind: 'leg', id: leg.id })
+  }
+
+  /** Move the dragged LEG. What the drag may change follows the host, the
+   *  same division legResolved applies:
+   *    unbound - both axes: strike from y, expiration from x.
+   *    hline   - x only: the strike belongs to the line; vertical motion is
+   *              ignored rather than fought over.
+   *    vline   - y only, the transpose.
+   *    trend   - x only, and the strike follows the line by itself: THIS is
+   *              "move along the trend line and filter contracts that way". */
+  private moveLeg(mx: number, my: number): void {
+    if (!this.legDrag) return
+    const b = this.bucket()
+    const leg = b.legs.find((l) => l.id === this.legDrag!.id)
+    if (!leg) return
+    const x = mx - this.legDrag.grab.x
+    const y = my - this.legDrag.grab.y
+    const hosted = this.legResolved(leg).hosted
+    if (hosted !== 'vline') {
+      const li = this.logicalAtX(x)
+      const date = li === null ? null : this.dateAtIdx(li)
+      // The past is not a place an expiration can go: clamp at today, which is
+      // also what keeps the window's exp_from clamp from ever firing on drag.
+      const today = new Date().toISOString().slice(0, 10)
+      if (date !== null) leg.expiration = date < today ? today : date
+    }
+    if (hosted === null || hosted === 'vline') {
+      const p = this.priceAtY(y)
+      if (p !== null) leg.strike = p
+    }
+    this.render()
+  }
+
+  /** coordinateToLogical - like timeAtX but alive in the right-hand
+   *  whitespace, which for legs is home ground. */
+  private logicalAtX(x: number): number | null {
+    try {
+      const l = this.chart.timeScale().coordinateToLogical(x)
+      return typeof l === 'number' ? l : null
+    } catch {
+      return null
+    }
+  }
+
+  /** logicalToCoordinate - the projection that works PAST the last bar, where
+   *  timeToCoordinate returns null and every expiration lives. */
+  private xAtIdx(i: number): number | null {
+    try {
+      const x = this.chart.timeScale().logicalToCoordinate(i as never)
+      return typeof x === 'number' ? x : null
+    } catch {
+      return null
+    }
   }
 
   /** Every endpoint currently held onto a line. Drawn after the geometry so a
