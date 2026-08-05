@@ -1,63 +1,239 @@
-# Grindstone — the Grindstone Trading dashboard (placeholder name)
+# Grindstone
 
-A desktop trading platform that looks and behaves like a **web browser**: one
-omnibox search bar, everything opens as tabs that tear off and regroup across OS
-windows like Chrome, an embedded AI (Claude via Open WebUI + MCP), and
-multi-broker trading (Alpaca, TastyTrade; Webull/Fidelity behind flags).
+A desktop market-research app that behaves like a **web browser**: one omnibox
+that searches tickers, news and pages alike; everything opens as tabs that tear
+off and regroup across OS windows like Chrome; split view; and a charting
+surface with drawing and measuring tools.
 
-**Start here → [`code/docs/REQUIREMENTS.md`](code/docs/REQUIREMENTS.md)** — the
-full requirements document. Research backing its technical decisions:
-[`code/docs/RESEARCH.md`](code/docs/RESEARCH.md).
+It runs as a real desktop app — Electron shell, Python (FastAPI) sidecar,
+SQLite storage. Everything lives inside the folder you clone it into.
 
-## Layout
+> **Read this before you install.**
+>
+> - **It cannot place trades.** Every broker adapter is read-only today
+>   (`order_entry: False`). It reads quotes, news, positions and account data.
+>   Order entry is a later milestone. Nothing here can move your money.
+> - **It is one person's project, early in its life.** Expect rough edges and
+>   breaking changes. "Grindstone" is a placeholder name.
+> - **Verified on Windows and Linux. macOS is untested** — the installer is
+>   written but has never run on a Mac. See [Platform support](#platform-support).
 
-| Path | What | In git |
-|---|---|---|
-| `code/docs/` | requirements + research docs | yes |
-| `code/assets/branding/` | logos, icons, branding.json, preview.html | yes |
-| `code/` | app source (shell, sidecar, tools) | yes |
-| `tools/installer/` | the double-click installers, per platform | yes |
-| `tools/icons/` | regenerates `app.ico` / `app.icns` / PNGs from `logo.svg` | yes |
-| `data/` | bars cache, news store, vector DB | no — Drive-backed |
-| `env/` | broker keys (`alpaca.env`, …) — **not read by the app**; runtime credentials live in the encrypted user DB | no — never leaves this machine |
-| `.venv/` | virtualenv, created by the installer | no — rebuild from requirements.txt |
+## What works today
 
-## Install
+- **Omnibox search** over ~14k tickers (fuzzy + prefix), news (full-text), and
+  app pages, with an intent grammar — typing `SPY news` returns scoped
+  headlines.
+- **Symbol pages** — live quote labelled with its source, plus recent news.
+- **Charts** — candles with trend/horizontal/vertical/circle drawing, snap
+  measurements, candle inspect, indicator settings, per-ticker visibility.
+- **News reader** — article content extracted and rendered in-app.
+- **Backtesting** — a calibrated SPY options engine with 120 known-answer tests
+  running in the verification gate. Strategies are editable as a form or as raw
+  JSON; runs happen in a killable subprocess with live progress and an HTML
+  report.
+- **Data recording** — scheduled jobs capturing bars, option-chain snapshots and
+  news, with retention pruning.
+- **Favorites and gesture wheels** — a starred home grid and radial menus.
 
-Clone the repo, then **double-click the installer in the repo root**:
+**Not built yet:** order entry, the AI assistant, TastyTrade, Webull and
+Fidelity adapters, and session restore. Roadmap: `code/docs/REQUIREMENTS.md` §10.
+
+## Do I need a broker account?
+
+**No.** Without any credentials you still get quotes and daily charts through a
+keyless, delayed fallback (clearly labelled as delayed in the UI), plus search,
+news and backtesting.
+
+With a free **Alpaca paper** account you additionally get real-time IEX quotes,
+option chains, richer news, and your paper positions. Paper keys cannot touch
+real money, and the app is read-only regardless.
+
+## Requirements
 
 | | |
 |---|---|
-| **Windows** | `Install.cmd` |
-| **macOS** | `Install.command` |
-| **Linux** | `./install.sh` (most file managers will not run a `.sh` on double-click) |
+| **OS** | Windows 10/11, or Linux with a desktop environment. macOS untested. |
+| **Disk** | ~650 MB installed (437 MB Node modules, 181 MB Python venv) |
+| **Prerequisites** | None — the installer fetches Python 3.12+ and Node.js 20+ if missing |
+| **Internet** | Needed to install, and for live data afterwards |
 
-A window opens, asks which shortcuts you want, and does the rest: it installs
-**Python 3.12+ and Node.js 20+ if they are missing**, creates `.venv/` inside
-the clone, installs the Python and frontend dependencies, builds the app, runs
-the verification gate, and creates the shortcuts you ticked. Nothing needs to
-be installed beforehand — the installer is built on what each OS already ships
-(WinForms, `osascript`, `zenity`/`kdialog`, or a plain terminal prompt).
+## Install
 
-**Linux note.** Debian and Ubuntu ship Python without `ensurepip`, so creating
-a virtualenv needs one system package. The installer installs it for you when
-it can do so without stopping to ask — that is, when you are root or `sudo`
-is already authorized. Otherwise it stops in a couple of seconds and prints
-the single command to run; an installer cannot answer a password prompt, so it
-refuses to start one rather than appear to hang:
+Clone the repo, then run the installer in the repo root:
+
+| | |
+|---|---|
+| **Windows** | double-click `Install.cmd` |
+| **Linux** | `./install.sh` — most file managers won't run a `.sh` on double-click |
+| **macOS** | double-click `Install.command` *(untested)* |
+
+```bash
+git clone https://github.com/KadePrice123/Grindstone.git
+cd Grindstone
+```
+
+A window opens, asks which shortcuts you want, and does everything else:
+installs Python and Node if they're missing, creates `.venv/` inside the clone,
+installs dependencies, builds the app, runs the verification gate, and creates
+your shortcuts. It's built on what each OS already ships (WinForms, `osascript`,
+`zenity`/`kdialog`, or a plain terminal prompt), so it has no prerequisite of
+its own.
+
+Measured on clean machines: **about 40 seconds** if you already have Python and
+Node, **3–4 minutes** if the installer has to fetch them first.
+
+**Windows:** installing Node.js raises a UAC prompt, because its installer is
+machine-scope. That one is unavoidable.
+
+**Linux:** Debian and Ubuntu ship Python without `ensurepip`, so creating a
+virtualenv needs one system package. The installer handles it when it can do so
+without stopping to ask — when you're root, or `sudo` is already authorized.
+Otherwise it exits in a couple of seconds and prints the command to run. An
+installer can't answer a password prompt, so it refuses to start one rather than
+appear to hang:
 
 ```bash
 sudo apt-get install python3-venv     # then run ./install.sh again
 ```
 
-Afterwards Grindstone launches from its desktop icon or your applications menu
-like any other program: no terminal, no `npm`. The shortcut points straight at
-the Electron binary in the clone, so the app stays wherever you cloned it —
-move the clone and you will need to rerun the installer.
+Afterwards Grindstone opens from its desktop icon or applications menu like any
+other program — no terminal, no `npm`. The shortcut points at the Electron
+binary inside the clone, so **the app stays wherever you cloned it**. Move the
+folder and you'll need to rerun the installer.
 
-<details><summary>Unattended / CI</summary>
+## First run
 
-The same work with no window and no shortcuts:
+1. **Create a profile.** Your password *is* the encryption key for the local
+   vault. There is **no recovery** — this is deliberate, not an oversight. Lose
+   it and the stored credentials are unrecoverable.
+2. **Optionally add a broker.** Accounts → add your Alpaca paper key → Test →
+   Save. Skip this and everything keyless still works.
+3. **Search something.** Type a ticker in the omnibox.
+
+## Your data and your keys
+
+Everything stays on your machine. There is no telemetry and no account system.
+
+- **Where:** inside the clone — `data/` for the databases, `.venv/` for Python.
+  Override the data location with the `GRINDSTONE_DATA_DIR` environment
+  variable.
+- **Broker keys:** encrypted with a key derived from your profile password
+  (envelope encryption; each secret is bound to its user, account and field, so
+  rows can't be swapped between accounts). The database is scanned in the test
+  suite to prove no plaintext key is recoverable from the file.
+- **`env/` is not read by the app.** It exists for scripts that run outside it.
+  You do not need to create it.
+
+## Updating
+
+```bash
+git pull
+```
+
+Then rerun the installer to pick up new dependencies and rebuild. It skips
+whatever is already present, so it's much faster than the first run. Your
+`data/` and profile are untouched.
+
+## Uninstalling
+
+Everything lives in the clone, so there's little to clean up:
+
+1. Delete the `Grindstone` folder — this removes the app, its virtualenv, its
+   dependencies and your local data.
+2. Delete the shortcuts: the desktop icon, and `Grindstone.lnk` from the Start
+   Menu (Windows) or `~/.local/share/applications/grindstone.desktop` (Linux).
+
+Python and Node, if the installer added them, are normal system installs — keep
+them or remove them via your usual package manager.
+
+## Troubleshooting
+
+Every install writes `grindstone-setup.log` to your temp directory with the full
+output of every step.
+
+- **"Python installed but is still not on PATH"** — a newly installed
+  interpreter isn't visible to already-running processes. Sign out and back in,
+  then rerun.
+- **The window opens but says "backend not running"** — the sidecar couldn't
+  find a Python with the dependencies. Rerun the installer; it creates `.venv`
+  where the app looks first.
+- **Gate fails** — the `FAIL` line names the exact check and reason. The install
+  is incomplete until it passes.
+- **The gate is skipped** — it shells out to `git ls-files` to scan for secrets,
+  so it needs git and a real clone. A ZIP download runs the app but can't run
+  the gate.
+- **`market refresh skipped — alpaca data: keys rejected (401/403)` during the
+  gate** — expected, and not your key. The gate creates a throwaway profile with
+  fixture credentials and the background refresh tries them for real.
+- **Linux: "Could not create a virtualenv"** — see the Linux note above. Run
+  `sudo apt-get install python3-venv` (Ubuntu 26.04 also accepts the versioned
+  `python3.14-venv`), then rerun.
+- **Linux: the desktop icon does nothing** — GNOME won't run a launcher it
+  doesn't trust. Right-click → "Allow launching".
+- **Linux: no desktop icon appeared** — there was no `~/Desktop` (common on
+  servers, containers and WSL). The applications-menu entry is still created.
+- **Windows: "Pin to taskbar" didn't happen** — Windows 10 1809 removed the API
+  that let installers do it. Right-click the Start Menu shortcut and pin it.
+- **macOS: "Grindstone.app cannot be opened"** — the wrapper bundle is unsigned.
+  Right-click → Open once, or `xattr -dr com.apple.quarantine
+  ~/Applications/Grindstone.app`. The Dock tile may read "Electron"; only real
+  packaging fixes that (REQUIREMENTS.md §6.8).
+
+## Platform support
+
+| Platform | Status |
+|---|---|
+| **Windows 11** | Verified end to end 2026-08-05 from a clean machine with neither Python nor Node installed. Gate green. |
+| **Linux** | Verified end to end 2026-08-05 on a freshly created Ubuntu 26.04 (Python 3.14.4, no `ensurepip`). Gate green. |
+| **macOS** | **Untested.** Written but never run on real hardware. Treat `Install.command` as unverified. |
+
+---
+
+## For developers
+
+<details><summary>Running from source</summary>
+
+```bash
+cd code/app
+npm run dev      # hot reload
+npm run start    # run the production build (electron-vite preview, serves out/)
+```
+
+`npm run start` is *preview* — it serves `out/`, it never builds it. Run
+`npm run build` first on a fresh clone.
+
+Electron main locates the backend's Python automatically (`.venv` in the clone
+first, then `python` on PATH), spawns the sidecar, waits for its
+`{"event":"listening","port":N}` line, health-checks it, and only then shows the
+window.
+</details>
+
+<details><summary>Verification gate</summary>
+
+```bash
+cd code
+python selftest.py     # the LAST line must read: SELFTEST OK <n>/<n>
+```
+
+Declared in `checkpoint.json`. The count grows with the project — every
+production bug becomes a permanent check. Covers secret hygiene, envelope
+encryption with AAD tamper detection, the auth and accounts API flow with a
+stolen-database plaintext scan, broker parser fixtures, the read-only broker
+invariant, session expiry, search ranking, gesture wheels, split view, the chart
+tool engine, the backtest engine's 120 known-answer tests, the installer surface
+(shebangs, exec bits, line endings, icon integrity, and that the shortcut target
+matches what the build produces), and the frontend typecheck.
+
+Known gap: the gate is described as offline but currently makes one live call to
+Alpaca, because booting the app triggers a background market refresh. See
+`code/docs/NOTES.md`.
+
+Live connectivity is a separate diagnostic: `cd code/app && npm run e2e`.
+</details>
+
+<details><summary>Unattended / CI install</summary>
+
+No window, no shortcuts:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File setup.ps1   # Windows
@@ -68,142 +244,48 @@ powershell -ExecutionPolicy Bypass -File setup.ps1   # Windows
 ```
 
 `Install.cmd -NoUi` and `./install.sh --no-ui` do the same but keep the
-shortcuts. Both paths write a full log to your temp directory
-(`grindstone-setup.log`).
+shortcuts.
 </details>
 
-<details><summary>What it does, by hand</summary>
+<details><summary>Doing it by hand</summary>
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 cd code\app
 npm install
-npm run build          # `npm run start` is preview: it serves out/, never builds it
+npm run build
 cd ..
 ..\.venv\Scripts\python.exe selftest.py
 ```
 </details>
 
-## Run the app
+<details><summary>Repository layout</summary>
 
-From the desktop shortcut or applications menu, or from a terminal:
+| Path | What | In git |
+|---|---|---|
+| `code/` | app source — Electron shell, Python sidecar | yes |
+| `code/docs/` | requirements, research, working notes | yes |
+| `code/assets/branding/` | logos, icons, `branding.json` | yes |
+| `tools/installer/` | the double-click installers, per platform | yes |
+| `tools/icons/` | regenerates `app.ico` / `app.icns` / PNGs from `logo.svg` | yes |
+| `data/` | databases: quotes cache, news, backtest data | no |
+| `env/` | optional secrets for external scripts — **not read by the app** | no |
+| `.venv/` | Python virtualenv, created by the installer | no |
 
-```bash
-cd code/app
-npm run dev      # dev mode with hot reload
-npm run start    # run the production build (electron-vite preview)
-```
+Branding is swappable: every name, colour and icon resolves through
+`code/assets/branding/branding.json`.
+</details>
 
-Electron main finds the backend's Python automatically (`.venv` in the clone
-first, then this workspace's venv, then `python` on PATH), spawns the sidecar,
-waits for its `{"event":"listening","port":N}` stdout line, health-checks it,
-and only then shows the window. First run: create a profile (that password
-*is* the vault key — no recovery by design), then Accounts → add your Alpaca
-paper key → Test → Save. No broker account? Quotes and daily charts still
-work through the keyless delayed fallback.
+## Documentation
 
-## Verification gate
+- [`code/docs/REQUIREMENTS.md`](code/docs/REQUIREMENTS.md) — the full
+  requirements document and roadmap.
+- [`code/docs/RESEARCH.md`](code/docs/RESEARCH.md) — the research and sources
+  behind the technical decisions.
+- [`code/docs/NOTES.md`](code/docs/NOTES.md) — working notes on in-flight work
+  and known gaps.
 
-Offline, declared in `checkpoint.json`:
+## License
 
-```bash
-cd code
-python selftest.py     # the LAST line must read: SELFTEST OK <n>/<n>
-```
-
-The count grows with the project — every production bug becomes a permanent
-check. Covered today: secret hygiene, envelope-encryption round-trip with AAD
-tamper detection, the full offline auth+accounts API flow with a stolen-DB
-plaintext scan, broker parser fixtures, the read-only Alpaca invariant,
-session expiry/wipe, search ranking, the gesture-wheel system, split view,
-the chart tool engine, the installer surface (shebangs, exec bits, line
-endings, icon integrity, and that the shortcut target matches what the build
-produces), and the frontend typecheck. Live connectivity stays a separate
-diagnostic (`cd code/app && npm run e2e`), never part of the gate.
-
-## Troubleshooting a fresh install
-
-Every install writes `grindstone-setup.log` to the temp directory; it has the
-full output of every step.
-
-- **"Python installed but is still not on PATH"** — a new interpreter is not
-  visible to already-running processes. Sign out and back in, then rerun.
-- **The window opens but says "backend not running"** — the sidecar could not
-  find a Python with the dependencies. Rerun the installer (it creates `.venv`
-  where the app looks first), or activate your own venv before `npm run start`.
-- **Gate fails** — the FAIL line names the exact check and reason; the install
-  is incomplete until it passes.
-- **The gate is skipped** — it shells out to `git ls-files` to scan tracked
-  files for secrets, so it needs git and a real clone. A ZIP download runs the
-  app fine but cannot run the gate.
-- **macOS: "Grindstone.app cannot be opened"** — the wrapper bundle is
-  unsigned. Right-click it and choose Open once, or `xattr -dr
-  com.apple.quarantine ~/Applications/Grindstone.app`. The Dock tile may read
-  "Electron": the wrapper runs Electron's own binary, and only real packaging
-  (REQUIREMENTS.md §6.8) fixes that.
-- **Linux: "Could not create a virtualenv"** — Debian/Ubuntu split `ensurepip`
-  into its own package and the installer could not become root without a
-  password prompt. Run `sudo apt-get install python3-venv` (Ubuntu 26.04 also
-  accepts the versioned `python3.14-venv`), then rerun the installer.
-- **Linux: the desktop icon does nothing** — GNOME will not run a launcher it
-  does not trust. Right-click it and choose "Allow launching".
-- **Linux: no desktop icon appeared** — there was no `~/Desktop` (common on
-  servers, containers and WSL). The applications-menu entry is still created at
-  `~/.local/share/applications/grindstone.desktop`.
-- **Windows: "Pin to taskbar" did not happen** — Windows 10 1809 removed the
-  API that let installers do it. The Start Menu shortcut is created; right-click
-  it and pin from there.
-
-## Distribution
-
-- **Source**: https://github.com/KadePrice123/Grindstone — pushed at major
-  completed milestones. Secrets never leave this machine: `env/` and `data/`
-  are gitignored and the gate scans every tracked file before a push.
-- **Installers**: GitHub Releases on the same repo (download-and-install
-  without the source); the auto-updater reads the same Releases feed.
-- **OS targets**: Windows and Linux both verified end to end from a clean
-  machine (2026-08-05) — Windows 11 with neither Python nor Node present, and
-  a freshly created Ubuntu 26.04 / Python 3.14.4 with no `ensurepip`. Both
-  finished with the gate green. macOS is written but **untested**: no Mac
-  here, so treat `Install.command` as unverified until it runs on real
-  hardware or a CI runner (REQUIREMENTS.md §6.8).
-
-## Status
-
-M1 (spine) + search/data (early M4 slice) — the app boots and *works*:
-- Omnibox with live results: ~14k tickers (Alpaca assets + SPX/VIX//ES
-  supplement), fuzzy + prefix matching, news search (FTS5 trigram), page
-  routing, and an intent grammar — `SPY news` answers scoped headlines with a
-  live-Alpaca fallthrough when the local store is thin.
-- Symbol pages: live IEX quote (labeled with its source) + recent news.
-- Data management: recording jobs for bars / options-chain snapshots / news
-  at chosen intervals with retention pruning; verified live with a 13,897-
-  contract SPY chain snapshot including greeks.
-- Yahoo Finance keyless fallback (delayed, labeled) for users with no data API.
-- Backtesting (`backtest.gs`, 2026-08-03): the workspace's calibrated SPY
-  options backtest engine, vendored at `code/backend/bt/` with its 120
-  known-answer tests in the gate. Strategy presets in the DB (seeded with the
-  three tastytrade calibration references + four showcase strategies), runs in
-  a killable subprocess with live progress, full HTML reports in a tab, and a
-  "Verify engine" flow that replays the shipped reference exports against the
-  exact data — the regression harness for anyone modifying engine code.
-- Backtest data is self-serve (2026-08-03): the app owns its store at
-  `data/backtest_data/<SYM>.db` (created automatically, both engine tables in
-  one file) and fills it from recorded chain/bars snapshots — one click on the
-  page wires the recording jobs, every run syncs the newest recordings first,
-  and the whole pipeline is gate-checked end to end on synthetic
-  arbitrage-clean chains. Machines with a full `spy_options.db` (or a
-  Settings path) use that instead; the page always says which source a run
-  reads and how much recorded history exists. Specs are editable two ways:
-  a form (legs, exit toggles, sizing) for humans, raw JSON for the full spec
-  language and future AI agents — both compile to the same spec.
-  Pickup notes for in-flight work: `code/docs/NOTES.md`.
-Roadmap: REQUIREMENTS.md §10. Alpaca paper key verified working 2026-08-05
-(trading and data APIs both 200) — but note the app does not read it from
-`env/`: credentials live in the encrypted user DB, added through Accounts.
-
-If you see `market refresh skipped — alpaca data: keys rejected (401/403)`
-while the gate runs, that is **not** your key. The gate creates a throwaway
-profile with fixture credentials, and the app's background market refresh
-then tries them against Alpaca for real.
+MIT — see [LICENSE](LICENSE).
