@@ -13,7 +13,7 @@ Every open item, in one place. Details live in the dated sections below.
 |---|---|---|
 | ~~C1~~ | ~~Measure boxes still not clickable~~ — **DONE 2026-08-05.** Never a picking bug: an e2e click on a placed measure passed first try with Select armed. It was C2 wearing a disguise — you had to arm a tool nobody armed. | |
 | ~~C2~~ | ~~Plain left-click should select~~ — **DONE 2026-08-05**, and the Select tool was removed with it. | |
-| C3 | Drag to move — genuinely unimplemented, the largest remaining piece | ~140 lines |
+| ~~C3~~ | ~~Drag to move~~ — **DONE 2026-08-05** (`f70e1ad`). Pixel-space translation with bar snapping, pan suspended on mousedown, trailing click swallowed, window-level move/up. Stage 1 of the constraints work. | |
 | C4 | Per-drawing colour — `Drawing` has no style field | medium |
 | C5 | Tickers wheel does nothing — three stacked causes | medium |
 | C6 | No candle/line toggle — indicators are built inside the candlestick branch | medium |
@@ -194,9 +194,14 @@ Delete key deletes; the wheel lock survives a chart click.
    guard puts a full overlay rebuild on every crosshair move in the app's
    default mode, which is the "nothing repaints at rest" invariant
    (`selftest.py` greps for it). Needs a `hoverId` unchanged-id early-out.
-3. **Drag to move.** Genuinely unimplemented: only two DOM listeners exist in
-   the whole 1525-line engine (`mousedown` as a pan discriminator, `keydown`)
-   and neither drags. ~140 lines, the largest remaining piece.
+3. ~~**Drag to move.**~~ **DONE 2026-08-05** (`f70e1ad`), as stage 1 of the
+   SolidWorks-style dimensions work. Three things that each look like they work
+   while being wrong, all now covered by the gate: translation must be in
+   PIXELS (the x axis is affine in bar index, so a constant Δtime is not a
+   constant Δx across a weekend); pan must be suspended on the mousedown, not
+   at the slop threshold, because the chart pans on its own mousemove; and the
+   click the library fires on the mouseup that ends a drag must be swallowed,
+   because the 4px guard does not cover it and it lands at the DROP point.
 4. **Per-drawing colour.** `Drawing` is `{id, kind, points}` — no style field
    exists, and one module constant `STROKE` feeds stroke, halo and handle fill.
    `spanToDrawing()` mints fresh drawings, so trim would erase any colour

@@ -216,6 +216,39 @@ const HALO = 'color-mix(in srgb, var(--accent) 25%, transparent)'
 const HALO_DANGER = 'color-mix(in srgb, var(--loss) 30%, transparent)'
 const MEASURE_STROKE = 'var(--text-dim)'
 
+/** Nominal minutes of CHART time in one candle, per timeframe.
+ *
+ *  1Day is 390 — one regular US session — not 1440. Chart time is time that
+ *  has candles in it, and a daily candle holds a session, not a calendar day.
+ *  That is what lets the same line read the same slope on any timeframe:
+ *  measure the same two moments on 5Min and on 1Day and the minutes agree.
+ *
+ *  Nominal, not a claim about any particular day: half-days are 210 minutes
+ *  and an extended-hours feed prints more intraday candles than a regular
+ *  session. chartMinutes() only ever uses it as a CEILING on a real gap, so
+ *  an approximate constant cannot inflate a span — it can only stop one.
+ *
+ *  Deliberately NOT shared with backend/recorder.py's duration map, where
+ *  1Day is 86400 because that answers a SCHEDULING question. Both numbers are
+ *  right for their own question; merging them would break one of the two. */
+export const TF_MINUTES: Record<string, number> = {
+  '1Min': 1,
+  '5Min': 5,
+  '15Min': 15,
+  '1Hour': 60,
+  '1Day': 390,
+}
+
+/** Price change per hour of CHART time. Pure, and exported, so the gate can
+ *  exercise the arithmetic directly instead of grepping for it. Null rather
+ *  than Infinity on a zero span: two points in the same candle have no slope,
+ *  and a chip reading "$Infinity/h" would be worse than an absent row. */
+export function slopePerHour(dPrice: number, chartMins: number): number | null {
+  if (!Number.isFinite(dPrice) || !Number.isFinite(chartMins)) return null
+  if (chartMins === 0) return null
+  return (dPrice / chartMins) * 60
+}
+
 interface XY {
   x: number
   y: number
@@ -826,6 +859,49 @@ export class ChartDraw {
     const ib = idx.map.get(b)
     if (ia === undefined || ib === undefined) return null
     return Math.abs(ib - ia)
+  }
+
+  /** Nominal minutes per candle for THIS bucket, read off the key's timeframe.
+   *  The header documents that the key must carry it, and percentMode() already
+   *  parses the key this way — no new plumbing, and no page has to pass it in.
+   *  Null (unknown timeframe) degrades honestly: no slope row, same habit as
+   *  bars-absent degrading the bar count. */
+  private barMinutes(): number | null {
+    for (const part of this.key.split('|')) {
+      const m = TF_MINUTES[part]
+      if (m !== undefined) return m
+    }
+    return null
+  }
+
+  /** Chart time between two bar times, in minutes, SIGNED.
+   *
+   *  Signed because a slope has a direction: barCountBetween is Math.abs, so
+   *  building a slope on it would report the opposite $/h for the same line
+   *  depending on which end was clicked first.
+   *
+   *  DERIVED FROM THE CANDLES, NOT THE CALENDAR. Each step between consecutive
+   *  candles contributes min(its real gap, one candle). So an overnight or
+   *  weekend break costs ONE candle rather than seventeen hours — time with no
+   *  candles in it does not exist — and a missing candle costs one step rather
+   *  than the hole it left. That is what makes the number portable: measure
+   *  09:30→11:30 on 5Min (24 steps × 5) or on 1Hour (2 steps × 60) and both
+   *  give 120 minutes. */
+  private chartMinutes(a: number, b: number): number | null {
+    const idx = this.barsIdx()
+    const per = this.barMinutes()
+    if (!idx || per === null) return null
+    const ia = idx.map.get(a)
+    const ib = idx.map.get(b)
+    if (ia === undefined || ib === undefined) return null
+    const lo = Math.min(ia, ib)
+    const hi = Math.max(ia, ib)
+    let mins = 0
+    for (let i = lo; i < hi; i++) {
+      const gap = (idx.times[i + 1] - idx.times[i]) / 60
+      mins += gap > 0 && gap < per ? gap : per
+    }
+    return ib >= ia ? mins : -mins
   }
 
   private nearestBarTime(t: number): number | null {
@@ -1680,15 +1756,31 @@ export class ChartDraw {
     const timeTxt = `${fmtSpan(dt)}${nBars === null ? '' : ` · ${nBars} bars`}`
     const priceRow: ChipRow = { text: priceTxt }
     const timeRow: ChipRow = { text: timeTxt }
+    // The slope, in the unit the axis is already speaking. Per HOUR OF CHART
+    // TIME rather than per candle: a candle is a different amount of time on
+    // every timeframe, so "$/candle" would rename itself when you switched,
+    // which is the whole thing chartMinutes exists to avoid.
+    const cm = this.chartMinutes(A.time as number, B.time as number)
+    const slope = cm === null ? null : slopePerHour(dp, cm)
+    const slopeRow: ChipRow | null =
+      slope === null
+        ? null
+        : {
+            text: this.percentMode()
+              ? `${signOf(slope)}${Math.abs(slope).toFixed(3)}%/h`
+              : `${signOf(slope)}$${fmtNum(Math.abs(slope))}/h`,
+          }
+    const withSlope = (rows: ChipRow[]): ChipRow[] =>
+      slopeRow === null ? rows : [...rows, slopeRow]
     if (aKind === 'candle' && bKind === 'candle') {
       timeRow.cls = 'em' // candle↔candle is a how-long question
-      return [timeRow, priceRow]
+      return withSlope([timeRow, priceRow])
     }
     if (aKind === 'line' && bKind === 'line') {
       priceRow.cls = 'em' // line↔line (two hlines) is a how-far question
-      return [priceRow, timeRow]
+      return withSlope([priceRow, timeRow])
     }
-    return [priceRow, timeRow] // mixed: both, no thumb on the scale
+    return withSlope([priceRow, timeRow]) // mixed: both, no thumb on the scale
   }
 
   /** liveB carries the in-progress second point during placement. */

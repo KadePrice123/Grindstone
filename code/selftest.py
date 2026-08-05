@@ -2312,6 +2312,137 @@ def _frontend():
     assert r.returncode == 0, f"tsc failed:\n{(r.stdout or r.stderr)[:1500]}"
 
 
+def _node_exe() -> str | None:
+    """Same resolution order as _frontend's. Kept separate on purpose for now:
+    merging them means touching the check that closed the typecheck false
+    green, and this one is new."""
+    exe = shutil.which("node")
+    if exe:
+        return exe
+    portable = ROOT.parent.parent / "runtimes" / "node"
+    cands = [portable / "node.exe", portable / "node"]
+    cands += sorted((Path.home() / ".local/share/grindstone").glob("node-*/bin/node"),
+                    reverse=True)
+    for cand in cands:
+        if cand.exists():
+            return str(cand)
+    return None
+
+
+@check("chart time is derived from candles: same span, same slope, any timeframe")
+def _chart_time():
+    """The property Kade asked for: "30 candles of 5 min and 15 candles of
+    10 min - our slope is the same". This RUNS the engine's own arithmetic
+    rather than restating it.
+
+    Every earlier draft of this check was worthless, and each failure mode is
+    worth naming because they all look green:
+      - `slopePerHour(10,30,5) == slopePerHour(10,15,10)` hand-feeds both
+        operands, so it is the statement 30*5 == 15*10 and cannot fail whatever
+        TF_MINUTES holds.
+      - greping the source for `chartMinutes` is satisfied by a comment.
+      - asserting `'86400' not in the file` goes RED on a correct tree, because
+        fmtSpan legitimately uses it twice.
+    So: build real candle arrays, call the real methods, compare real numbers.
+    Only ChartDraw's CONSTRUCTOR touches the DOM, so the methods run fine on a
+    plain object via .call() with no jsdom and no bundler.
+    """
+    app_dir = CODE / "app"
+    if not (app_dir / "node_modules" / "typescript").exists():
+        print("      (node_modules absent — npm install enables the chart-time check)")
+        return
+    exe = _node_exe()
+    assert exe, "no node runtime on PATH — the chart-time arithmetic cannot be run"
+    ver = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
+    m = re.match(r"v(\d+)\.(\d+)", ver.stdout.strip())
+    assert m, f"could not read node version: {ver.stdout!r}"
+    major, minor = int(m.group(1)), int(m.group(2))
+    # Importing a .ts file directly needs type stripping, on by default from
+    # 22.18. The installers pin 22.20 so a real install is fine; an older node
+    # gets an honest message instead of a mystery failure.
+    assert (major, minor) >= (22, 18), (
+        f"node {major}.{minor} cannot import TypeScript directly (need >= 22.18). "
+        f"The installers pin v22.20; update node or rerun the installer.")
+
+    probe = r"""
+import { TF_MINUTES, slopePerHour, ChartDraw } from './src/renderer/src/components/ChartDraw.ts'
+const out = []
+const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail })
+
+// Candles at a fixed step, as ISO strings - the shape barsIdx() expects.
+const mk = (startMs, stepMin, n) =>
+  Array.from({ length: n }, (_, i) => ({ ts: new Date(startMs + i * stepMin * 60000).toISOString() }))
+// The stub must INHERIT the prototype, not just borrow one method off it:
+// chartMinutes calls this.barsIdx() and this.barMinutes(), so a plain object
+// throws "this.barsIdx is not a function". Only the CONSTRUCTOR touches the
+// DOM, so an object with the prototype and the two fields these methods read
+// is a complete enough `this` to run real arithmetic on.
+const stub = (key, bars) =>
+  Object.assign(Object.create(ChartDraw.prototype), { key, barsOpt: () => bars })
+const cm = (key, bars, a, b) => ChartDraw.prototype.chartMinutes.call(stub(key, bars), a, b)
+const sec = (b) => Math.floor(Date.parse(b.ts) / 1000)
+
+const T0 = Date.parse('2024-01-02T14:30:00Z')   // 09:30 ET
+
+// THE PROPERTY: the same two moments, on two timeframes, agree.
+const b5 = mk(T0, 5, 25)     // 24 steps x 5min  = 120 minutes
+const b10 = mk(T0, 10, 13)   // 12 steps x 10min = 120 minutes
+const b60 = mk(T0, 60, 3)    //  2 steps x 60min = 120 minutes
+const m5 = cm('X|5Min', b5, sec(b5[0]), sec(b5[24]))
+const m10 = cm('X|10Min', b10, sec(b10[0]), sec(b10[12]))
+const m60 = cm('X|1Hour', b60, sec(b60[0]), sec(b60[2]))
+ok('5Min span is 120 chart-minutes', m5 === 120, m5)
+ok('1Hour span agrees with 5Min', m60 === m5, `${m60} vs ${m5}`)
+ok('unknown timeframe degrades to null', m10 === null, m10)
+
+// Kade's own example, in the timeframes this app actually ships:
+// 30 candles of 5Min and 10 candles of 15Min are both 150 chart-minutes, so
+// the SAME price move over them must give the SAME slope.
+const k5 = mk(T0, 5, 31)     // 30 steps x 5  = 150
+const k15 = mk(T0, 15, 11)   // 10 steps x 15 = 150
+const c5 = cm('X|5Min', k5, sec(k5[0]), sec(k5[30]))
+const c15 = cm('X|15Min', k15, sec(k15[0]), sec(k15[10]))
+ok('30 candles of 5Min is 150 chart-minutes', c5 === 150, c5)
+ok('10 candles of 15Min is the same span', c15 === c5, `${c15} vs ${c5}`)
+ok('so the same move gives the same slope',
+   slopePerHour(10, c5) === slopePerHour(10, c15), `${slopePerHour(10, c5)}`)
+
+// OVERNIGHT COSTS ONE CANDLE, not the calendar gap. Two sessions of 5Min.
+const day1 = mk(T0, 5, 3)
+const day2 = mk(T0 + 24 * 3600 * 1000, 5, 3)
+const both = [...day1, ...day2]
+const across = cm('X|5Min', both, sec(both[0]), sec(both[5]))
+ok('overnight break costs one candle', across === 25, across)   // 5 steps x 5
+
+// SIGN: a slope has a direction.
+const fwd = cm('X|5Min', b5, sec(b5[0]), sec(b5[24]))
+const rev = cm('X|5Min', b5, sec(b5[24]), sec(b5[0]))
+ok('reversed span is negated', rev === -fwd, `${rev} vs ${fwd}`)
+ok('slope sign follows it', slopePerHour(10, rev) === -slopePerHour(10, fwd), '')
+ok('zero span has no slope', slopePerHour(10, 0) === null, '')
+
+// The constant that makes daily reconcile with intraday.
+ok('1Day is one session, not a calendar day', TF_MINUTES['1Day'] === 390, TF_MINUTES['1Day'])
+ok('every shipped timeframe has a duration',
+   ['1Min', '5Min', '15Min', '1Hour', '1Day'].every((k) => TF_MINUTES[k] > 0), '')
+
+console.log(JSON.stringify(out))
+"""
+    probe_path = app_dir / ".selftest-charttime.mjs"
+    try:
+        probe_path.write_text(probe, encoding="utf-8")
+        r = subprocess.run([exe, str(probe_path)], cwd=app_dir,
+                           capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, f"chart-time probe crashed:\n{(r.stderr or r.stdout)[:1500]}"
+        results = json.loads(r.stdout.strip().splitlines()[-1])
+    finally:
+        probe_path.unlink(missing_ok=True)
+    bad = [x for x in results if not x["cond"]]
+    assert not bad, "chart-time arithmetic is wrong:\n" + "\n".join(
+        f"  - {x['name']} (got {x['detail']})" for x in bad)
+    assert len(results) >= 11, f"the probe lost assertions: only {len(results)} ran"
+
+
 def main() -> int:
     passed = 0
     total = len(CHECKS)
