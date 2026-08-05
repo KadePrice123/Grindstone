@@ -56,6 +56,13 @@ CREATE TABLE IF NOT EXISTS favorites (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (user_id, kind, key)
 );
+CREATE TABLE IF NOT EXISTS chart_objects (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key     TEXT NOT NULL,
+    doc     TEXT NOT NULL,
+    updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (user_id, key)
+);
 CREATE TABLE IF NOT EXISTS backtest_presets (
     id          INTEGER PRIMARY KEY,
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

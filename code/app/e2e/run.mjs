@@ -1631,6 +1631,153 @@ try {
     10000
   ).catch(() => null)
   check(favHelpOpen === 'ok', 'help: help.gs?s=favorites lands on the section')
+
+  // ---- drawings survive a restart (NOTES D7) -----------------------------
+  // LAST in the run, and deliberately: it reloads the renderer, which resets
+  // the engine's module-level session Map — the only way to prove a drawing
+  // came back from the DATABASE rather than from memory that never died.
+  // Nothing may follow it, because a reload throws away the page state every
+  // earlier block set up.
+  //
+  // What the offline gate cannot reach, and this can: the Electron proxy. Every
+  // selftest talks to the backend directly; a proxy bug broke search three
+  // times before a human found it, which is why this file exists at all.
+  await chromeA.eval(typeAddress('spy.gs'))
+  let persistView = null
+  await waitFor(
+    async () => {
+      for (const t of (await targets()).filter((x) => x.url.includes('mode=content'))) {
+        const c = await connect(t)
+        const ready = await c.eval(
+          `(() => {
+             if (document.querySelector('.page-head h1')?.textContent !== 'SPY') return null;
+             const el = document.querySelector('[data-draw-tool]');
+             return el && el.querySelector('canvas') ? 'ok' : null })()`
+        )
+        if (ready) {
+          persistView = c
+          return 'ok'
+        }
+      }
+      return null
+    },
+    'the SPY chart for the persistence block',
+    30000
+  )
+
+  const pAttr = (name) =>
+    persistView.eval(`document.querySelector('[data-draw-tool]')?.getAttribute('${name}') ?? null`)
+  const pTool = (title) =>
+    persistView.eval(
+      `(() => { const b = [...document.querySelectorAll('button')]
+          .find(x => (x.title ?? '').startsWith(${JSON.stringify(title)}));
+        if (!b) return 'missing'; b.click(); return 'ok' })()`
+    )
+  // The engine's own bucket name for this page: symbol|timeframe.
+  const CHART_KEY = 'SPY|1Day'
+  const readDoc = () =>
+    persistView
+      .eval(
+        `window.grindstone.request('GET','/api/chart-objects?key=' +
+           encodeURIComponent(${JSON.stringify(CHART_KEY)}))
+          .then(r => JSON.stringify({ status: r.status, doc: r.body?.doc ?? null }))`
+      )
+      .then((s) => JSON.parse(s ?? '{}'))
+
+  await pTool('Clear every drawing')
+  await sleep(700) // clear is itself a save; let it land before measuring
+
+  // Place one h-line by hand, then wait for the debounced write.
+  await pTool('Horizontal price line')
+  await sleep(200)
+  const pRect = await persistView.eval(
+    `(() => { const b = document.querySelector('[data-draw-tool]').getBoundingClientRect();
+       return JSON.stringify({ x: b.x, y: b.y, w: b.width, h: b.height }) })()`
+  ).then((s) => JSON.parse(s))
+  let placed = false
+  for (let i = 0; i < 3 && !placed; i++) {
+    await persistView.click(pRect.x + pRect.w * 0.5, pRect.y + pRect.h * 0.45)
+    await sleep(400)
+    placed = (await pAttr('data-draw-count')) === '1'
+  }
+  check(placed, 'persist: an h-line is placed to be saved')
+
+  const saved = await waitFor(
+    async () => {
+      const r = await readDoc()
+      return r.status === 200 && (r.doc?.drawings?.length ?? 0) === 1 ? r : null
+    },
+    'the drawing to reach the backend through the real proxy',
+    8000
+  ).catch(async () => ({ status: 'timeout', doc: (await readDoc()).doc }))
+  check(
+    saved.status === 200 && saved.doc?.drawings?.[0]?.kind === 'hline',
+    'persist: a drawn line crosses the IPC proxy and lands in the database',
+    JSON.stringify(saved.doc)
+  )
+  check(
+    Number.isFinite(saved.doc?.drawings?.[0]?.points?.[0]?.price),
+    'persist: it stores a real data-space point, not a pixel',
+    JSON.stringify(saved.doc?.drawings?.[0]?.points)
+  )
+
+  // THE ACTUAL PROMISE: reload the renderer — the session Map dies with it —
+  // and the line must come back from the database.
+  //
+  // Stamp the live context FIRST. Page.reload is asynchronous, so a scan that
+  // only looks for "a SPY page showing 1 drawing" is satisfied by the page
+  // that has not navigated yet — a false green that proves nothing about the
+  // database. A global set here cannot survive a real reload, so its ABSENCE
+  // is the proof the JS context (and with it the engine's session Map) is new.
+  await persistView.eval(`(window.__preReload = 1, 'ok')`)
+  await persistView.send('Page.reload', { ignoreCache: false })
+  let reloadedView = null
+  const restored = await waitFor(
+    async () => {
+      // Every content tab is its OWN renderer process with its own module
+      // state, and several of them are showing SPY by this point in the run.
+      // Match the reloaded one specifically and keep that connection: clearing
+      // on a different SPY view would be a no-op on an already-empty bucket,
+      // which is exactly the false failure this replaced.
+      for (const t of (await targets()).filter((x) => x.url.includes('mode=content'))) {
+        const c = await connect(t)
+        const n = await c.eval(
+          `(() => {
+             if (window.__preReload) return null;          // not the reloaded context
+             if (document.querySelector('.page-head h1')?.textContent !== 'SPY') return null;
+             const el = document.querySelector('[data-draw-tool]');
+             if (!el || !el.querySelector('canvas')) return null;
+             return el.getAttribute('data-draw-count') })()`
+        )
+        if (n === '1') {
+          reloadedView = c
+          return 'ok'
+        }
+      }
+      return null
+    },
+    'the drawing to come back after a reload',
+    30000
+  ).catch(() => null)
+  check(restored === 'ok',
+    'persist: the drawing survives a renderer reload (fresh JS context, read from the DB)')
+
+  // And clearing it removes the row, so the store does not accumulate empty
+  // documents for every chart ever opened. Driven through the reloaded view —
+  // the one whose engine actually holds the restored drawing.
+  if (reloadedView) persistView = reloadedView
+  const clearBtn = await pTool('Clear every drawing')
+  const emptied = await waitFor(
+    async () => {
+      const r = await readDoc()
+      return (r.doc?.drawings?.length ?? 0) === 0 ? 'ok' : null
+    },
+    'the cleared chart to empty in the store',
+    8000
+  ).catch(() => null)
+  check(emptied === 'ok', 'persist: clearing the chart clears the stored document',
+    `btn=${clearBtn} domCount=${await pAttr('data-draw-count')} ` +
+    `doc=${JSON.stringify((await readDoc()).doc)}`)
 } catch (err) {
   console.log('FAIL  harness error —', err.message)
   failures += 1

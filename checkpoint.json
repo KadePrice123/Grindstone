@@ -2,7 +2,7 @@
   "gate": {
     "command": ["{python}", "selftest.py"],
     "cwd": "code",
-    "expect": "SELFTEST OK 42/42",
+    "expect": "SELFTEST OK 43/43",
     "timeout": 300
   }
 }

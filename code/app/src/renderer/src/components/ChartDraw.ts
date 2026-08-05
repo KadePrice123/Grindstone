@@ -19,6 +19,9 @@
  *     opts.percent () => boolean — true when the price axis is % (normalize
  *                  mode); measure labels then show Δ% only. Falls back to the
  *                  charts-page key convention (key ends in '|%').
+ *     opts.store   ChartStore — where drawings live across restarts. Omit it
+ *                  and the engine is exactly what it was before: everything
+ *                  stays in the session Map and dies with the process.
  *   setKey(key)            switch session bucket (symbol/timeframe/scale)
  *   setSeries(series)      re-anchor after Chart.tsx rebuilds its series
  *   setBars(bars)          refresh the bars source on the re-anchor path
@@ -46,6 +49,14 @@
  * timeframe (a 1Min anchor is unprojectable on a 1Day axis) and the axis
  * semantics (a $ anchor is meaningless on a % axis — the charts page keys
  * '|$' / '|%' for exactly that reason).
+ *
+ * PERSISTENCE (opts.store). The same key addresses a row in the backend's
+ * chart_objects table, so the Map is a session cache in front of it, not the
+ * home of the data. The Map still WINS while the app is running: it is newer
+ * than the server whenever a save is mid-debounce, so a key is loaded at most
+ * once per session and a revisit reads memory. What persists is the bucket
+ * alone — no selection, no armed tool, no hidden flag, because those describe
+ * how you are looking at a chart rather than what you drew on it.
  *
  * TRIM (SolidWorks-style, the arrangement model):
  *   Clicking a line removes ONLY the clicked span — the piece between the
@@ -168,6 +179,31 @@ export interface InspectPin {
   time: UTCTimestamp
 }
 
+/** What one chart's persisted objects look like on the wire. It is the bucket,
+ *  nothing more — no selection, no tool, no hidden flag: those are how you are
+ *  looking at the chart right now, not what you drew on it. */
+export interface ChartDoc {
+  version?: number
+  drawings: Drawing[]
+  measures: Measure[]
+  pins: InspectPin[]
+}
+
+/** Persistence, INJECTED rather than imported.
+ *
+ *  The engine reaches nothing outside lightweight-charts and its own types,
+ *  which is what lets the gate run its arithmetic under plain node with no
+ *  bundler and no jsdom. An `import { api }` here would end that, so the pages
+ *  hand in an adapter (renderer/src/chartStore.ts) and the engine keeps its
+ *  one dependency direction.
+ *
+ *  `load` resolving null means "nothing saved" — the same as an empty doc.
+ *  Errors belong to the adapter: it owns the UI that reports them. */
+export interface ChartStore {
+  load: (key: string) => Promise<ChartDoc | null>
+  save: (key: string, doc: ChartDoc) => Promise<void>
+}
+
 /** What a pick can land on. Drawings carry the nearest-point/parameter that
  *  trim and measure-snap need; measures and pins are pick-or-not. `id` is on
  *  every arm so the selection can stay a flat string[] — mkId's single counter
@@ -223,8 +259,75 @@ interface Bucket {
 
 const sessionStore = new Map<string, Bucket>()
 
+function bucketFor(key: string): Bucket {
+  let b = sessionStore.get(key)
+  if (!b) {
+    b = { drawings: [], measures: [], pins: [] }
+    sessionStore.set(key, b)
+  }
+  return b
+}
+
+const isEmptyBucket = (b: Bucket): boolean =>
+  b.drawings.length === 0 && b.measures.length === 0 && b.pins.length === 0
+
 let nextId = 1
 const mkId = (prefix: string) => `${prefix}${nextId++}`
+
+// ---- persistence ----------------------------------------------------------
+// Module-level, not per-instance, because split view puts TWO engines on one
+// key: they share the bucket already, so they must share the "have we loaded
+// this?" and "what does the server hold?" answers too, or one instance's load
+// clobbers the other's edits and both race to write.
+
+/** Bumped in step with chartobjects.DOC_VERSION on the backend. */
+export const CHART_DOC_VERSION = 1
+
+/** Coalesces a burst of edits into one write. Every mutator emits, and a drag
+ *  commit emits once, so this is about typing/rapid clicks rather than frames. */
+const SAVE_DEBOUNCE_MS = 400
+
+/** key -> the in-flight (or settled) first load for that key. */
+const loadedKeys = new Map<string, Promise<void>>()
+/** key -> the serialized doc last handed to the store, so an emit that changed
+ *  only the SELECTION or the armed tool costs nothing. */
+const savedDocs = new Map<string, string>()
+
+const docOf = (b: Bucket): ChartDoc => ({
+  version: CHART_DOC_VERSION,
+  drawings: b.drawings,
+  measures: b.measures,
+  pins: b.pins,
+})
+
+/** Move the id counter past everything we just loaded.
+ *
+ *  Without this, a reload is a duplicate-id generator: `nextId` is a fresh
+ *  module counter starting at 1, so the first new drawing on a restored chart
+ *  is 'dw1' — the id the restored one already has. The selection is a flat
+ *  string[] matched by id, so the two would select, drag and delete as one. */
+function adoptIds(b: Bucket): void {
+  let max = 0
+  for (const o of [...b.drawings, ...b.measures, ...b.pins]) {
+    const n = Number(/\d+$/.exec(o.id)?.[0] ?? '0')
+    if (Number.isFinite(n) && n > max) max = n
+  }
+  if (max >= nextId) nextId = max + 1
+}
+
+/** Write one key's bucket if it differs from what the store last took. */
+function saveNow(store: ChartStore, key: string): void {
+  const b = sessionStore.get(key)
+  if (!b) return
+  const doc = docOf(b)
+  const ser = JSON.stringify(doc)
+  if (savedDocs.get(key) === ser) return
+  // Recorded BEFORE the await so a burst does not queue N identical writes.
+  // Dropped again on failure, so the next edit retries instead of believing a
+  // write that never landed.
+  savedDocs.set(key, ser)
+  store.save(key, doc).catch(() => savedDocs.delete(key))
+}
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
 /** A press that travelled further than this before release is a pan. */
@@ -434,6 +537,11 @@ export class ChartDraw {
     live: boolean
   } | null = null
   private teardown: (() => void)[] = []
+  private store?: ChartStore
+  private saveTimer: ReturnType<typeof setTimeout> | null = null
+  /** Set by destroy(), read by the load continuation — a response can outlive
+   *  the engine that asked for it. */
+  private destroyed = false
 
   // bars index cache, keyed by array identity — pages hand the same array
   // until data actually changes, so this rebuilds only on real reloads.
@@ -445,13 +553,18 @@ export class ChartDraw {
     key: string,
     chart: IChartApi,
     series: ISeriesApi<SeriesType>,
-    opts?: { bars?: Bar[] | (() => Bar[]); percent?: () => boolean }
+    opts?: {
+      bars?: Bar[] | (() => Bar[])
+      percent?: () => boolean
+      store?: ChartStore
+    }
   ) {
     this.key = key
     this.chart = chart
     this.series = series
     this.setBarsSource(opts?.bars)
     this.percentOpt = opts?.percent
+    this.store = opts?.store
     this.host = chart.chartElement()
     if (getComputedStyle(this.host).position === 'static') this.host.style.position = 'relative'
 
@@ -640,6 +753,10 @@ export class ChartDraw {
 
     this.applyCursor()
     this.render()
+    // Last, and deliberately after the first render: hydrate() renders again
+    // when the objects arrive, and a chart that paints empty and then fills is
+    // honest about a store it has not heard from yet.
+    this.hydrate()
   }
 
   // ---- public surface -----------------------------------------------------
@@ -668,6 +785,11 @@ export class ChartDraw {
    *  half-placed object and the selection (ids belong to the old bucket). */
   setKey(key: string): void {
     if (key === this.key) return
+    // Before the reassignment, while this.key still names the bucket those
+    // pending edits belong to. A debounce timer cancelled by the switch and
+    // never flushed is exactly how the last line drawn before a symbol change
+    // disappears.
+    this.flushSave()
     this.key = key
     this.pendingPt = null
     this.pendingAnchor = null
@@ -675,6 +797,7 @@ export class ChartDraw {
     this.cursor = null
     this.render()
     this.emit()
+    this.hydrate()
   }
 
   setTool(tool: DrawTool): void {
@@ -805,6 +928,11 @@ export class ChartDraw {
   }
 
   destroy(): void {
+    // Write before tearing down. An unmount is the most common way a drawing
+    // reaches the end of its life within the debounce window — draw, switch
+    // tab, and the timer dies with the engine unless it is flushed here.
+    this.flushSave()
+    this.destroyed = true
     // React unmounts children before parents, so the chart is often already
     // disposed when the owning page's cleanup runs — every unhook tolerates it.
     for (const fn of this.teardown) {
@@ -824,15 +952,80 @@ export class ChartDraw {
   // ---- store / projection helpers ----------------------------------------
 
   private bucket(): Bucket {
-    let b = sessionStore.get(this.key)
-    if (!b) {
-      b = { drawings: [], measures: [], pins: [] }
-      sessionStore.set(this.key, b)
+    return bucketFor(this.key)
+  }
+
+  // ---- persistence --------------------------------------------------------
+
+  /** Pull this key's saved objects in — once per key per session, however many
+   *  engines ask. A revisit inside the session reads the live bucket instead,
+   *  which is both faster and correct: the bucket is newer than the server
+   *  copy whenever a save is still debouncing. */
+  private hydrate(): void {
+    const store = this.store
+    if (!store) return
+    const key = this.key
+    let first = loadedKeys.get(key)
+    if (!first) {
+      first = store
+        .load(key)
+        .then((doc) => {
+          const b = bucketFor(key)
+          // The user can draw in the milliseconds a load is in flight. Their
+          // work is newer than the server's, so it wins and the pending save
+          // carries it — seeding here would delete a line they just drew.
+          if (!isEmptyBucket(b)) return
+          b.drawings = doc?.drawings ?? []
+          b.measures = doc?.measures ?? []
+          b.pins = doc?.pins ?? []
+          adoptIds(b)
+          // Now in sync with the store, so the emit below is not a write.
+          savedDocs.set(key, JSON.stringify(docOf(b)))
+        })
+        .catch(() => {
+          /* The adapter owns reporting. A chart whose objects failed to load
+             still draws — it just starts blank, and the first edit tries to
+             save again. */
+        })
+      loadedKeys.set(key, first)
     }
-    return b
+    void first.then(() => {
+      // A tab switch or an unmount can beat the response back. Painting then
+      // would draw the previous symbol's lines onto this one, or touch nodes
+      // that destroy() already removed.
+      if (this.destroyed || this.key !== key) return
+      this.render()
+      this.emit()
+    })
+  }
+
+  private scheduleSave(): void {
+    if (!this.store) return
+    if (this.saveTimer !== null) clearTimeout(this.saveTimer)
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null
+      this.flushSave()
+    }, SAVE_DEBOUNCE_MS)
+  }
+
+  /** Write the pending edit NOW. Called before the key changes and on destroy:
+   *  both cancel the debounce timer, and a cancelled timer with no flush is
+   *  exactly how the last drawing before a tab switch goes missing. */
+  private flushSave(): void {
+    if (this.saveTimer !== null) {
+      clearTimeout(this.saveTimer)
+      this.saveTimer = null
+    }
+    // this.key, not a captured one: setKey() flushes BEFORE it reassigns, so
+    // in both call sites this is still the key the pending edits belong to.
+    if (this.store) saveNow(this.store, this.key)
   }
 
   private emit(): void {
+    // Every mutator routes through here, so this is the one place persistence
+    // has to hook. Selection and tool changes emit too; saveNow's comparison
+    // makes those free rather than a write per click.
+    this.scheduleSave()
     this.changeCb?.(this.getState())
   }
 

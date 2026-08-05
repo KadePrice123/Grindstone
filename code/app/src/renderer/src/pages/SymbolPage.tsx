@@ -4,8 +4,9 @@
  * drawings themselves and reports back through onChange, which is what
  * feeds the data-draw-* testability attrs and the floating DrawEditor.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, SymbolSummary } from '../api'
+import { makeChartStore } from '../chartStore'
 import {
   Bar,
   Chart,
@@ -105,6 +106,7 @@ export function SymbolPage({
   const [engine, setEngine] = useState<ChartDraw | null>(null)
   const [drawState, setDrawState] = useState<EngineState | null>(null)
   const [drawingsHidden, setDrawingsHidden] = useState(false)
+  const [drawSaveErr, setDrawSaveErr] = useState<string | null>(null)
   const [indHidden, setIndHidden] = useState(false)
   const [showIndSettings, setShowIndSettings] = useState(false)
   // Session-scoped periods (IndicatorSettings notes this); stable identity —
@@ -115,6 +117,10 @@ export function SymbolPage({
   // timeframe switch, so onReady fires against a NEW chart each time — the
   // refs let one stable callback re-anchor or rebuild as needed.
   const draw = useRef<ChartDraw | null>(null)
+  // Built once: handleChartReady is a stable callback and the engine holds the
+  // adapter for its whole life, so a new object per render would hand every
+  // rebuilt engine a different store for no reason.
+  const chartStore = useMemo(() => makeChartStore(setDrawSaveErr), [])
   const drawKeyRef = useRef(`${symbol}|1Day`)
   drawKeyRef.current = `${symbol}|${timeframe}`
   const toolRef = useRef(drawTool)
@@ -260,6 +266,7 @@ export function SymbolPage({
     // flagged — closed by handing it the ref).
     const d = new ChartDraw(drawKeyRef.current, chart, mainSeries, {
       bars: () => barsRef.current,
+      store: chartStore,
     })
     d.setTool(toolRef.current)
     d.setDrawingsHidden(drawHiddenRef.current)
@@ -443,6 +450,14 @@ export function SymbolPage({
           <span className="subtle chart-source">
             {bars.length > 0 ? `${bars.length} bars · ${barSource}` : barNote || 'loading…'}
           </span>
+          {/* Drawings are saved in the background, so a failure has no other
+              way to reach the user — and "my lines vanished on restart" is
+              the complaint it prevents. */}
+          {drawSaveErr ? (
+            <span className="subtle draw-save-err" data-draw-save-err="1">
+              drawings not saved: {drawSaveErr}
+            </span>
+          ) : null}
         </div>
         <div className="chart-stage">
           {bars.length > 0 ? (

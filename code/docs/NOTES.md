@@ -1,7 +1,9 @@
 # Pickup notes — installers, then chart dimensions (2026-08-05)
 
 Newest session first. Older sections are accurate history; where they quote a
-gate count it is stale — **the gate is 41/41** as of 2026-08-05.
+gate count it is stale — **the gate is 43/43** as of 2026-08-05. (The 41/41
+this line used to claim was itself stale by two: bump BOTH this line and
+`checkpoint.json` when you add a check.)
 
 ## Open work — the whole list
 
@@ -34,7 +36,8 @@ Every open item, in one place. Details live in the dated sections below.
 
 Shipped so far: drag-to-move (`f70e1ad`), derived chart time so a slope reads
 the same on any timeframe (`118f8ba`), axis-locked draggable dimensions
-(`576bfc3`).
+(`576bfc3`), and persistence (D7) — so a typed constraint now has somewhere to
+live, which is what unblocks D1.
 
 The settled model, which everything below builds on — **do not relitigate**:
 a dimension has the same shape as the line tools that already exist. An hline
@@ -57,8 +60,68 @@ false while you merely scroll sideways.
 | D4 | **Value entry**: a real focused `<input>` in the PAGE's float layer (reusing DrawEditor's Field contract), not in-chip digit capture — the cheap path has no backspace, no paste, no minus sign, and collides with Backspace-deletes-the-selection | small |
 | D5 | **Diagonal/slope dimension form** — the unit and its arithmetic are already shipped and gate-proven; this is the dimension *kind* plus its entry | small |
 | D6 | **Configurable hotkeys** — chart-scoped for v1. Truly app-wide means routing through main's `before-input-event` (the pattern `main/tabs.ts` uses for F12), which is a shell change, not a chart change | medium |
-| D7 | **Persistence, and it gates D1** — nothing in the drawing engine survives a reload (`sessionStore` is a module-level Map; no drawing state reaches the backend). Two lines are cheap to redraw; a set of typed constraints is not, so constraints without persistence is arguably a worse deal than a plain measurement. Kade chose a small `chart_objects(key, doc, updated)` table — NOT the settings blob, which `_coerce` caps at 8192 bytes | medium |
+| ~~D7~~ | ~~**Persistence, and it gates D1**~~ — **DONE 2026-08-05.** `chart_objects(user_id, key, doc, updated)` as chosen; drawings, measures and pins survive a restart. D1 is unblocked. Details below. | |
 | D8 | Log scale is **deferred by decision**; amend REQUIREMENTS FR-CHART-1 so it is not a silent broken promise. Under log, Δ$ and Δbars stay correct but `parallel` becomes false and $/bar stops describing the drawn line | small |
+
+**D7 as built (2026-08-05).** `backend/chartobjects.py` + two routes
+(`GET/PUT /api/chart-objects?key=…`, plus `/keys`); the key is the engine's own
+bucket name, so `SPY|1Day|$` addresses one row. It is a QUERY parameter because
+'|' is not a legal unescaped path segment. The engine takes an INJECTED
+`opts.store` rather than importing the API — ChartDraw.ts must stay runnable
+under plain node, which is how the gate runs its arithmetic against the real
+code. `renderer/src/chartStore.ts` is the adapter; both chart pages pass it and
+render a `draw-save-err` line, because a background save that fails has no
+other way to reach the user.
+
+What persists is the bucket alone — no selection, no armed tool, no hidden
+flag: those describe how you are LOOKING at a chart, not what you drew on it.
+The session Map stays in front of the table and still wins while the app runs
+(it is newer than the server whenever a save is mid-debounce), so a key loads
+at most once per session.
+
+Four traps, all now gate-covered:
+  - **Restored ids collide.** `mkId`'s counter is a module global starting at
+    1, so after a reload the first new drawing is called `dw1` — the name a
+    restored one already has. The selection is a flat `string[]` matched by id,
+    so the two would select, drag and delete as ONE object. `adoptIds` moves
+    the counter past everything loaded.
+  - **The last edit before a tab switch is lost.** Saves are debounced 400ms;
+    `setKey` and `destroy` cancel that timer, so both flush first — `setKey`
+    *before* it reassigns, while `this.key` still names the right bucket.
+  - **A slow load clobbers fresh work.** Hydrate seeds only an EMPTY bucket: a
+    line drawn while the request was in flight is newer than the server's copy.
+  - **NaN is not JSON.** Python's json module both PARSES and EMITS NaN/Infinity,
+    so a non-finite price round-trips into SQLite happily and then makes the
+    renderer's `JSON.parse` throw — one bad write kills every chart on that key.
+    The validator refuses non-finite numbers; the gate posts a raw `NaN` body,
+    which is the only way to reach that path since no compliant encoder emits it.
+
+The validator enumerates the engine's vocabulary, which buys a real guarantee
+(a doc the renderer cannot project is refused at the door) at a real cost:
+**adding a DrawKind or anchor kind means editing chartobjects.py too.** The
+gate parses both files and fails on drift rather than trusting the discipline.
+
+**The new check was a false green when first written, and the mutation test is
+what caught it.** The id-collision assertion used a stored doc with ids
+`dw7/ms8/pin9`; deleting `adoptIds` entirely still passed, because the fresh
+counter mints `dw1`, which collides with nothing in that set. Fixed by storing
+the ids a real first session actually produces. Worth repeating the method: after
+writing a check, BREAK the thing it guards and confirm it goes red. Eight
+mutations were run against this one (each invariant above, plus the vocabulary
+and the empty-row delete); seven were caught immediately, one was not, and that
+one was the assertion that mattered most.
+
+E2E covers what the offline gate structurally cannot — the Electron proxy — and
+the reload is the only proof that a drawing came back from the DATABASE rather
+than from a session Map that never died. Two things learned writing it:
+**every content tab is its own renderer process with its own module state**, and
+several are showing SPY by that point in the run, so a view matched by title
+alone can be a different tab whose engine is already empty (a clear on it is a
+no-op with nothing to save — it read as a product bug for one run). And
+`Page.reload` is asynchronous, so "a SPY page showing 1 drawing" is satisfied by
+the page that has not navigated yet. The block stamps `window.__preReload`
+first and requires its ABSENCE, so a fresh JS context is proven rather than
+assumed. It runs LAST in the file because nothing may follow a reload.
 
 Refused by design, with reasons to give in the chip rather than silent no-ops:
 perpendicular distance between two non-parallel lines (its data-space magnitude

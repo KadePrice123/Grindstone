@@ -2443,6 +2443,340 @@ console.log(JSON.stringify(out))
     assert len(results) >= 11, f"the probe lost assertions: only {len(results)} ran"
 
 
+@check("chart objects persist: strict store, one vocabulary, engine round-trip")
+def _chart_persistence():
+    """Drawings survive a restart (NOTES D7), and the three ways that quietly
+    fails are each covered here rather than reasoned about:
+
+      1. The STORE takes garbage. A NaN price round-trips through Python's json
+         happily and then makes the renderer's JSON.parse throw — one bad write
+         takes out every chart for that key.
+      2. The two VOCABULARIES drift. The validator enumerates the engine's
+         kinds, so adding a DrawKind to ChartDraw.ts and not to chartobjects.py
+         makes the new tool save-refused at runtime and nowhere else.
+      3. The ENGINE loses the last edit. Draw, switch tab: the debounce timer
+         dies with the engine unless setKey/destroy flush it. And a restored
+         'dw1' collides with the fresh counter's first 'dw1', which makes two
+         objects select and delete as one.
+    """
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from fastapi.testclient import TestClient
+
+    from backend import chartobjects as co
+    from backend.app import State, create_app
+
+    KEY = "SPY|1Day|$"
+    DOC = {
+        "drawings": [
+            {"id": "dw1", "kind": "trend", "points": [
+                {"time": 1700000000, "price": 450.5},
+                {"time": 1700086400, "price": 455.0}]},
+            {"id": "dw2", "kind": "hline", "points": [{"time": 1700000000, "price": 460}]},
+        ],
+        "measures": [
+            {"id": "ms3",
+             "a": {"kind": "candle", "time": 1700000000},
+             "b": {"kind": "line", "drawingId": "dw1", "u": 0.5,
+                   "time": 1700043200, "price": 452.7},
+             "place": {"axis": "time", "at": 1700020000}},
+            # A free diagonal: no place at all. JSON has no 'undefined', so the
+            # renderer sends null and the store must read that as "absent".
+            {"id": "ms4",
+             "a": {"kind": "free", "time": 1700000000, "price": 1.0},
+             "b": {"kind": "free", "time": 1700086400, "price": 2.0},
+             "place": None},
+        ],
+        "pins": [{"id": "pin5", "time": 1700000000}],
+    }
+
+    # -- 1. the routes, end to end ------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        state = State("boot-token-for-tests", db_path=Path(tmp) / "app.db")
+        client = TestClient(create_app(state), base_url="http://127.0.0.1")
+        B = {"X-App-Token": "boot-token-for-tests"}
+        token = client.post("/api/auth/setup", headers=B,
+                            json={"username": "t", "password": "longenough1"}).json()["token"]
+        A = {**B, "Authorization": f"Bearer {token}"}
+
+        assert client.get("/api/chart-objects", headers=B,
+                          params={"key": KEY}).status_code == 401, \
+            "chart objects are readable without a session"
+
+        r = client.get("/api/chart-objects", headers=A, params={"key": KEY})
+        assert r.status_code == 200 and r.json()["doc"]["drawings"] == [], \
+            f"an undrawn chart should read empty, got {r.text[:200]}"
+
+        r = client.put("/api/chart-objects", headers=A, json={"key": KEY, "doc": DOC})
+        assert r.status_code == 200, r.text
+        back = client.get("/api/chart-objects", headers=A, params={"key": KEY}).json()["doc"]
+        assert back == r.json()["doc"], "a saved chart did not read back identically"
+        assert len(back["drawings"]) == 2 and len(back["measures"]) == 2, back
+        assert "place" not in back["measures"][1], \
+            "a null place must round-trip as ABSENT — a free diagonal is not axis-locked"
+        assert back["measures"][0]["place"] == {"axis": "time", "at": 1700020000}
+
+        # The key is a query parameter because '|' is not a legal path char.
+        keys = client.get("/api/chart-objects/keys", headers=A).json()["charts"]
+        assert [k["key"] for k in keys] == [KEY], keys
+
+        # Clearing a chart removes the row, so 'keys' stays an honest answer to
+        # "where did I draw something".
+        client.put("/api/chart-objects", headers=A,
+                   json={"key": KEY, "doc": {"drawings": [], "measures": [], "pins": []}})
+        assert client.get("/api/chart-objects/keys", headers=A).json()["charts"] == [], \
+            "clearing a chart left an empty row behind"
+
+        # Garbage is a 422 naming the reason, never a 500 and never a silent
+        # substitution — a 'fixed' document is how a user's work disappears.
+        bad_docs = {
+            # What a JS client actually sends for a NaN: JSON.stringify(NaN)
+            # is the string "null", not "NaN".
+            "null price": {"drawings": [{"id": "d", "kind": "hline",
+                                         "points": [{"time": 1, "price": None}]}]},
+            "unknown kind": {"drawings": [{"id": "d", "kind": "fib", "points": []}]},
+            "wrong point count": {"drawings": [{"id": "d", "kind": "trend",
+                                                "points": [{"time": 1, "price": 2}]}]},
+            "fractional bar time": {"pins": [{"id": "p", "time": 1.5}]},
+            "unknown anchor": {"measures": [{"id": "m", "a": {"kind": "ghost"},
+                                             "b": {"kind": "candle", "time": 1}}]},
+            "duplicate id": {"drawings": [{"id": "x", "kind": "hline",
+                                           "points": [{"time": 1, "price": 2}]}],
+                             "pins": [{"id": "x", "time": 1}]},
+        }
+        for name, doc in bad_docs.items():
+            r = client.put("/api/chart-objects", headers=A, json={"key": KEY, "doc": doc})
+            assert r.status_code == 422, f"{name}: expected 422, got {r.status_code} {r.text[:160]}"
+        assert client.put("/api/chart-objects", headers=A,
+                          json={"key": "x" * 500, "doc": {}}).status_code == 422, \
+            "an unbounded chart key was accepted"
+
+        # NaN/Infinity have to be posted as RAW bytes: they are not legal JSON,
+        # so no compliant client encoder will emit them — but Python's json
+        # module PARSES them, which is exactly how one reaches the validator and
+        # then the database. A stored NaN makes the renderer's JSON.parse throw
+        # and takes out every chart for that key.
+        raw = ('{"key": "' + KEY + '", "doc": {"drawings": [{"id": "d", "kind": '
+               '"hline", "points": [{"time": 1, "price": NaN}]}]}}')
+        r = client.put("/api/chart-objects", headers={**A, "Content-Type": "application/json"},
+                       content=raw)
+        assert r.status_code == 422, f"a NaN price was accepted: {r.status_code} {r.text[:160]}"
+
+        # A corrupt row degrades to blank rather than crashing every chart.
+        with state.db() as db:
+            db.execute("INSERT INTO chart_objects (user_id, key, doc) VALUES (1,?,?)",
+                       ("BAD|1Day|$", "{not json"))
+        r = client.get("/api/chart-objects", headers=A, params={"key": "BAD|1Day|$"})
+        assert r.status_code == 200 and r.json()["doc"]["drawings"] == [], \
+            "a corrupt row must read as empty, not 500"
+
+    # -- 2. one vocabulary, two files ---------------------------------------
+    draw_src = (CODE / "app/src/renderer/src/components/ChartDraw.ts").read_text(
+        encoding="utf-8")
+
+    def _block(pattern: str, what: str) -> str:
+        m = re.search(pattern, draw_src, re.S)
+        assert m, f"ChartDraw.ts no longer declares {what} — this check cannot see drift"
+        return m.group(1)
+
+    kinds = set(re.findall(r"'(\w+)'", _block(r"export type DrawKind =([^\n]+)", "DrawKind")))
+    anchors = set(re.findall(
+        r"kind: '(\w+)'", _block(r"export type MeasureAnchor =(.*?)\n\n", "MeasureAnchor")))
+    axes = set(re.findall(
+        r"axis: '(\w+)'", _block(r"export type MeasurePlace =(.*?)\n\n", "MeasurePlace")))
+
+    assert kinds == set(co.DRAW_KINDS), (
+        f"drawing vocabulary drifted: engine {sorted(kinds)} vs "
+        f"backend {sorted(co.DRAW_KINDS)} — the new kind cannot be saved")
+    assert anchors == set(co.ANCHOR_KINDS), (
+        f"anchor vocabulary drifted: engine {sorted(anchors)} vs "
+        f"backend {sorted(co.ANCHOR_KINDS)}")
+    assert axes == set(co.PLACE_AXES), (
+        f"dimension axes drifted: engine {sorted(axes)} vs backend {sorted(co.PLACE_AXES)}")
+    assert set(co.POINTS_FOR) == set(co.DRAW_KINDS), \
+        "a DrawKind has no declared point count in chartobjects.POINTS_FOR"
+
+    m = re.search(r"export const CHART_DOC_VERSION = (\d+)", draw_src)
+    assert m and int(m.group(1)) == co.DOC_VERSION, (
+        f"doc version drifted: engine {m and m.group(1)} vs backend {co.DOC_VERSION} "
+        "— every saved chart would read back blank")
+
+    # The engine must not import the API: the checks above and _chart_time run
+    # it under plain node, and the window.grindstone bridge does not exist there.
+    assert "from '../api'" not in draw_src and 'from "../api"' not in draw_src, \
+        "ChartDraw.ts imports the API — persistence is INJECTED (chartStore.ts) so " \
+        "the engine stays runnable outside a browser"
+    for page in ("ChartsPage.tsx", "SymbolPage.tsx"):
+        src = (CODE / "app/src/renderer/src/pages" / page).read_text(encoding="utf-8")
+        assert "makeChartStore" in src and "store: chartStore" in src, \
+            f"{page} builds an engine with no store — its drawings die with the process"
+        assert "draw-save-err" in src, \
+            f"{page} cannot report a failed save, so lost drawings would be silent"
+
+    # -- 3. the engine's own load/save behaviour ----------------------------
+    app_dir = CODE / "app"
+    if not (app_dir / "node_modules" / "typescript").exists():
+        print("      (node_modules absent — npm install enables the engine probe)")
+        return
+    exe = _node_exe()
+    assert exe, "no node runtime on PATH — the persistence round-trip cannot be run"
+
+    probe = r"""
+import { ChartDraw, CHART_DOC_VERSION } from './src/renderer/src/components/ChartDraw.ts'
+const out = []
+const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail })
+const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms))
+
+// A store that records every call, so the assertions are about what the engine
+// ASKED FOR rather than about a mock's internal state.
+const mkStore = (docs, delayMs = 0) => ({
+  loads: [], saves: [],
+  load(key) {
+    this.loads.push(key)
+    return new Promise((r) => setTimeout(() => r(docs[key] ?? null), delayMs))
+  },
+  save(key, doc) {
+    this.saves.push({ key, doc: JSON.parse(JSON.stringify(doc)) })
+    return Promise.resolve()
+  },
+})
+
+// Only the CONSTRUCTOR touches the DOM (see _chart_time). An object with the
+// prototype plus the fields these methods read is a complete enough `this`;
+// render/applyCursor are own properties, which shadow the DOM-touching ones.
+const mkEngine = (key, store) =>
+  Object.assign(Object.create(ChartDraw.prototype), {
+    key, store, saveTimer: null, destroyed: false, changeCb: null,
+    tool: 'pointer', selected: [], hidden: false,
+    barsOpt: () => [],
+    series: { coordinateToPrice: (y) => 100 + y, priceToCoordinate: (p) => p - 100 },
+    teardown: [], host: { style: {} }, svg: { remove() {} }, labels: { remove() {} },
+    render() {}, applyCursor() {},
+  })
+
+// The ids a real FIRST session produces: mkId's counter starts at 1, so these
+// are exactly what a user's first three objects are called. Using high ids
+// here (dw7/ms8/pin9) makes the collision assertion below unfailable -- the
+// fresh counter would mint 'dw1', which collides with nothing in that set.
+// That false green is what this comment exists to stop coming back.
+const RESTORED = {
+  version: 1,
+  drawings: [{ id: 'dw1', kind: 'trend',
+               points: [{ time: 1700000000, price: 1 }, { time: 1700086400, price: 2 }] }],
+  measures: [{ id: 'ms2', a: { kind: 'candle', time: 1700000000 },
+               b: { kind: 'candle', time: 1700086400 } }],
+  pins: [{ id: 'pin3', time: 1700000000 }],
+}
+
+const store = mkStore({ 'SPY|1Day': RESTORED })
+const e = mkEngine('SPY|1Day', store)
+e.hydrate()
+await settle(5)
+
+let s = e.getState()
+ok('a saved chart comes back', s.drawings === 1, s.drawings)
+ok('measures and pins come back too', s.measures === 2, s.measures)
+ok('hydrating is not itself a write', store.saves.length === 0, store.saves.length)
+
+// THE ID COLLISION: a fresh module counter starts at 1, so without adoptIds
+// the first new drawing is called 'dw1' -- the name a restored drawing already
+// has. The selection is a flat string[] matched by id, so the two would
+// select, drag and delete as one object.
+const restoredIds = new Set(['dw1', 'ms2', 'pin3'])
+e.clickHline(10, 20, 1700000000)
+const ids = e.bucket().drawings.map((d) => d.id)
+ok('a new object cannot reuse a restored id',
+   ids.length === 2 && !restoredIds.has(ids[1]), ids.join(','))
+// The invariant itself, independent of which ids the stored doc happened to
+// use: no id may appear twice anywhere in the bucket.
+const b0 = e.bucket()
+const allIds = [...b0.drawings, ...b0.measures, ...b0.pins].map((o) => o.id)
+ok('every id in a restored chart is unique',
+   new Set(allIds).size === allIds.length, allIds.join(','))
+
+e.flushSave()
+ok('an edit is written', store.saves.length === 1, store.saves.length)
+const wrote = store.saves[0]
+ok('it writes the key it edited', wrote.key === 'SPY|1Day', wrote.key)
+ok('the written doc holds both drawings', wrote.doc.drawings.length === 2,
+   wrote.doc.drawings.length)
+ok('the doc is stamped with a version', wrote.doc.version === CHART_DOC_VERSION,
+   wrote.doc.version)
+// What you drew, not how you are looking at it.
+ok('no ui state is persisted',
+   !('tool' in wrote.doc) && !('selected' in wrote.doc) && !('hidden' in wrote.doc),
+   Object.keys(wrote.doc).join(','))
+
+// Every mutator emits, including selection. Writing on each would be a request
+// per click.
+e.selected = [ids[0]]
+e.emit()
+e.flushSave()
+ok('selecting something is not a change worth saving', store.saves.length === 1,
+   store.saves.length)
+
+// THE TAB SWITCH: the debounce timer is cancelled by the key change, so
+// without a flush the last drawing before the switch is simply gone.
+e.clickHline(10, 30, 1700000000)
+e.setKey('SPY|1Hour')
+ok('switching charts flushes the previous one',
+   store.saves.length === 2 && store.saves[1].key === 'SPY|1Day',
+   store.saves.map((x) => x.key).join(','))
+ok('and the new key is hydrated', store.loads.includes('SPY|1Hour'), store.loads.join(','))
+
+// THE UNMOUNT: same failure, different exit.
+const e2 = mkEngine('QQQ|1Day', store)
+e2.hydrate()
+await settle(5)
+e2.clickHline(10, 20, 1700000000)
+const before = store.saves.length
+e2.destroy()
+ok('destroy writes the pending edit',
+   store.saves.length === before + 1 && store.saves.at(-1).key === 'QQQ|1Day',
+   store.saves.at(-1).key)
+
+// A revisit inside the session reads memory: the bucket is NEWER than the
+// server whenever a save is still debouncing.
+const e3 = mkEngine('SPY|1Day', store)
+e3.hydrate()
+await settle(5)
+ok('a key is loaded at most once per session',
+   store.loads.filter((k) => k === 'SPY|1Day').length === 1, store.loads.join(','))
+ok('and the revisit still sees the objects', e3.getState().drawings === 3,
+   e3.getState().drawings)
+
+// THE RACE: a slow load that lands after the user has already drawn must not
+// replace their work with the older server copy.
+const slow = mkStore({ 'IWM|1Day': {
+  version: 1, drawings: [{ id: 'dwX', kind: 'hline',
+                           points: [{ time: 1700000000, price: 5 }] }],
+  measures: [], pins: [] } }, 30)
+const e4 = mkEngine('IWM|1Day', slow)
+e4.hydrate()
+e4.clickHline(10, 20, 1700000000)   // drawn while the request is in flight
+await settle(80)
+const raced = e4.bucket().drawings.map((d) => d.id)
+ok('an in-flight load never clobbers a fresh drawing',
+   raced.length === 1 && !raced.includes('dwX'), raced.join(','))
+
+console.log(JSON.stringify(out))
+"""
+    probe_path = app_dir / ".selftest-chartpersist.mjs"
+    try:
+        probe_path.write_text(probe, encoding="utf-8")
+        r = subprocess.run([exe, str(probe_path)], cwd=app_dir,
+                           capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, f"persistence probe crashed:\n{(r.stderr or r.stdout)[:1500]}"
+        results = json.loads(r.stdout.strip().splitlines()[-1])
+    finally:
+        probe_path.unlink(missing_ok=True)
+    bad = [x for x in results if not x["cond"]]
+    assert not bad, "the drawing engine's persistence is wrong:\n" + "\n".join(
+        f"  - {x['name']} (got {x['detail']})" for x in bad)
+    assert len(results) >= 16, f"the probe lost assertions: only {len(results)} ran"
+
+
 def main() -> int:
     passed = 0
     total = len(CHECKS)

@@ -17,7 +17,8 @@
   font-size: 12.5px;
 }
 /* A failed save is a visible state, not a silent shrug. */
-.mc-save-err {
+.mc-save-err,
+.draw-save-err {
   color: var(--loss);
 }
 

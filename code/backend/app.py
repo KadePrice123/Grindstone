@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import backtests as backtests_mod
+from . import chartobjects as chartobjects_mod
 from . import favorites as favorites_mod
 from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
@@ -542,6 +543,34 @@ def create_app(state: State) -> FastAPI:
         if not removed:
             raise HTTPException(404, "no such favorite")
         return {"ok": True}
+
+    # -------------------------------------------------------- chart objects
+    @app.get("/api/chart-objects")
+    def chart_objects_get(key: str = "", s=Depends(current_session)) -> dict[str, Any]:
+        """One chart's drawings. The key is a QUERY parameter, not a path
+        segment: it is the engine's bucket name ("SPY|1Day|$"), and '|' is not
+        a legal unescaped path character."""
+        try:
+            with state.db() as db:
+                return {"key": key, "doc": chartobjects_mod.get(db, s.user_id, key)}
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+
+    @app.put("/api/chart-objects")
+    def chart_objects_put(body: dict[str, Any],
+                          s=Depends(current_session)) -> dict[str, Any]:
+        try:
+            with state.db() as db:
+                doc = chartobjects_mod.put(db, s.user_id, body.get("key"),
+                                           body.get("doc"))
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        return {"key": body.get("key"), "doc": doc}
+
+    @app.get("/api/chart-objects/keys")
+    def chart_objects_keys(s=Depends(current_session)) -> dict[str, Any]:
+        with state.db() as db:
+            return {"charts": chartobjects_mod.list_keys(db, s.user_id)}
 
     # ------------------------------------------------------- gesture wheels
     @app.get("/api/wheels")

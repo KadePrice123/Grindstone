@@ -18,6 +18,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
+import { makeChartStore } from '../chartStore'
 import { Bar, Chart, ChartReadyApi, CompareLine } from '../components/Chart'
 import { ChartDraw, DrawTool } from '../components/ChartDraw'
 import { DrawEditor } from '../components/DrawEditor'
@@ -160,12 +161,16 @@ export function ChartsPage() {
   const [tool, setTool] = useState<DrawTool>('pointer')
   const [loadErr, setLoadErr] = useState<string | null>(null)
   const [saveErr, setSaveErr] = useState<string | null>(null)
+  const [drawSaveErr, setDrawSaveErr] = useState<string | null>(null)
   const [engine, setEngine] = useState<ChartDraw | null>(null)
   const [drawState, setDrawState] = useState<EngineState | null>(null)
   const [drawingsHidden, setDrawingsHidden] = useState(false)
 
   const dirty = useRef(false)
   const draw = useRef<ChartDraw | null>(null)
+  // Built once — handleChartReady is stable and the engine keeps the adapter
+  // for its whole life.
+  const chartStore = useMemo(() => makeChartStore(setDrawSaveErr), [])
   const toolRef = useRef(tool)
   toolRef.current = tool
   const drawHiddenRef = useRef(false)
@@ -325,6 +330,7 @@ export function ChartsPage() {
     // bars — snapshots went stale on refetch (build-flagged trap, closed).
     const d = new ChartDraw(drawKeyRef.current, chart, mainSeries, {
       bars: () => mainBarsRef.current,
+      store: chartStore,
     })
     d.setTool(toolRef.current)
     d.setDrawingsHidden(drawHiddenRef.current)
@@ -603,6 +609,12 @@ export function ChartsPage() {
             </button>
           </form>
           {saveErr ? <span className="subtle mc-save-err">layout not saved: {saveErr}</span> : null}
+          {/* Background save, so a failure has no other way to surface. */}
+          {drawSaveErr ? (
+            <span className="subtle draw-save-err" data-draw-save-err="1">
+              drawings not saved: {drawSaveErr}
+            </span>
+          ) : null}
         </div>
 
         <div className="mc-legend">
