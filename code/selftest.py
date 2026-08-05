@@ -2184,7 +2184,15 @@ def _frontend():
     exe = shutil.which("node")
     if not exe:
         portable = ROOT.parent.parent / "runtimes" / "node"
-        for cand in (portable / "node.exe", portable / "node"):
+        cands = [portable / "node.exe", portable / "node"]
+        # install.sh unpacks a private Node here and deliberately does NOT
+        # persist it to PATH (the app launches Electron directly and never
+        # needs node again). Without this, every standalone gate run after a
+        # Linux install — checkpoint.py included — would fail the assert below
+        # on a machine where the toolchain is in fact sitting right there.
+        cands += sorted((Path.home() / ".local/share/grindstone").glob("node-*/bin/node"),
+                        reverse=True)
+        for cand in cands:
             if cand.exists():
                 exe = str(cand)
                 break
