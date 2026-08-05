@@ -1687,6 +1687,66 @@ try {
   await pTool('Clear every drawing')
   await sleep(700) // clear is itself a save; let it land before measuring
 
+  // ---- a trend endpoint snaps onto an h-line, VISIBLY -----------------------
+  // Kade: "the lines dont snap together so its hard to tell when they actually
+  // get connected." The claim is not that the coordinate matches — that was
+  // already true and invisible — but that a joint marker appears where they
+  // meet. Asserted on the marker, because a price comparison alone would pass
+  // on exactly the version that prompted the complaint.
+  const pRect0 = await persistView
+    .eval(
+      `(() => { const b = document.querySelector('[data-draw-tool]').getBoundingClientRect();
+         return JSON.stringify({ x: b.x, y: b.y, w: b.width, h: b.height }) })()`
+    )
+    .then((s) => JSON.parse(s))
+  await pTool('Horizontal price line')
+  await sleep(200)
+  for (let i = 0; i < 3; i++) {
+    await persistView.click(pRect0.x + pRect0.w * 0.5, pRect0.y + pRect0.h * 0.4)
+    await sleep(400)
+    if ((await pAttr('data-draw-count')) === '1') break
+  }
+  const hPlaced = (await pAttr('data-draw-count')) === '1'
+  // Two clicks for the trend, the second landing ON the h-line's row. Retried
+  // like placeTwo above: clicks lose the crosshair race on dense charts, and
+  // Escape's last rung DISARMS the tool, so each retry has to re-arm or it
+  // clicks into a dead engine. fy stays <= 0.70 — below that is the volume
+  // pane, and the engine ignores anything outside pane 0.
+  for (let i = 0; i < 3; i++) {
+    await pTool('Trend line')
+    await sleep(200)
+    await persistView.click(pRect0.x + pRect0.w * 0.25, pRect0.y + pRect0.h * 0.68)
+    await sleep(350)
+    await persistView.click(pRect0.x + pRect0.w * 0.7, pRect0.y + pRect0.h * 0.4)
+    await sleep(500)
+    if ((await pAttr('data-draw-count')) === '2') break
+    await persistView.eval(
+      `document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))`
+    )
+    await sleep(200)
+  }
+  const joints = await persistView.eval(
+    `JSON.stringify({
+       joints: document.querySelectorAll('.cd-joint:not(.cd-joint-live)').length,
+       count: document.querySelector('[data-draw-tool]')?.getAttribute('data-draw-count'),
+       dof: document.querySelector('[data-draw-tool]')?.getAttribute('data-draw-dof') })`
+  ).then((s) => JSON.parse(s))
+  check(
+    hPlaced && joints.count === '2' && joints.joints >= 1,
+    'snap: a trend endpoint dropped on an h-line draws a joint where they meet',
+    JSON.stringify(joints)
+  )
+  // 1 hline + 1 trend = 5 coordinates; one 'on' merges two of them into one,
+  // so a bound figure reports 4. An unbound one would say 5 — which is how the
+  // DOF badge tells "connected" from "merely touching".
+  check(
+    joints.dof === '4',
+    'snap: and the relation shows up as one fewer degree of freedom',
+    `dof=${joints.dof} (5 means the endpoint only looks attached)`
+  )
+  await pTool('Clear every drawing')
+  await sleep(700)
+
   // Place one h-line by hand, then wait for the debounced write.
   await pTool('Horizontal price line')
   await sleep(200)

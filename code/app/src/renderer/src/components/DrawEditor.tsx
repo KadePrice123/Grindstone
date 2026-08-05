@@ -285,6 +285,28 @@ export function DrawEditor({
     />
   )
 
+  // A trend's SLOPE is a driving dimension, not a coordinate: locking it holds
+  // the angle of the line while both its ends stay free to move, so dragging an
+  // h-line makes the far end run out instead of tilting the line. Price per
+  // hour of chart time — never degrees, which would go false as the price scale
+  // drifts under an untouched chart.
+  const slopeLocked = engine.slopeLockOf(d.id)
+  const slopeNow = engine.slopeOf(d.id)
+  const slopeField =
+    d.kind === 'trend' && (slopeNow !== null || slopeLocked !== null) ? (
+      <Field
+        key={`${d.id}:slope:${slopeLocked ?? slopeNow}`}
+        label="Slope"
+        initial={fmtPrice(slopeLocked ?? slopeNow ?? 0)}
+        parse={parsePrice}
+        onCommit={(v) => engine.setSlopeLock(d.id, v)}
+        locked={slopeLocked !== null}
+        onToggleLock={() =>
+          engine.setSlopeLock(d.id, slopeLocked !== null ? null : (slopeNow ?? 0))
+        }
+      />
+    ) : null
+
   let fields: ReactNode
   if (d.kind === 'hline') {
     fields = priceField(0, 'Price')
@@ -300,6 +322,12 @@ export function DrawEditor({
         <div className="de-group">{gB}</div>
         {priceField(1, 'Price')}
         {timeField(1, 'Date')}
+        {slopeField ? (
+          <>
+            <div className="de-group">Shape</div>
+            {slopeField}
+          </>
+        ) : null}
       </>
     )
   }

@@ -38,7 +38,7 @@ PLACE_AXES = ("time", "price")
 # equalities (a typed slope or gap) arrive with the factorisation that can
 # honour them, not before — accepting a constraint the engine silently ignores
 # is a worse lie than not offering it.
-CONSTRAINT_KINDS = ("lock", "on")
+CONSTRAINT_KINDS = ("lock", "on", "slope")
 ENTITY_PARTS = ("line", "a", "b")
 
 # How many points each kind carries. trend/circle are two-point (circle is
@@ -253,6 +253,17 @@ def validate(doc: Any) -> dict[str, Any]:
                 _fail(f"constraint {cid}: a drawing cannot be held against itself")
         elif c.get("b") is not None:
             _fail(f"constraint {cid}: a {kind} names one thing, not two")
+        if kind == "slope":
+            # A driving slope carries a VALUE, and it is price per hour of chart
+            # time — never an angle. Degrees would rot the moment the price
+            # scale drifted, which it does with no user input at all.
+            if c.get("value") is None:
+                _fail(f"constraint {cid}: a driving slope needs a value")
+            out["value"] = _num(c.get("value"), f"constraint {cid}.value")
+            if out["a"]["part"] != "line" or out["a"].get("axis") is not None:
+                _fail(f"constraint {cid}: a slope drives a whole trend line")
+        elif c.get("value") is not None:
+            _fail(f"constraint {cid}: a {kind} carries no value")
         constraints.append(out)
 
     clean = {"version": DOC_VERSION, "drawings": drawings,

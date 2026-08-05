@@ -198,7 +198,7 @@ export interface InspectPin {
  *
  *  Both are EQUALITIES between coordinates, which is why this whole stage needs
  *  no matrix — see analyze(). */
-export type ConstraintKind = 'lock' | 'on'
+export type ConstraintKind = 'lock' | 'on' | 'slope'
 
 /** Which coordinate-carrying part of a drawing a constraint names. 'line' is a
  *  whole hline/vline — it IS one coordinate, so it has no endpoints, the same
@@ -222,13 +222,17 @@ export interface Constraint {
   a: EntityRef
   /** 'on' only: the line the point is held against. */
   b?: EntityRef
+  /** 'slope' only: price per HOUR OF CHART TIME, the unit the measure chips
+   *  already print. Never an angle — the price scale drifts with no user input
+   *  at all, so a stored degree would go false while you merely scroll. */
+  value?: number
 }
 
 /** Something the engine refused to do, or did with a caveat, in words meant for
  *  a person. Carried on DrawState so a page can show it: a constraint that
  *  silently fails to apply is the one outcome this feature cannot have. */
 export interface ConstraintIssue {
-  code: 'duplicate' | 'unknown' | 'unsupported' | 'blocked'
+  code: 'duplicate' | 'unknown' | 'unsupported' | 'blocked' | 'quantized'
   message: string
 }
 
@@ -357,12 +361,24 @@ export function analyze(drawings: Drawing[], constraints: Constraint[]): SketchA
     rep.set(s, r)
     reps.add(r)
   }
+  // A driving SLOPE is the first constraint here that is not an equality: it is
+  // one linear relation over a trend's four coordinates, so it removes one more
+  // degree of freedom. Independent unless every coordinate it touches is
+  // already pinned, in which case it constrains nothing that could still move.
+  // One per trend — a second is refused at admission, so this cannot double-count.
+  const driven = new Set<string>()
+  for (const c of constraints) {
+    if (c.kind !== 'slope' || c.value === undefined || driven.has(c.a.id)) continue
+    const d = byId.get(c.a.id)
+    if (!d || d.kind !== 'trend') continue
+    if (slotsOf(d).some((s) => parent.has(s) && !pinned.has(find(s)))) driven.add(c.a.id)
+  }
   return {
     rep,
     pinned,
     total: parent.size,
     classes: reps.size,
-    free: reps.size - pinned.size,
+    free: reps.size - pinned.size - driven.size,
   }
 }
 
@@ -1166,6 +1182,7 @@ export class ChartDraw {
       price: p.price,
     }))
     propagate(this.bucket().drawings, this.bucket().constraints, new Set([id]))
+    this.issue = this.restoreSlopes(new Set([id]))
     this.commit()
   }
 
@@ -1372,7 +1389,7 @@ export class ChartDraw {
       if (d) writeSlot(d, s, value)
     }
     if (!mine) this.addConstraint({ kind: 'lock', a: ref })
-    this.issue = null
+    this.issue = this.restoreSlopes(new Set([ref.id]))
     this.commit()
     return { ok: true }
   }
@@ -1447,6 +1464,146 @@ export class ChartDraw {
     const id = mkId('cn')
     b.constraints.push({ ...c, id })
     return { ok: true, id }
+  }
+
+  /** The live slope of a trend, in price per hour of chart time. */
+  slopeOf(id: string): number | null {
+    const d = this.bucket().drawings.find((x) => x.id === id)
+    if (!d || d.kind !== 'trend') return null
+    const mins = this.chartMinutes(d.points[0].time, d.points[1].time)
+    return mins === null ? null : slopePerHour(d.points[1].price - d.points[0].price, mins)
+  }
+
+  /** The slope this trend is driven to hold, or null if it floats. */
+  slopeLockOf(id: string): number | null {
+    const c = this.bucket().constraints.find((x) => x.kind === 'slope' && x.a.id === id)
+    return c?.value ?? null
+  }
+
+  /** Drive a trend's slope, or release it. This is the constraint Kade asked
+   *  for: "lock the trend angle / price action per time so when changing a
+   *  horizontal or vertical line's price the trend line stays the same but
+   *  follows the anchor line without changing the slope." */
+  setSlopeLock(id: string, value: number | null): { ok: true } | { ok: false; issue: ConstraintIssue } {
+    const b = this.bucket()
+    const d = b.drawings.find((x) => x.id === id)
+    if (!d || d.kind !== 'trend') {
+      return { ok: false, issue: { code: 'unsupported', message: 'Only a trend line has a slope.' } }
+    }
+    // Replace rather than stack: one driving slope per trend, so the DOF count
+    // cannot double-count and there is never a second value to disagree with.
+    b.constraints = b.constraints.filter((c) => !(c.kind === 'slope' && c.a.id === id))
+    if (value !== null) {
+      if (!Number.isFinite(value)) {
+        return { ok: false, issue: { code: 'unsupported', message: 'A slope must be a number.' } }
+      }
+      b.constraints.push({ id: mkId('cn'), kind: 'slope', a: { id, part: 'line' }, value })
+    }
+    // Hold the trend itself: setting a slope must move the OTHER end, not
+    // silently redefine the line you just dimensioned.
+    this.issue = this.restoreSlopes(new Set())
+    this.commit()
+    return { ok: true }
+  }
+
+  /** Restore every driven slope after something moved.
+   *
+   *  ONE PASS, and closed-form, because the relation is affine:
+   *      (p_b − p_a) = k · (i_b − i_a),   k = value · barMinutes / 60
+   *  Solving it is picking WHICH coordinate absorbs the change, which is an
+   *  ordering decision rather than a minimisation — a least-norm solve would
+   *  move lines the user never touched, and by an amount that depends on how
+   *  price and bars are weighted against each other.
+   *
+   *  The order is Kade's: the end drawn SECOND trails, the first is the anchor;
+   *  and time gives way before price, so a dragged h-line makes the diagonal
+   *  run out rather than dragging the other h-line with it. Anything pinned, and
+   *  anything the user is currently holding, is skipped — restoring a constraint
+   *  by undoing the drag that triggered it is not a fix. */
+  private restoreSlopes(held: Set<string>): ConstraintIssue | null {
+    const b = this.bucket()
+    const idx = this.barsIdx()
+    const per = this.barMinutes()
+    if (!idx || per === null) return null
+    const byId = new Map(b.drawings.map((d) => [d.id, d]))
+    let issue: ConstraintIssue | null = null
+
+    for (const c of b.constraints) {
+      if (c.kind !== 'slope' || c.value === undefined) continue
+      const d = byId.get(c.a.id)
+      if (!d || d.kind !== 'trend') continue
+      const ia = idx.map.get(d.points[0].time)
+      const ib = idx.map.get(d.points[1].time)
+      if (ia === undefined || ib === undefined) continue
+      const k = (c.value * per) / 60 // price per BAR — chart time is linear in index
+      const pa = d.points[0].price
+      const pb = d.points[1].price
+      if (Math.abs(pb - pa - k * (ib - ia)) < 1e-9) continue // already true
+
+      // Recomputed per constraint: an earlier restore may have moved something.
+      const a = analyze(b.drawings, b.constraints)
+      const usable = (slot: string): boolean => {
+        const r = a.rep.get(slot)
+        if (r === undefined || a.pinned.has(r)) return false
+        // Nothing in the class may belong to what the user is holding.
+        for (const [s, rr] of a.rep) if (rr === r && held.has(slotOwner(s))) return false
+        return true
+      }
+      const write = (slot: string, v: number): void => {
+        const r = a.rep.get(slot)
+        for (const [s, rr] of a.rep) {
+          if (rr !== r) continue
+          const od = byId.get(slotOwner(s))
+          if (od) writeSlot(od, s, v)
+        }
+      }
+
+      // k === 0 is a flat line: the index terms vanish, so only a price can
+      // satisfy it. No division by zero exists anywhere in this block.
+      const byIndex = k !== 0
+      const cands: { slot: string; value: number; index: boolean }[] = []
+      if (byIndex) {
+        cands.push({ slot: `${d.id}:b:i`, value: ia + (pb - pa) / k, index: true })
+        cands.push({ slot: `${d.id}:a:i`, value: ib - (pb - pa) / k, index: true })
+      }
+      cands.push({ slot: `${d.id}:b:p`, value: pa + k * (ib - ia), index: false })
+      cands.push({ slot: `${d.id}:a:p`, value: pb - k * (ib - ia), index: false })
+
+      const pick = cands.find((x) => usable(x.slot))
+      if (!pick) {
+        issue = {
+          code: 'blocked',
+          message: `The slope is locked at ${c.value.toFixed(4)} and nothing is free to absorb the change. Unlock something to move this.`,
+        }
+        continue
+      }
+      if (!pick.index) {
+        write(pick.slot, pick.value)
+        continue
+      }
+      // An index has to land on a real bar. barIndexOf REPORTS running off the
+      // loaded history rather than clamping to the last bar and pretending.
+      const landed = barIndexOf(pick.value, idx.times.length)
+      if (!('i' in landed)) {
+        issue = {
+          code: 'blocked',
+          message: `Holding that slope needs a bar ${landed.byBars} past the ${landed.side === 'after' ? 'end' : 'start'} of the loaded history.`,
+        }
+        continue
+      }
+      write(pick.slot, idx.times[landed.i])
+      // Bars are a lattice, so the slope can only be hit exactly when the
+      // solution happens to be a whole bar. Say so rather than quietly
+      // realising a different number than the one on screen.
+      const got = this.slopeOf(d.id)
+      if (got !== null && Math.abs(got - c.value) > Math.abs(c.value) * 1e-6 + 1e-9) {
+        issue = {
+          code: 'quantized',
+          message: `Slope ${got.toFixed(4)} — ${c.value.toFixed(4)} falls between bars.`,
+        }
+      }
+    }
+    return issue
   }
 
   /** Which of the wanted drawings a drag may actually move, and why not if not.
@@ -2246,6 +2403,21 @@ export class ChartDraw {
     return d && (d.kind === 'hline' || d.kind === 'vline') ? d : null
   }
 
+  /** Where a trend endpoint would ACTUALLY land, in pixels, given the line
+   *  under the cursor. The preview draws to this rather than to the raw cursor,
+   *  so the rubber band visibly jumps onto the line before you commit — the
+   *  same "magnet is visible before the click" the measure tool already has. */
+  private snapToLine(x: number, y: number): { x: number; y: number; host: Drawing } | null {
+    const host = this.lineUnder(x, y)
+    if (!host) return null
+    if (host.kind === 'hline') {
+      const hy = this.yForPrice(host.points[0].price)
+      return hy === null ? null : { x, y: hy, host }
+    }
+    const hx = this.xForTime(host.points[0].time)
+    return hx === null ? null : { x: hx, y, host }
+  }
+
   private clickTwoPoint(x: number, y: number, time: UTCTimestamp | null): void {
     // Whitespace right of the last bar has no time — nothing to anchor to.
     // The preview dims out there so the dead zone is visible before the click.
@@ -2356,7 +2528,11 @@ export class ChartDraw {
     if (moved) {
       // Equalities re-satisfied every frame, so the attached trend stretches
       // WHILE you drag rather than snapping into place on mouseup.
-      propagate(b.drawings, b.constraints, new Set(this.drag.ids))
+      const grabbed = new Set(this.drag.ids)
+      propagate(b.drawings, b.constraints, grabbed)
+      // Slopes AFTER equalities: an endpoint riding an h-line has to have taken
+      // its new price before the slope can work out where the far end goes.
+      this.issue = this.restoreSlopes(grabbed)
       this.render()
     }
   }
@@ -2685,6 +2861,9 @@ export class ChartDraw {
         })
         if (locked.has(d.id)) this.renderLock(d)
       }
+      // After every drawing, so a joint is never buried under the lines that
+      // meet at it — which is exactly where it is least visible and most needed.
+      this.renderJoints(b)
       for (const m of b.measures) this.renderMeasure(pane, m)
       for (const pin of b.pins) this.renderPin(pane, pin)
     }
@@ -2700,6 +2879,45 @@ export class ChartDraw {
     this.renderPreview(pane)
     // Frame complete — swap the chip hit-zones in atomically.
     this.hotZones = this.zoneDraft
+  }
+
+  /** The "held here" marker.
+   *
+   *  ONE glyph for both the live snap preview and the placed relation, and that
+   *  is the whole point: what you saw hovering is what stays, so a connected
+   *  endpoint is recognisable at a glance — and, just as importantly, so is one
+   *  that only LOOKS close. Dashed while it is still a proposal, solid once it
+   *  is real, which is the same preview idiom the trim and placement previews
+   *  already use. */
+  private renderJoint(x: number, y: number, live: boolean): void {
+    // Classed so a test can tell a live proposal from a committed joint. A
+    // count alone could not: the whole claim is that the two look the same and
+    // mean different things.
+    this.el('circle', {
+      class: live ? 'cd-joint cd-joint-live' : 'cd-joint',
+      cx: x,
+      cy: y,
+      r: 5.5,
+      fill: 'var(--surface)',
+      stroke: STROKE,
+      'stroke-width': 1.75,
+      ...(live ? { 'stroke-dasharray': '3 2' } : {}),
+    })
+    this.el('circle', { cx: x, cy: y, r: 1.8, fill: STROKE })
+  }
+
+  /** Every endpoint currently held onto a line. Drawn after the geometry so a
+   *  joint is never hidden under the lines that meet at it. */
+  private renderJoints(b: Bucket): void {
+    const byId = new Map(b.drawings.map((d) => [d.id, d]))
+    for (const c of b.constraints) {
+      if (c.kind !== 'on') continue
+      const d = byId.get(c.a.id)
+      if (!d) continue
+      const pt = d.points[c.a.part === 'b' ? 1 : 0]
+      const at = pt ? this.project(pt) : null
+      if (at) this.renderJoint(at.x, at.y, false)
+    }
   }
 
   /** A padlock at the drawing's handle. CAD shows constrained geometry in a
@@ -3012,6 +3230,15 @@ export class ChartDraw {
       }
       case 'trend':
       case 'circle': {
+        // THE MAGNET, VISIBLE BEFORE THE CLICK — and before the FIRST click
+        // too, which is why this sits above the pendingPt guard. Without it the
+        // snap only became apparent after both ends were down, so there was no
+        // way to tell a connected endpoint from one that merely looked close.
+        const snap = this.tool === 'trend' && cur ? this.snapToLine(cur.x, cur.y) : null
+        if (snap) {
+          this.highlightDrawing(pane, snap.host)
+          this.renderJoint(snap.x, snap.y, true)
+        }
         if (this.pendingPt === null) return
         const a = this.project(this.pendingPt)
         if (!a) return
@@ -3020,7 +3247,9 @@ export class ChartDraw {
         const dead = cur.time === null
         const op = dead ? 0.35 : 1
         if (this.tool === 'trend') {
-          this.line(a, cur, STROKE, 1.5, true, op)
+          // Drawn to the SNAPPED point, so the band jumps onto the line under
+          // the cursor instead of trailing a few pixels off it.
+          this.line(a, snap ?? cur, STROKE, 1.5, true, op)
         } else {
           this.el('ellipse', {
             cx: a.x, cy: a.y,

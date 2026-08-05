@@ -2928,6 +2928,18 @@ def _chart_constraints():
         assert got["constraints"][0]["b"] == {"id": "dw1", "part": "line"}, got["constraints"]
         assert got["constraints"][1]["a"]["axis"] == "price", got["constraints"]
 
+        # A driving slope round-trips with its value intact. The enum drift
+        # check structurally cannot see a dropped scalar, and validate()'s
+        # whitelist normalization produces exactly the "works all session, gone
+        # after restart, no error anywhere" failure.
+        drive = {**doc, "constraints": [
+            {"id": "cn7", "kind": "slope", "a": {"id": "dw2", "part": "line"},
+             "value": 0.076923}]}
+        rr = client.put("/api/chart-objects", headers=A, json={"key": KEY, "doc": drive})
+        assert rr.status_code == 200, rr.text
+        kept = client.get("/api/chart-objects", headers=A, params={"key": KEY}).json()["doc"]
+        assert kept["constraints"][0]["value"] == 0.076923, kept["constraints"]
+
         bad = {
             "dangling reference": {**doc, "constraints": [
                 {"id": "cn4", "kind": "lock", "a": {"id": "nope", "part": "line"}}]},
@@ -2949,6 +2961,17 @@ def _chart_constraints():
             "lock given a second reference": {**doc, "constraints": [
                 {"id": "cn4", "kind": "lock", "a": {"id": "dw1", "part": "line"},
                  "b": {"id": "dw2", "part": "line"}}]},
+            "slope with no value": {**doc, "constraints": [
+                {"id": "cn4", "kind": "slope", "a": {"id": "dw2", "part": "line"}}]},
+            "slope on a coordinate rather than a line": {**doc, "constraints": [
+                {"id": "cn4", "kind": "slope",
+                 "a": {"id": "dw2", "part": "line", "axis": "price"}, "value": 0.5}]},
+            "slope with a non-finite value": {**doc, "constraints": [
+                {"id": "cn4", "kind": "slope", "a": {"id": "dw2", "part": "line"},
+                 "value": None}]},
+            "lock carrying a value": {**doc, "constraints": [
+                {"id": "cn4", "kind": "lock", "a": {"id": "dw1", "part": "line"},
+                 "value": 0.5}]},
             "unknown axis": {**doc, "constraints": [
                 {"id": "cn4", "kind": "lock",
                  "a": {"id": "dw1", "part": "line", "axis": "sideways"}}]},
@@ -2978,6 +3001,27 @@ def _chart_constraints():
     # replaces a drawing with new ones and would otherwise leave a lock behind.
     assert "this.pruneConstraints(this.bucket())" in draw_src, \
         "commit() no longer prunes dangling constraints — trim and delete would leave them"
+
+    # A snap the user cannot see is a snap they cannot trust: Kade reported
+    # exactly that ("the lines dont snap together so its hard to tell when they
+    # actually get connected"). Three things carry the feedback and each can be
+    # deleted independently, so each is named here.
+    assert "this.renderJoints(b)" in draw_src, \
+        "placed 'on' relations draw no joint marker — a connection would be invisible"
+    assert "this.snapToLine(cur.x, cur.y)" in draw_src, \
+        "the trend preview no longer previews the snap, so it is only visible after the click"
+    assert "this.line(a, snap ?? cur," in draw_src, \
+        "the rubber band tracks the raw cursor again, so it trails off the line it will snap to"
+    assert draw_src.count("cd-joint") >= 1, "the joint marker is unfindable from the DOM"
+
+    # WIRING, not behaviour: the probe below calls restoreSlopes directly, so it
+    # proves the solve is right and says nothing about it being reached. A
+    # driven slope that is only restored when something else calls it is a lock
+    # that holds until the moment you actually move something.
+    assert "this.issue = this.restoreSlopes(grabbed)" in draw_src, \
+        "dragging no longer restores driven slopes"
+    assert draw_src.count("this.restoreSlopes(") >= 4, \
+        "a slope-restoring path was dropped (drag, exact edit, typed value, set-slope)"
 
     # -- 3. the engine's own arithmetic and behaviour ------------------------
     app_dir = CODE / "app"
@@ -3188,6 +3232,97 @@ ok('and the refusal names what is holding it',
    refused.issue && /hline/.test(refused.issue.message), refused.issue && refused.issue.message)
 ok('and nothing moved', bC.drawings[1].points[0].price === 600, bC.drawings[1].points[0].price)
 
+// ---- a DRIVEN SLOPE: the first constraint that is not an equality ---------
+// Kade: "lock the trend angle / price action per time so when changing a
+// horizontal or vertical line's price the trend line stays the same but follows
+// the anchor line without changing the slope."
+//
+// Real bars, because the solve converts price-per-HOUR to price-per-BAR through
+// the timeframe: on 1Day, one bar is 390 chart-minutes = 6.5 hours.
+const day = (i) => ({ ts: new Date(Date.UTC(2024, 0, 2 + i, 14, 30)).toISOString() })
+const bars = Array.from({ length: 40 }, (_, i) => day(i))
+const secOf = (i) => Math.floor(Date.parse(bars[i].ts) / 1000)
+
+const eS = mkEngine('SLOPE|1Day')
+eS.barsOpt = () => bars
+const bS = eS.bucket()
+bS.drawings.push(
+  { id: 'h1', kind: 'hline', points: [{ time: secOf(0), price: 600 }] },
+  { id: 'h2', kind: 'hline', points: [{ time: secOf(0), price: 604 }] },
+  { id: 'tr', kind: 'trend',
+    points: [{ time: secOf(10), price: 600 }, { time: secOf(18), price: 604 }] }
+)
+eS.addConstraint({ kind: 'on', a: { id: 'tr', part: 'a' }, b: { id: 'h1', part: 'line' } })
+eS.addConstraint({ kind: 'on', a: { id: 'tr', part: 'b' }, b: { id: 'h2', part: 'line' } })
+
+// $4 over 8 bars x 6.5 chart-hours = 52 hours -> 0.076923 $/h, i.e. $0.50/bar.
+const s0 = eS.slopeOf('tr')
+ok('the live slope is price per hour of CHART time',
+   Math.abs(s0 - 4 / 52) < 1e-9, s0)
+ok('two on-relations leave 4 degrees of freedom',
+   eS.getState().dof.free === 4, JSON.stringify(eS.getState().dof))
+
+eS.setSlopeLock('tr', s0)
+ok('driving the slope removes one more degree of freedom',
+   eS.getState().dof.free === 3, JSON.stringify(eS.getState().dof))
+
+// THE ASK: move an h-line and the trend keeps its slope, running the far end
+// out to match rather than tilting.
+bS.drawings[1].points[0].price = 610          // h2 dragged +$6 (was 604)
+propagate(bS.drawings, bS.constraints, new Set(['h2']))
+const iss = eS.restoreSlopes(new Set(['h2']))
+ok('the endpoint on the dragged line follows it',
+   bS.drawings[2].points[1].price === 610, bS.drawings[2].points[1].price)
+ok('the SLOPE is unchanged', Math.abs(eS.slopeOf('tr') - s0) < 1e-9, eS.slopeOf('tr'))
+// $10 gap at $0.50/bar = 20 bars, so the far end runs from bar 18 to bar 30.
+ok('and the far end ran out to match — bar 10 to bar 30',
+   bS.drawings[2].points[1].time === secOf(30),
+   `${(bS.drawings[2].points[1].time - secOf(0)) / 86400} days in`)
+ok('while the near end, the one drawn first, is the anchor',
+   bS.drawings[2].points[0].time === secOf(10), '')
+ok('and the untouched h-line never moved',
+   bS.drawings[0].points[0].price === 600, bS.drawings[0].points[0].price)
+ok('a clean solve reports nothing', iss === null, JSON.stringify(iss))
+
+// A slope that falls BETWEEN bars is realised on the nearest one and SAID so —
+// never silently rounded into a different number than the chip shows.
+bS.drawings[1].points[0].price = 610.25
+propagate(bS.drawings, bS.constraints, new Set(['h2']))
+const quant = eS.restoreSlopes(new Set(['h2']))
+ok('a slope between bars is reported, not silently rounded',
+   quant !== null && quant.code === 'quantized', JSON.stringify(quant))
+
+// BLOCKED: pin everything the solve could use and it must refuse in words.
+const eT = mkEngine('BLOCK|1Day')
+eT.barsOpt = () => bars
+const bT = eT.bucket()
+bT.drawings.push(
+  { id: 'h1', kind: 'hline', points: [{ time: secOf(0), price: 600 }] },
+  { id: 'tr', kind: 'trend',
+    points: [{ time: secOf(10), price: 600 }, { time: secOf(18), price: 604 }] }
+)
+eT.addConstraint({ kind: 'on', a: { id: 'tr', part: 'a' }, b: { id: 'h1', part: 'line' } })
+eT.setSlopeLock('tr', 0.5)
+eT.addConstraint({ kind: 'lock', a: { id: 'tr', part: 'b' } })
+eT.addConstraint({ kind: 'lock', a: { id: 'tr', part: 'a', axis: 'time' } })
+const stuck = eT.restoreSlopes(new Set(['h1']))
+ok('with nothing free to absorb it, the slope lock refuses in words',
+   stuck !== null && stuck.code === 'blocked' && /slope/i.test(stuck.message),
+   JSON.stringify(stuck))
+
+// A flat slope is a legal system, not an error: the index terms vanish, so a
+// PRICE satisfies it. Nothing in the solve divides by the slope.
+const eZ = mkEngine('ZERO|1Day')
+eZ.barsOpt = () => bars
+const bZ = eZ.bucket()
+bZ.drawings.push({ id: 'tr', kind: 'trend',
+  points: [{ time: secOf(4), price: 600 }, { time: secOf(12), price: 604 }] })
+eZ.setSlopeLock('tr', 0)
+ok('slope 0 is solved, not refused or divided by',
+   bZ.drawings[0].points[1].price === bZ.drawings[0].points[0].price,
+   `${bZ.drawings[0].points[0].price} vs ${bZ.drawings[0].points[1].price}`)
+ok('and it left the times alone', bZ.drawings[0].points[1].time === secOf(12), '')
+
 // ---- dangling constraints are pruned by commit() --------------------------
 bC.drawings = bC.drawings.filter((d) => d.id !== 'dw6')
 eC.commit()
@@ -3208,7 +3343,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the constraint model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 40, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 54, f"the probe lost assertions: only {len(results)} ran"
 
 
 def main() -> int:
