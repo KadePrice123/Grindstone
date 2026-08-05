@@ -11,8 +11,8 @@ Every open item, in one place. Details live in the dated sections below.
 
 | # | Item | Size |
 |---|---|---|
-| C1 | **Measure boxes still not clickable** — needs runtime diagnosis with F12, not more code review | unknown |
-| C2 | Plain left-click should select (Phase 3, never implemented) — needs a `hoverId` early-out or it breaks "nothing repaints at rest" | medium |
+| ~~C1~~ | ~~Measure boxes still not clickable~~ — **DONE 2026-08-05.** Never a picking bug: an e2e click on a placed measure passed first try with Select armed. It was C2 wearing a disguise — you had to arm a tool nobody armed. | |
+| ~~C2~~ | ~~Plain left-click should select~~ — **DONE 2026-08-05**, and the Select tool was removed with it. | |
 | C3 | Drag to move — genuinely unimplemented, the largest remaining piece | ~140 lines |
 | C4 | Per-drawing colour — `Drawing` has no style field | medium |
 | C5 | Tickers wheel does nothing — three stacked causes | medium |
@@ -38,6 +38,7 @@ Every open item, in one place. Details live in the dated sections below.
 | P2 | **macOS is untested** — add a GitHub Actions matrix (`macos-latest` is free) so it is built and gated every push | small |
 | P3 | Regenerate an Alpaca paper key and add it via Accounts — the old one was deleted with `env/` | trivial |
 | P4 | Order entry — every adapter is `order_entry: False`; the trading milestone flips it | large |
+| P5 | **e2e flake, cause unknown**: selecting the trend line mid-span failed 1 run in 6 (all seven `fanClick` offsets missed on an 8435-bar chart). A retry now absorbs it, but the underlying race is not understood — suspect the crosshair not having resolved when the click lands. Worth a real diagnosis before trusting a single green e2e run. | small |
 
 Roadmap-level work (AI layer, TastyTrade adapter, session restore, sidebar
 rail) is REQUIREMENTS.md §10, not this list.
@@ -158,7 +159,18 @@ Delete key deletes; the wheel lock survives a chart click.
 
 ## Not done yet — pick up here (charting)
 
-1. **Measure boxes are STILL not clickable.** Reported after the fix shipped,
+> **Items 1 and 2 are DONE (2026-08-05).** Left-click in Pointer now picks any
+> drawing, measurement or pin; the Select tool is gone entirely. Item 1 was
+> never a picking bug — an e2e click on a placed measure with Select armed
+> passed on the first attempt, and the label layer sat exactly on the canvas
+> origin, so all three candidates below were wrong. The real cause was item 2:
+> `handleClick` returned immediately in `pointer`, so a user who never armed
+> Select saw nothing happen and reported it as "not clickable". Kept below
+> because the reasoning is a useful record of how a mis-framed bug report
+> survived a green gate — the check that should have caught it greps
+> ChartDraw.ts for wiring that was correct the whole time.
+
+1. ~~**Measure boxes are STILL not clickable.**~~ Reported after the fix shipped,
    with the Select tool active. The wiring all reads correct, so this needs a
    RUNTIME diagnosis, not more code review. Verified already: `handleClick`
    routes `select` → `clickSelect` → `hitAny`; `zoneDraft` is reset at the top
@@ -175,7 +187,7 @@ Delete key deletes; the wheel lock survives a chart click.
         whether `handleClick` is entered at all.
    Clicking a measure's CONNECTOR LINE (not its chip) exercises a different
    branch of `hitAny`; testing that first splits the problem in half.
-2. **No auto-selection on left click.** This is the plan's Phase 3 and it was
+2. ~~**No auto-selection on left click.**~~ This is the plan's Phase 3 and it was
    never implemented — the default `pointer` tool returns immediately at the
    top of `handleClick`, so nothing is pickable without arming Select first.
    Kade wants plain left-click to select. NOTE the trap: naively deleting that

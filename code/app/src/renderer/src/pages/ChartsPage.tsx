@@ -47,17 +47,15 @@ const TIMEFRAMES: { key: string; label: string }[] = [
 /* Toolbar groups mirror the wheel's chart vocabulary exactly — every wheel
    action has a button twin, so the no-mouse path reaches everything. */
 const PLACE_TOOLS: { key: DrawTool; label: string; title: string }[] = [
-  { key: 'pointer', label: 'Ptr', title: 'Pointer — pan/zoom, no drawing' },
+  { key: 'pointer', label: 'Ptr', title: 'Pointer — click to select, drag to pan' },
   { key: 'trend', label: 'Line', title: 'Trend line — click two anchors' },
   { key: 'hline', label: 'H', title: 'Horizontal price line' },
   { key: 'vline', label: 'V', title: 'Vertical time line' },
   { key: 'circle', label: 'Circle', title: 'Circle — click center, then edge' },
 ]
-const SELECT_TOOL: { key: DrawTool; label: string; title: string } = {
-  key: 'select',
-  label: 'Sel',
-  title: 'Select drawings to edit or delete',
-}
+/* There is no Select button: plain left-click in Pointer picks whatever is
+   under it. A mode for selecting was a mode you always wanted on, and
+   forgetting to arm it read as "the measurements are not clickable". */
 const TRIM_TOOL: { key: DrawTool; label: string; title: string } = {
   key: 'trim',
   label: 'Trim',
@@ -75,7 +73,6 @@ const ARMABLE = [
   'hline',
   'vline',
   'circle',
-  'select',
   'trim',
   'measure',
   'inspect',
@@ -528,7 +525,6 @@ export function ChartsPage() {
             <div className="seg">
               {PLACE_TOOLS.map(toolBtn)}
               <span className="seg-sep" />
-              {toolBtn(SELECT_TOOL)}
               <button
                 className={`seg-btn${tool === 'delete' ? ' on' : ''}`}
                 title="Delete — removes the selection, or arms click-to-delete"

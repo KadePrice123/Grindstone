@@ -46,10 +46,14 @@ DOC_KEY = "gesture_wheels"
 # should adopt (v2: the chart wheel family; v3: the full charting toolset —
 # draw/measure/timeframe wheels, visibility toggles, select/delete/trim;
 # v4: the tickers wheel became the dynamic Favorites wheel, and page/web
-# favorites ride in 'link' segments). A stored doc with an older version is
-# regenerated from defaults — honest data loss, taken deliberately over
-# silently mixing old and new.
-DOC_VERSION = 4
+# favorites ride in 'link' segments; v5: the Select tool is gone — left-click
+# in Pointer picks whatever is under it — so the Draw wheel's SW slot became
+# Pointer and 'select' left CHART_TOOLS. The bump matters: a stored v4 doc
+# still carries a Select segment, and validation would now drop it silently,
+# leaving a hole in the wheel instead of a working button.
+# A stored doc with an older version is regenerated from defaults — honest
+# data loss, taken deliberately over silently mixing old and new.
+DOC_VERSION = 5
 
 MAX_WHEELS = 16
 MAX_SEGMENTS = 12
@@ -62,8 +66,9 @@ TIMEFRAMES = ("1Min", "5Min", "15Min", "1Hour", "1Day")
 # Chart actions a wheel segment can fire at the chart it was spawned over
 # (delivered to that view as a chart:action event; pages without a chart
 # handler simply ignore them). v3 vocabulary:
-#   drawing     pointer trend(free-angle) hline vline circle | select delete
-#               trim (the interacting set) | clear
+#   drawing     pointer(also selects: left-click picks what is under it)
+#               trend(free-angle) hline vline circle | delete trim
+#               (the interacting set) | clear
 #   measuring   measure(two snapped anchors) inspect(candle detail)
 #               clearmeasure
 #   indicators  ind:<key> toggles, settings (opens the period editor)
@@ -71,7 +76,7 @@ TIMEFRAMES = ("1Min", "5Min", "15Min", "1Hour", "1Day")
 #               all indicators), isolate (solo one ticker / restore),
 #               tf:<timeframe>
 CHART_TOOLS = ("pointer", "trend", "hline", "vline", "circle",
-               "select", "delete", "trim", "clear",
+               "delete", "trim", "clear",
                "measure", "inspect", "clearmeasure",
                "ind:vol", "ind:sma20", "ind:sma50", "ind:ema20", "ind:rsi14",
                "settings", "normalize", "vis:draw", "vis:ind", "isolate",
@@ -137,9 +142,16 @@ def default_doc() -> dict[str, Any]:
             # Ticker management groups under chart-tickers, which now also
             # navigates to Add symbol — one node owns show/hide/isolate/add.
             {
-                # The drawing wheel: the four shapes plus the INTERACTING
-                # tool set — select (multi), delete (selected or clicked),
-                # trim (SolidWorks-style, back to the nearest intersection).
+                # The drawing wheel: the four shapes plus the INTERACTING tool
+                # set — delete (selected or clicked) and trim (SolidWorks-
+                # style, back to the nearest intersection).
+                #
+                # No Pointer segment. The slot Select used to hold is simply
+                # gone rather than refilled: getting back to picking is what
+                # Escape does (ChartDraw's Escape ladder ends in
+                # setTool('pointer')), and a wheel slot that duplicates a key
+                # everyone already presses is worth less than one fewer slot
+                # to aim past.
                 "id": "chart-draw", "name": "Draw", "symbol": "✎", "builtin": True,
                 "segments": [
                     {"type": "chart", "tool": "trend", "label": "Line (any angle)"},  # N
@@ -147,22 +159,24 @@ def default_doc() -> dict[str, Any]:
                     {"type": "chart", "tool": "vline", "label": "V-line"},            # E
                     {"type": "chart", "tool": "circle", "label": "Circle"},           # SE
                     {"type": "wheel", "wheel": "chart", "label": "Chart"},            # S
-                    {"type": "chart", "tool": "select", "label": "Select"},           # SW
-                    {"type": "chart", "tool": "trim", "label": "Trim"},               # W
-                    {"type": "chart", "tool": "delete", "label": "Delete"},           # NW
+                    {"type": "chart", "tool": "trim", "label": "Trim"},               # SW
+                    {"type": "chart", "tool": "delete", "label": "Delete"},           # W
                 ],
             },
             {
                 # The measurement wheel: two-point measurements that snap to
                 # candles and lines (price Δ, date/bar Δ), candle inspection
                 # (size + volume), and cleanup.
+                # No Pointer segment: its only job was disarming, and Escape
+                # already does that (ChartDraw's Escape ladder ends in
+                # setTool('pointer')). A wheel slot that usually changes
+                # nothing visible is worse than one fewer slot.
                 "id": "chart-measure", "name": "Measure", "symbol": "⤢", "builtin": True,
                 "segments": [
                     {"type": "chart", "tool": "measure", "label": "Measure"},
                     {"type": "chart", "tool": "inspect", "label": "Inspect candle"},
                     {"type": "chart", "tool": "clearmeasure", "label": "Clear measures"},
                     {"type": "wheel", "wheel": "chart", "label": "Chart"},
-                    {"type": "chart", "tool": "pointer", "label": "Pointer"},
                 ],
             },
             {"id": "chart-add", "name": "Add symbol", "symbol": "+", "builtin": True,

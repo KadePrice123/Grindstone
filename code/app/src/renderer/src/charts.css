@@ -111,6 +111,20 @@
 .cd-chip.cd-pin {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
 }
+/* Left-click picks whatever is under it, so a measurement chip has to answer
+   two questions before the click: can I click this (cd-hot, on hover), and
+   did my click land (cd-sel). Border only — moving the box on hover would
+   shift the very target being aimed at. */
+/* No `cursor` here: this layer is pointer-events:none, so a chip is never the
+   pointer target and its cursor would never be consulted. ChartDraw's
+   applyCursor() puts the pointer cursor on the chart host instead. */
+.cd-chip.cd-hot {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.cd-chip.cd-sel {
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25), 0 0 0 1px var(--accent) inset;
+}
 
 /* ---- DrawEditor: the selected-object exact-value panel ------------------ */
 /* The pages wrap this in .float-panel (charttools.css), which owns the

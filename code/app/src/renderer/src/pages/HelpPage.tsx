@@ -295,18 +295,22 @@ const SECTIONS: Sec[] = [
     fig: TrimSvg,
     body: (
       <>
-        <p>Toolbar: <em>Ptr · Line · H · V · Circle | Sel · Del · Trim | Clear</em> —
+        <p>Toolbar: <em>Ptr · Line · H · V · Circle | Del · Trim | Clear</em> —
           the same tools live on the Chart wheel → <em>Draw</em>.</p>
         <ul>
+          <li><strong>Selecting needs no tool.</strong> In <strong>Ptr</strong> — the
+            default — just left-click a drawing, measurement or pinned candle. It
+            highlights as you hover so you can see what you are about to pick, and the
+            cursor turns into a hand. Clicking picks that one object and drops whatever
+            was held before; hold <kbd>Shift</kbd> (or <kbd>Ctrl</kbd>) to add to the
+            selection instead. Clicking empty space clears it, and so does <kbd>Esc</kbd>.
+            Picking <em>one</em> object opens exact-value boxes: price for an H-line, date
+            for a V-line, price + date per endpoint for lines and circles. Enter commits.</li>
           <li><strong>Line</strong> (any angle): click two anchors — a dashed preview with
             live Δprice/Δtime follows your cursor between them.</li>
           <li><strong>H / V</strong>: one click places a horizontal price line or vertical
             time line; the preview tracks the crosshair before you click.</li>
           <li><strong>Circle</strong>: click the center, then an edge point.</li>
-          <li><strong>Sel</strong>: click a drawing to select it (click several to
-            multi-select; empty space clears). Selecting <em>one</em> object opens exact-value
-            boxes: price for an H-line, date for a V-line, price + date per endpoint for
-            lines and circles. Enter commits.</li>
           <li><strong>Del</strong>: with a selection, deletes all of it; without one, deletes
             the drawing you click. <kbd>Delete</kbd> works too.</li>
           <li><strong>Trim</strong>: like SolidWorks — click a span of a line and only that

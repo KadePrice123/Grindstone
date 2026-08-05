@@ -1157,8 +1157,16 @@ def _gesture_wheels():
         f"the chart wheel is missing a tool-wheel navigation: {navs}"
     draw = next(w for w in doc["wheels"] if w["id"] == "chart-draw")
     draw_tools = {s.get("tool") for s in draw["segments"] if s["type"] == "chart"}
-    assert {"trend", "hline", "vline", "circle", "select", "delete", "trim"} <= draw_tools, \
-        f"the draw wheel is missing tools: {draw_tools}"
+    # No 'select' AND no 'pointer': Select was removed 2026-08-05, and the slot
+    # was not refilled with Pointer because Escape already disarms (the Escape
+    # ladder ends in setTool('pointer')). A wheel segment that duplicates a key
+    # press is worse than one fewer segment.
+    want_draw = {"trend", "hline", "vline", "circle", "delete", "trim"}
+    assert want_draw <= draw_tools, \
+        f"the draw wheel is missing {want_draw - draw_tools} (it has {draw_tools})"
+    assert not ({"select", "pointer"} & draw_tools), \
+        "the draw wheel got a select/pointer segment back - Escape is the way " \
+        "out of a tool, and a segment that only disarms is dead weight"
     measure = next(w for w in doc["wheels"] if w["id"] == "chart-measure")
     m_tools = {s.get("tool") for s in measure["segments"] if s["type"] == "chart"}
     assert {"measure", "inspect", "clearmeasure"} <= m_tools, \
@@ -1361,7 +1369,12 @@ def _chart_tools_v3():
 
     # The engine carries the full interacting tool set.
     draw = (rend / "components" / "ChartDraw.ts").read_text(encoding="utf-8")
-    for tool in ("trend", "hline", "vline", "circle", "select", "delete",
+    # No "select": the tool was removed 2026-08-05 (left-click in pointer
+    # picks). Leaving it in this list was a live false green — it passed only
+    # because the doc comment explaining the removal happens to contain the
+    # quoted token, so the gate asserted the OPPOSITE of the truth and would
+    # have failed the moment anyone reworded a comment.
+    for tool in ("pointer", "trend", "hline", "vline", "circle", "delete",
                  "trim", "measure", "inspect"):
         assert f"'{tool}'" in draw, f"the drawing engine lost the {tool} tool"
     for api_name in ("updateDrawing", "deleteSelected", "clearMeasures",
@@ -1432,6 +1445,65 @@ def _chart_selection():
     # directly and widening it would let "trim" resolve to a measurement.
     trim = draw.split("private clickTrim(")[1][:300]
     assert "hitTest(" in trim, "clickTrim must keep using the narrow hitTest"
+
+    # -- left-click selects, and there is no Select tool (2026-08-05) -------
+    # The 2026-08-04 fix widened picking but left selection behind a mode you
+    # had to arm. Forgetting to arm it is indistinguishable from a broken
+    # picker, which is exactly how "measures are not clickable" survived the
+    # check above: the wiring it greps for was correct the whole time. An e2e
+    # click on a placed measure now proves the behaviour end to end.
+    ids = draw.split("DRAW_TOOL_IDS = [")[1].split("]")[0]
+    assert "'select'" not in ids, \
+        "the select tool is back - plain left-click in pointer is the picker now"
+    sw = draw.split("switch (this.tool)")[1][:1200]
+    assert "case 'pointer':" in sw and "clickSelect" in sw.split("case 'pointer':")[1][:160], \
+        "pointer no longer routes to clickSelect - left-click stopped selecting"
+    # The switch arm is not enough on its own: the ORIGINAL bug was an early
+    # return ABOVE the switch, which the slice above cannot see. Restoring it
+    # would make every left-click in the resting tool a no-op again with the
+    # gate still green.
+    head = draw.split("private handleClick(")[1].split("switch (this.tool)")[0]
+    assert "'pointer') return" not in head, \
+        "handleClick returns early for pointer again - that is the original " \
+        "bug (nothing is pickable without arming a tool), and the case-arm " \
+        "assertion above passes right through it"
+
+    # Picking must respect visibility. render() skips everything when hidden,
+    # so a picker that does not would select invisible objects - and since
+    # pointer is the resting tool, any stray click could do it.
+    for fn in ("hitAny", "hitTest"):
+        seg = draw.split(f"private {fn}(")[1][:700]
+        assert "this.hidden" in seg, \
+            f"{fn} ignores this.hidden - a left-click can select, and Delete " \
+            f"can remove, a drawing the user cannot see"
+
+    # Plain click replaces, modifier adds. Toggling on every plain click made
+    # the resting gesture silently accumulate a multi-kind selection that the
+    # single-object editor's Delete button would then sweep.
+    sel = draw.split("private clickSelect(")[1][:900]
+    assert "downAdditive" in sel, \
+        "clickSelect toggles on every plain click again - selections accumulate " \
+        "invisibly and Delete takes more than the editor is showing"
+
+    # The repaint guard. Pointer is the app's RESTING tool and it now has to
+    # follow the crosshair to know what is under it; rendering unconditionally
+    # there is a full overlay rebuild at mouse-move rate. Only an id CHANGE may
+    # paint. (Measured 2026-08-01: a 60fps repaint loop cost 10.7% of a core.)
+    assert "hoverId" in draw, "the pointer-mode hover id is gone"
+    assert "if (id === this.hoverId) return" in draw, \
+        "pointer mode repaints on every crosshair move again - the unchanged-id " \
+        "early-out is what keeps the default tool free"
+
+    # No page may offer a Select button, and no wheel may offer the segment.
+    for page in ("ChartsPage", "SymbolPage"):
+        src = (CODE / f"app/src/renderer/src/pages/{page}.tsx").read_text(encoding="utf-8")
+        assert "'select'" not in src, f"{page} still offers a Select tool"
+    cat = (CODE / "app/src/renderer/src/wheelCatalog.ts").read_text(encoding="utf-8")
+    assert "chart:select" not in cat, "the wheel catalog still offers a Select segment"
+    wsrc = (CODE / "backend/wheels.py").read_text(encoding="utf-8")
+    tools = wsrc.split("CHART_TOOLS = (")[1].split(")")[0]
+    assert '"select"' not in tools, \
+        "backend still accepts a 'select' chart tool - a stored wheel could fire it"
 
     # -- one doomed set sweeps all three collections ------------------------
     seg = draw.split("deleteSelected(): void")[1][:600]
@@ -1555,10 +1627,17 @@ def _help_system():
                 f"Help·{section} ranks too low for {q!r}: position {rows.index(hit)}"
         con.close()
 
-    # The manual must name the REAL UI, not an imagined one.
-    for real in ("Trim", "Sel", "Clear M", "⇄", "Candles per chart",
+    # The manual must name the REAL UI, not an imagined one. "Sel" was in this
+    # list until 2026-08-05 and became the inverse of its own purpose: the
+    # button was deleted, the manual still described it, and this check kept
+    # the stale text green while failing anyone who fixed it. A required name
+    # is only safe while the thing it names exists.
+    for real in ("Trim", "Ptr", "Clear M", "⇄", "Candles per chart",
                  "Split with", "⦿", "Esc", "Timeframe", "Gesture wheels"):
         assert real in help_src, f"help content never mentions {real!r}"
+    for gone in ("Sel ·", "<strong>Sel</strong>"):
+        assert gone not in help_src, \
+            f"the manual still documents the removed Select button ({gone!r})"
     # ...and never a stale count or path that rots.
     assert "SELFTEST OK" not in help_src, "help must not hardcode the gate count"
 

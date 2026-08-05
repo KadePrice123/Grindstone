@@ -1030,9 +1030,22 @@ try {
   const drew = await placeTwo(0.30, 0.70, 0.60, 0.35, '1')
   check(drew, 'tools: two real clicks place a trend line')
 
-  // Select it mid-span: the editor appears with per-endpoint fields.
-  await toolBtn('Select drawings')
-  const selHit = await fanClick(0.45, 0.525, 'data-draw-selected', '1')
+  // Select it mid-span with a PLAIN left click — Pointer is the default tool
+  // and picking is what it does, so this also proves the trend tool disarms
+  // rather than drawing a second line on top of the first.
+  await toolBtn('Pointer')
+  await waitFor(async () => (await attr('data-draw-tool')) === 'pointer', 'pointer armed', 5000)
+  let selHit = await fanClick(0.45, 0.525, 'data-draw-selected', '1')
+  if (!selHit) {
+    // Measured 1 failure in 6 runs on this line, cause not identified — all
+    // seven fan offsets missed on an 8435-bar chart, the same crosshair race
+    // placeTwo already retries for. One retry rather than a wider fan, because
+    // a miss here is not cosmetic: Delete with nothing selected ARMS
+    // click-to-delete instead of deleting, so the single flake also failed
+    // both trim checks and left 10 drawings on the chart.
+    await sleep(500)
+    selHit = await fanClick(0.45, 0.525, 'data-draw-selected', '1')
+  }
   const selected = await waitFor(
     async () => {
       const n = await attr('data-draw-selected')
@@ -1099,6 +1112,88 @@ try {
     }
   }
   check(measured, 'tools: measure connects two real points')
+
+  // ---- can a PLACED measure be picked? -----------------------------------
+  // Trend-line selection is proven above; measure selection has never been
+  // exercised, which is exactly why "measures are not clickable" survived a
+  // green gate (selftest's chart-selection check greps ChartDraw.ts for the
+  // widened hitAny and passes on wiring that reads correct).
+  //
+  // The engine stores a measure's hot zone as the chip's {left,top,w,h}
+  // computed against the PANE, then positions that same chip inside
+  // this.labels using those numbers. So the zone is only where the user sees
+  // the chip if labels shares the canvas origin. Measure that first: if it is
+  // offset, every click misses by exactly this much and the click test below
+  // cannot tell you why on its own.
+  const geom = await chartView.eval(
+    `(() => {
+       const host = document.querySelector('[data-draw-tool]');
+       const chip = document.querySelector('.cd-chip');
+       const cv   = host && host.querySelector('canvas');
+       const lbl  = chip && chip.parentElement;
+       const r = (e) => { if (!e) return null; const b = e.getBoundingClientRect();
+         return { x: Math.round(b.x), y: Math.round(b.y),
+                  w: Math.round(b.width), h: Math.round(b.height) }; };
+       return { host: r(host), canvas: r(cv), labels: r(lbl), chip: r(chip),
+                zones: document.querySelectorAll('.cd-chip').length,
+                styled: chip ? chip.style.left + ',' + chip.style.top : null };
+     })()`
+  )
+  check(!!geom.chip, 'tools: a placed measure renders a chip in the DOM',
+    JSON.stringify(geom))
+
+  // NOT a chip-vs-hot-zone check: a measure's hot zone IS the chip's own rect
+  // (chip() returns the numbers it just wrote to style.left/top and
+  // renderMeasure spreads that same object into the zone list), so those two
+  // can never disagree and comparing them would always pass. What is worth
+  // asserting is that the label layer sits on the canvas origin, because the
+  // zone is stored in PANE coordinates while the click arrives in the same
+  // space - a skew here would offset every pick.
+  const originSkew = geom.labels && geom.canvas
+    ? { dx: geom.labels.x - geom.canvas.x, dy: geom.labels.y - geom.canvas.y }
+    : null
+  check(originSkew !== null && originSkew.dx === 0 && originSkew.dy === 0,
+    'tools: the label layer sits on the canvas origin (pane and click coords agree)',
+    `skew=${JSON.stringify(originSkew)} labels=${JSON.stringify(geom.labels)} canvas=${JSON.stringify(geom.canvas)}`)
+
+  // Now the click the user actually makes: NOTHING armed. Pointer is the
+  // default and picks on plain left-click, which is the whole point — there
+  // is no Select tool to forget to arm any more. Aim at the chip's own centre
+  // in page coordinates rather than a chart fraction, so a miss cannot be
+  // blamed on aiming at the wrong place.
+  await toolBtn('Pointer')
+  await sleep(200)
+  // data-draw-selected is a COUNT across every kind, and three trimmed
+  // drawings are still on screen from the trim block - two of them crossing
+  // near the chip. Asserting "selected === 1" would therefore go green if the
+  // click picked a LINE instead of the measure, i.e. exactly when measure
+  // picking is broken. Ask the DOM which chip carries cd-sel instead: only
+  // renderMeasure/renderPin apply it, so it can only mean a measure was hit.
+  const measureSelected = () =>
+    chartView.eval(`document.querySelectorAll('.cd-chip.cd-sel').length`)
+  let measurePicked = null
+  if (geom.chip) {
+    for (const [dx, dy] of [[0, 0], [0, -6], [0, 6], [-10, 0], [10, 0]]) {
+      await chartView.click(geom.chip.x + geom.chip.w / 2 + dx, geom.chip.y + geom.chip.h / 2 + dy)
+      await sleep(350)
+      if ((await measureSelected()) >= 1) { measurePicked = `chip+${dx},${dy}`; break }
+    }
+  }
+  check(!!measurePicked, 'tools: a placed measure is selected by a PLAIN left click',
+    measurePicked ?? `chip=${JSON.stringify(geom.chip)} cd-sel=${await measureSelected()} selected=${await attr('data-draw-selected')}`)
+
+  // Plain click REPLACES: clicking a drawing after the measure must leave one
+  // object held, not two. This is what stops the editor showing one object
+  // while Delete quietly takes several.
+  await fanClick(0.5, 0.5, 'data-draw-selected', '1')
+  const afterOther = await attr('data-draw-selected')
+  check(afterOther === '1', 'tools: a plain click replaces the selection rather than adding',
+    `selected=${afterOther} cd-sel=${await measureSelected()}`)
+  await chartView.eval(
+    `document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))`
+  )
+  await sleep(150)
+
   const clearedBtn = await toolBtn('Clear all measurements')
   const cleared = await waitFor(
     async () => ((await attr('data-measure-count')) === '0' ? 'ok' : null),

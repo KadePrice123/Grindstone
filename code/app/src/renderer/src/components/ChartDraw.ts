@@ -87,9 +87,13 @@ import type { Bar } from './Chart'
 // Public model
 // ---------------------------------------------------------------------------
 
+/** No 'select' tool: plain left-click in 'pointer' picks whatever is under it,
+ *  so a mode for it would be a mode you always want on. Removed 2026-08-05 —
+ *  needing to arm Select first is what "the measurements are not clickable"
+ *  actually was. */
 export const DRAW_TOOL_IDS = [
   'pointer', 'trend', 'hline', 'vline', 'circle',
-  'select', 'delete', 'trim', 'measure', 'inspect',
+  'delete', 'trim', 'measure', 'inspect',
 ] as const
 export type DrawTool = (typeof DRAW_TOOL_IDS)[number]
 export function isDrawTool(v: string): v is DrawTool {
@@ -324,6 +328,12 @@ export class ChartDraw {
    *  object, or to none. */
   private hotZones: HotZone[] = []
   private zoneDraft: HotZone[] = []
+  /** What the cursor is over in pointer mode, or null. This exists to keep the
+   *  default tool cheap: pointer now picks, so it has to follow the crosshair,
+   *  but re-rendering on every move would put a full overlay rebuild in the
+   *  app's resting mode. Rendering only when this ID *changes* means an idle
+   *  cursor over empty chart costs one hit-test per move and no paint. */
+  private hoverId: string | null = null
   private hidden = false
   private changeCb: ((s: DrawState) => void) | null = null
 
@@ -332,6 +342,8 @@ export class ChartDraw {
   private readonly labels: HTMLDivElement
   private readonly ro: ResizeObserver
   private downAt: XY | null = null
+  /** Was a modifier held on the mousedown that started this click? */
+  private downAdditive = false
   private teardown: (() => void)[] = []
 
   // bars index cache, keyed by array identity — pages hand the same array
@@ -393,11 +405,26 @@ export class ChartDraw {
     // clunkiness complaint). Pointer mode is an immediate no-op, so there is
     // no per-move cost at rest.
     const onMove = (p: MouseEventParams) => {
-      if (this.tool === 'pointer') return
       const ok = p.point !== undefined && (p.paneIndex ?? 0) === 0
       const next = ok
         ? { x: p.point!.x, y: p.point!.y, time: typeof p.time === 'number' ? p.time : null }
         : null
+      if (this.tool === 'pointer') {
+        // Pointer is the resting mode of the whole app, and it now picks, so
+        // it has to know what is under the cursor. Paint ONLY when that answer
+        // changes: an unconditional render here is a full overlay rebuild at
+        // crosshair rate, which is the cost the no-idle-repaint rule exists to
+        // avoid. Over empty chart the answer is null every time and nothing
+        // repaints at all.
+        this.cursor = next
+        const id = next ? (this.hitAny(next.x, next.y)?.id ?? null) : null
+        if (id === this.hoverId) return
+        this.hoverId = id
+        this.applyCursor() // pickable-vs-not has to reach the real cursor
+        this.render()
+        return
+      }
+      if (this.hoverId !== null) this.hoverId = null
       if (next === null && this.cursor === null) return
       this.cursor = next
       this.render()
@@ -411,6 +438,10 @@ export class ChartDraw {
     const onDown = (e: MouseEvent) => {
       const r = this.host.getBoundingClientRect()
       this.downAt = { x: e.clientX - r.left, y: e.clientY - r.top }
+      // The library's click params carry no modifier keys, and this mousedown
+      // is the only place a REAL MouseEvent reaches us before the click. Held
+      // here so clickSelect can tell "add to the selection" from "replace it".
+      this.downAdditive = e.shiftKey || e.ctrlKey || e.metaKey
     }
     this.host.addEventListener('mousedown', onDown)
     this.teardown.push(() => this.host.removeEventListener('mousedown', onDown))
@@ -657,7 +688,15 @@ export class ChartDraw {
   private applyCursor(): void {
     // Crosshair while any tool is armed: the cursor itself says "the chart
     // is a placement surface right now", pointer mode hands it back.
-    this.host.style.cursor = this.tool === 'pointer' ? '' : 'crosshair'
+    if (this.tool !== 'pointer') {
+      this.host.style.cursor = 'crosshair'
+      return
+    }
+    // Pointer picks, so the cursor must say when something is pickable. This
+    // has to live on the HOST: both overlay layers are pointer-events:none
+    // (clicks arrive through subscribeClick, not the DOM), so a chip is never
+    // the pointer target and a `cursor` rule on it is never consulted.
+    this.host.style.cursor = this.hoverId !== null ? 'pointer' : ''
   }
 
   private xForTime(t: UTCTimestamp): number | null {
@@ -820,6 +859,10 @@ export class ChartDraw {
     y: number,
     linesOnly = false
   ): { drawing: Drawing; dist: number; nx: number; ny: number; u: number } | null {
+    // Same rule as hitAny: an invisible drawing is not a target. This also
+    // stops trim cutting, and measure-snap snapping to, geometry the user
+    // cannot see.
+    if (this.hidden) return null
     const pane = this.paneSizeSafe()
     if (!pane) return null
     let best: { drawing: Drawing; dist: number; nx: number; ny: number; u: number } | null = null
@@ -865,7 +908,18 @@ export class ChartDraw {
    * than whichever array happened to be scanned first.
    */
   private hitAny(x: number, y: number): Hit | null {
+    // Hidden means hidden. render() skips every object when this.hidden, so
+    // picking must too, or a plain left-click in the resting tool selects
+    // something invisible: the editor opens for an object that is not on
+    // screen, and Delete then removes it with nothing to see. Harmless while
+    // selecting needed an armed tool; reachable from any click now.
+    if (this.hidden) return null
     const b = this.bucket()
+    // Nothing to hit: bail before paneSizeSafe(), the anchor projections and
+    // the ellipse sampler. Pointer is the resting tool and calls this on every
+    // crosshair move, so the empty chart - the state the app spends most of
+    // its life in - must cost three length checks and no allocation.
+    if (b.drawings.length === 0 && b.measures.length === 0 && b.pins.length === 0) return null
     for (const z of this.hotZones) {
       if (x < z.left || x > z.left + z.w || y < z.top || y > z.top + z.h) continue
       if (z.kind === 'measure') {
@@ -1125,7 +1179,9 @@ export class ChartDraw {
   // ---- click handling -----------------------------------------------------
 
   private handleClick(p: MouseEventParams): void {
-    if (this.tool === 'pointer') return
+    // 'pointer' no longer returns here: it IS the select tool now, so it needs
+    // the pan guard and pane check below just as much as a placement does — a
+    // drag-pan that ends over a drawing must not select it.
     // No point / another pane (RSI) = not a placement surface.
     if (p.point === undefined || (p.paneIndex ?? 0) !== 0) return
     if (
@@ -1149,7 +1205,7 @@ export class ChartDraw {
       case 'vline':
         this.clickVline(y, time)
         break
-      case 'select':
+      case 'pointer':
         this.clickSelect(x, y)
         break
       case 'delete':
@@ -1233,7 +1289,19 @@ export class ChartDraw {
       }
       return
     }
-    this.toggleSelect(hit.id)
+    // Plain click REPLACES, modifier-click adds. Toggling on every plain click
+    // was survivable while selecting needed an armed tool, but as the resting
+    // gesture it silently accumulates: click a measure, then a line, and the
+    // editor shows one object over a two-object selection whose Delete button
+    // takes both. Replace is also what every drawing program does.
+    if (this.downAdditive) {
+      this.toggleSelect(hit.id)
+      return
+    }
+    if (this.selected.length === 1 && this.selected[0] === hit.id) return
+    this.selected = [hit.id]
+    this.render()
+    this.emit()
   }
 
   private clickDelete(x: number, y: number): void {
@@ -1387,8 +1455,11 @@ export class ChartDraw {
 
     // Hover resolution feeds hover states INTO the object render below —
     // every interacting tool telegraphs its target before the click.
+    // hitTest is drawings-only and its callers (delete/trim) speak in lines.
+    // Pointer's hover is the wider one and rides on this.hoverId instead, so
+    // it can highlight a measurement or a pin too.
     const hover =
-      cur && (this.tool === 'select' || this.tool === 'delete' || this.tool === 'trim')
+      cur && (this.tool === 'delete' || this.tool === 'trim')
         ? this.hitTest(cur.x, cur.y, this.tool === 'trim')
         : null
     const trimPrev =
@@ -1404,7 +1475,7 @@ export class ChartDraw {
       for (const d of b.drawings) {
         this.renderDrawing(pane, d, {
           selected: this.selected.includes(d.id),
-          hover: this.tool === 'select' && hover?.drawing.id === d.id,
+          hover: this.hoverId === d.id,
           danger: dangerIds.has(d.id),
         })
       }
@@ -1518,7 +1589,14 @@ export class ChartDraw {
         })()
       : this.resolveAnchor(m.b)
     if (!A || !B) return
-    this.line(A, B, MEASURE_STROKE, 1.25, true)
+    // A measurement is pickable now, so it has to look pickable and look
+    // picked. Without this a click that landed was indistinguishable from one
+    // that missed, which is most of why "they are not clickable" persisted.
+    const picked = !liveB && this.selected.includes(m.id)
+    const hot = !liveB && !picked && this.hoverId === m.id
+    const ink = picked || hot ? STROKE : MEASURE_STROKE
+    const wide = picked ? 2 : 1.25
+    this.line(A, B, ink, wide, true)
     // Dimension end ticks, perpendicular to the connector.
     const len = Math.hypot(B.x - A.x, B.y - A.y)
     if (len > 1) {
@@ -1528,15 +1606,18 @@ export class ChartDraw {
         this.line(
           { x: e.x - px * 5, y: e.y - py * 5 },
           { x: e.x + px * 5, y: e.y + py * 5 },
-          MEASURE_STROKE,
-          1.25
+          ink,
+          wide
         )
       }
     }
-    this.el('circle', { cx: A.x, cy: A.y, r: 2, fill: MEASURE_STROKE })
-    this.el('circle', { cx: B.x, cy: B.y, r: 2, fill: MEASURE_STROKE })
+    this.el('circle', { cx: A.x, cy: A.y, r: 2, fill: ink })
+    this.el('circle', { cx: B.x, cy: B.y, r: 2, fill: ink })
     const rows = this.measureRows(m.a.kind, liveB ? liveB.anchor.kind : m.b.kind, A, B)
-    const box = this.chip((A.x + B.x) / 2, (A.y + B.y) / 2 - 10, rows, '', 0.5, 1, pane)
+    const box = this.chip(
+      (A.x + B.x) / 2, (A.y + B.y) / 2 - 10, rows,
+      picked ? 'cd-sel' : hot ? 'cd-hot' : '', 0.5, 1, pane
+    )
     // The chip IS the measurement's handle — it is what the eye reads as the
     // object, so it is what a click must resolve to. Only for a REAL stored
     // measure: liveB means this is the in-progress preview, which is not in
@@ -1566,11 +1647,19 @@ export class ChartDraw {
     const x = this.xForTime(pin.time)
     const yHigh = this.yForPrice(bar.high)
     if (x === null || yHigh === null) return
-    const box = this.chip(x, yHigh - 12, this.inspectRows(bar, pin.time), 'cd-inspect cd-pin', 0.5, 1, pane)
+    // Pins are pickable exactly like measures — and their chip is the largest
+    // one drawn, so it absorbs clicks over a big rectangle. It has to show the
+    // same two states, or a click that landed on a pin looks like a click that
+    // hit nothing while quietly joining it to the selection.
+    const picked = this.selected.includes(pin.id)
+    const hot = !picked && this.hoverId === pin.id
+    const cls = `cd-inspect cd-pin${picked ? ' cd-sel' : hot ? ' cd-hot' : ''}`
+    const box = this.chip(x, yHigh - 12, this.inspectRows(bar, pin.time), cls, 0.5, 1, pane)
     this.zoneDraft.push({ ...box, kind: 'pin', id: pin.id })
     // Stem from the chip down to the bar it belongs to — a floating box with
     // no stem stops meaning anything the moment two pins share a screen.
-    this.line({ x, y: box.top + box.h }, { x, y: yHigh - 2 }, MEASURE_STROKE, 1)
+    this.line({ x, y: box.top + box.h }, { x, y: yHigh - 2 },
+              picked || hot ? STROKE : MEASURE_STROKE, picked ? 1.75 : 1)
   }
 
   private renderPreview(pane: { width: number; height: number }): void {

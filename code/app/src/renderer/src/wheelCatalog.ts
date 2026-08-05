@@ -65,9 +65,9 @@ export const CATALOG: CatalogEntry[] = [
   { id: 'chart:circle', category: 'Chart · drawing', label: 'Circle',
     keywords: 'draw ellipse zone area highlight',
     segment: { type: 'chart', tool: 'circle', label: 'Circle' } },
-  { id: 'chart:select', category: 'Chart · drawing', label: 'Select',
-    keywords: 'pick multi edit adjust move choose',
-    segment: { type: 'chart', tool: 'select', label: 'Select' } },
+  // There is deliberately no Select entry here: left-click in Pointer already
+  // picks anything under it, so the Pointer segment IS the picking segment.
+  // Removed 2026-08-05.
   { id: 'chart:delete', category: 'Chart · drawing', label: 'Delete',
     keywords: 'remove erase selected lines',
     segment: { type: 'chart', tool: 'delete', label: 'Delete' } },
