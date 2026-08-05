@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -2166,12 +2167,32 @@ def _frontend():
     pkg = json.loads((app_dir / "package.json").read_text(encoding="utf-8"))
     assert pkg["name"] == "grindstone"
 
+    # Dependencies were never installed, so a typecheck is genuinely impossible.
+    # This is the ONLY honest reason to skip: both installers run `npm install`
+    # before the gate, so a real install never lands here.
     tsc = app_dir / "node_modules" / "typescript" / "bin" / "tsc"
-    node = CODE.parent.parent.parent / "runtimes" / "node" / "node.exe"
-    if not (tsc.exists() and node.exists()):
-        print("      (toolchain absent — file checks only; full typecheck needs node_modules)")
+    if not tsc.exists():
+        print("      (node_modules absent — file checks only; npm install enables the typecheck)")
         return
-    r = subprocess.run([str(node), str(tsc), "--noEmit"], cwd=app_dir,
+
+    # Resolve node the way every machine can: PATH first. This previously looked
+    # ONLY at <workspace>/runtimes/node/node.exe — three levels ABOVE the repo —
+    # so the typecheck silently no-opped on every clone except the one machine
+    # that happened to have that folder, and being `.exe` it could never run on
+    # Linux or macOS. It still counted `ok`, which made the gate report coverage
+    # it did not have. The portable copy stays as a fallback, now cross-platform.
+    exe = shutil.which("node")
+    if not exe:
+        portable = ROOT.parent.parent / "runtimes" / "node"
+        for cand in (portable / "node.exe", portable / "node"):
+            if cand.exists():
+                exe = str(cand)
+                break
+    # typescript is installed, so the toolchain was meant to be here. Skipping
+    # now would recreate exactly the false green this check exists to avoid.
+    assert exe, ("typescript is installed but no node runtime is on PATH — "
+                 "the typecheck would be skipped while still reporting ok")
+    r = subprocess.run([exe, str(tsc), "--noEmit"], cwd=app_dir,
                        capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, f"tsc failed:\n{(r.stdout or r.stderr)[:1500]}"
 

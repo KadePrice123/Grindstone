@@ -116,6 +116,14 @@ class State:
                     con.close()
                 LOG.info("market refresh done — universe %d, news %s",
                          self.universe.size, "refreshed" if creds else "skipped (no creds)")
+            except brokers_base.BrokerError as exc:
+                # An expected, actionable condition — rejected or missing keys,
+                # a broker outage. A full stack trace here reads as a crash to
+                # anyone who just ran the installer (the gate boots the app, so
+                # every keyless clone printed one), and buries the one line that
+                # actually tells them what to do. Unexpected faults still get
+                # the traceback below.
+                LOG.warning("market refresh skipped — %s", exc)
             except Exception:  # noqa: BLE001 — background refresh must not kill the app
                 LOG.exception("market refresh failed")
 

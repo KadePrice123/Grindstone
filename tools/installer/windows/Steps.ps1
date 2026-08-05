@@ -199,7 +199,15 @@ function Find-Python {
       "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe",
       "$env:ProgramFiles\Python3*\python.exe",
       "${env:ProgramFiles(x86)}\Python3*\python.exe",
-      "$env:SystemDrive\Python3*\python.exe")) {
+      "$env:SystemDrive\Python3*\python.exe",
+      # The Microsoft Store build. Its per-package folder is NOT the alias dir
+      # skipped above: the bare WindowsApps\python.exe stub is a dead reparse
+      # point that opens the Store, but this one is the real interpreter and
+      # builds a working venv. Without this the installer declares "no Python"
+      # on a machine that already has a perfectly good 3.12 and installs a
+      # second copy. Probed here rather than by running the stub, so a machine
+      # with no Store Python never gets a Store window thrown at it.
+      "$env:LOCALAPPDATA\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3*\python.exe")) {
     foreach ($p in @(Get-ChildItem $glob -ErrorAction SilentlyContinue)) {
       & $probe $p.FullName @()
     }
