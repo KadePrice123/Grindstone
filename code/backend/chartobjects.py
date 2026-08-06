@@ -194,7 +194,16 @@ def validate(doc: Any) -> dict[str, Any]:
         want = POINTS_FOR[kind]
         if len(pts) != want:
             _fail(f"drawing {did}: a {kind} needs {want} point(s), got {len(pts)}")
-        drawings.append({"id": did, "kind": kind,
+        # Minted BY a leg, so the engine may sweep it once nothing rides it.
+        # A bare FLAG, not an owner id: the sweep test is rider count, because
+        # a condor's four legs share one vline and sweeping it when the first
+        # is deleted would strand the other three. Absent on every hand-drawn
+        # line, which is precisely why those survive a leg's deletion.
+        owned = d.get("legOwned")
+        if owned is not None and not isinstance(owned, bool):
+            _fail(f"drawing {did}: legOwned must be true/false, got {owned!r}")
+        extra = {"legOwned": True} if owned else {}
+        drawings.append({**extra, "id": did, "kind": kind,
                          "points": [_point(p, f"drawing {did}") for p in pts]})
 
     measures: list[dict[str, Any]] = []
@@ -317,13 +326,32 @@ def validate(doc: Any) -> dict[str, Any]:
             "strike": strike, "dteTol": dte_tol, "strikeTol": strike_tol,
             "slot": slot,
         }
-        # A DANGLING hostId is legal — the measures policy. Shape-checked only:
+        # A DANGLING host id is legal — the measures policy. Shape-checked only:
         # the leg runs on its stored snapshot when the drawing is gone.
-        host = lg.get("hostId")
-        if host is not None:
-            if not isinstance(host, str) or not (1 <= len(host) <= MAX_ID):
-                _fail(f"leg {lid}: hostId must be an id, got {host!r}")
-            out_leg["hostId"] = host
+        #
+        # THREE id fields, because a leg has TWO hosts. `hostId` is the legacy
+        # single binding whose ROLE was inferred from the drawing's kind; that
+        # stopped working the moment a vline could drive the expiration while a
+        # trend drove the strike, since kind can no longer disambiguate intent.
+        # The role is now POSITIONAL — which field the id sits in — so no new
+        # vocabulary string exists to keep in lockstep. Legacy docs are folded
+        # at READ time by the engine, never rewritten, so DOC_VERSION holds.
+        for field in ("hostId", "timeHostId", "priceHostId"):
+            v = lg.get(field)
+            if v is not None:
+                if not isinstance(v, str) or not (1 <= len(v) <= MAX_ID):
+                    _fail(f"leg {lid}: {field} must be an id, got {v!r}")
+                out_leg[field] = v
+        # The strategy tag. It was validated nowhere and copied nowhere, so
+        # every condor lost its grouping on the first save — the four legs came
+        # back as four unrelated legs. The enum harvest cannot see a dropped
+        # scalar, which is exactly how it went missing; the gate now asserts an
+        # exact round-trip value instead.
+        grp = lg.get("group")
+        if grp is not None:
+            if not isinstance(grp, str) or not (1 <= len(grp) <= MAX_ID):
+                _fail(f"leg {lid}: group must be a short tag, got {grp!r}")
+            out_leg["group"] = grp
         legs.append(out_leg)
 
     clean = {"version": DOC_VERSION, "drawings": drawings,

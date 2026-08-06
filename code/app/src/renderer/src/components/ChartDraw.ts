@@ -126,6 +126,14 @@ export interface Drawing {
   id: string
   kind: DrawKind
   points: Pt[]
+  /** Minted BY a leg, so the engine may sweep it once nothing rides it.
+   *  A bare flag rather than an owner id: the sweep test is RIDER COUNT,
+   *  because a condor's four legs share one vline and sweeping it when the
+   *  first of them is deleted would strand the other three. Absent on every
+   *  line the user drew by hand — which is exactly why those survive a leg's
+   *  deletion, and why trimming a guide (new ids, no flag) demotes it to an
+   *  ordinary line. */
+  legOwned?: boolean
 }
 
 /** Measure anchors snap at click time and stay attached:
@@ -225,9 +233,20 @@ export interface OptionLeg {
   dteTol: number
   /** +- dollars accepted around the strike. */
   strikeTol: number
-  /** Drawing this leg rides, if any. May dangle after a delete/trim - the leg
-   *  then runs on its own stored strike/expiration. */
+  /** LEGACY single binding, whose ROLE was inferred from the drawing's kind.
+   *  That stopped being expressible the moment a vline could drive the
+   *  expiration while a TREND drove the strike: kind can no longer say which
+   *  was meant. Still READ forever (folded per-role at resolve time, so no
+   *  stored document is ever rewritten and DOC_VERSION never moves); written
+   *  by nothing after this change. */
   hostId?: string
+  /** The vline whose time IS this leg's expiration. */
+  timeHostId?: string
+  /** The hline (flat) or trend (sloping) whose price IS this leg's strike.
+   *  A trend is evaluated AT the time host's expiration, and that single
+   *  ordering is what makes "further DTE means the strike drops with the
+   *  trend" true rather than decorative. */
+  priceHostId?: string
   /** Strategy-instance tag: a condor is four legs sharing one group string.
    *  FLAT on purpose - a tag, never a container, so every existing consumer
    *  of the legs list keeps working and a group is just a filter over it. */
@@ -627,10 +646,25 @@ export interface DrawState {
   legs: ResolvedLeg[]
 }
 
+/** What the two hosts resolved to. `hosted` is kept as a DERIVED summary so
+ *  every existing consumer (the editors' "rides {hosted}" line, the chain
+ *  panel, the gate probe) is untouched; the price host wins when both drive,
+ *  because "rides trend" is the sentence that matters to a trader. */
+export interface LegResolution {
+  expiration: string
+  strike: number
+  timeHosted: 'vline' | null
+  priceHosted: 'hline' | 'trend' | null
+  /** The ids actually in force after the legacy fold. */
+  timeHostId?: string
+  priceHostId?: string
+  hosted: Drawing['kind'] | null
+}
+
 /** A leg as consumers see it: stored fields plus the host-resolved values and
  *  the exact window the options endpoint takes. */
 export interface ResolvedLeg extends OptionLeg {
-  resolved: { expiration: string; strike: number; hosted: Drawing['kind'] | null }
+  resolved: LegResolution
   window: { expFrom: string; expTo: string; strikeLo: number; strikeHi: number } | null
 }
 
@@ -1853,33 +1887,68 @@ export class ChartDraw {
    *  trend the price AT the leg's expiration, segment extrapolated. A dangling
    *  or unresolvable host leaves the stored snapshot in charge, the measures'
    *  degradation policy: the filter stays where it was, never vanishes. */
-  legResolved(leg: OptionLeg): { expiration: string; strike: number; hosted: Drawing['kind'] | null } {
+  legResolved(leg: OptionLeg): LegResolution {
     const b = this.bucket()
-    const host = leg.hostId ? b.drawings.find((d) => d.id === leg.hostId) : undefined
+    const find = (id?: string): Drawing | undefined =>
+      id ? b.drawings.find((d) => d.id === id) : undefined
+
+    // LEGACY FOLD, at READ time. A document saved before the two-host split
+    // carries one hostId whose role followed its kind. Folding here means no
+    // stored doc is ever rewritten to stay readable, so DOC_VERSION holds.
+    let timeId = leg.timeHostId
+    let priceId = leg.priceHostId
+    if (timeId === undefined && priceId === undefined && leg.hostId) {
+      const h = find(leg.hostId)
+      if (h?.kind === 'vline') timeId = leg.hostId
+      // hline, trend, or DANGLING: two of the three old kinds drove price, and
+      // a dangling host drives nothing, so the guess is unobservable.
+      else priceId = leg.hostId
+    }
+
+    // ---- 1. TIME FIRST: the expiration is what the price host is read AT.
     let expiration = leg.expiration
+    let timeHosted: 'vline' | null = null
+    const th = find(timeId)
+    if (th?.kind === 'vline') {
+      expiration = new Date(th.points[0].time * 1000).toISOString().slice(0, 10)
+      timeHosted = 'vline'
+    }
+
+    // ---- 2. PRICE, EVALUATED AT THAT EXPIRATION.
     let strike = leg.strike
-    let hosted: Drawing['kind'] | null = null
-    if (host?.kind === 'hline') {
-      strike = host.points[0].price
-      hosted = 'hline'
-    } else if (host?.kind === 'vline') {
-      expiration = new Date(host.points[0].time * 1000).toISOString().slice(0, 10)
-      hosted = 'vline'
-    } else if (host?.kind === 'trend') {
-      const idx = this.barsIdx()
-      const ia = idx?.map.get(host.points[0].time)
-      const ib = idx?.map.get(host.points[1].time)
-      const at = this.idxForDate(leg.expiration)
+    let priceHosted: 'hline' | 'trend' | null = null
+    const ph = find(priceId)
+    if (ph?.kind === 'hline') {
+      strike = ph.points[0].price
+      priceHosted = 'hline'
+    } else if (ph?.kind === 'trend') {
+      // idxForTime, NOT idx.map.get. That map is an EXACT loaded-bar hash, and
+      // snapDrawTime now stores EXTENDED-lattice times which are not in it — so
+      // once lines could be drawn past the last candle, a trend with an endpoint
+      // out there silently stopped driving its leg: hosted fell to null, the
+      // filter froze at its snapshot, and nothing on screen said why.
+      const ia = this.idxForTime(ph.points[0].time)
+      const ib = this.idxForTime(ph.points[1].time)
+      // The expiration resolved ONE STEP ABOVE, never leg.expiration. Reading
+      // the stored value instead makes the strike lag the expiration by a
+      // commit: drag the vline and the zone slides sideways at the OLD trend
+      // price, then jumps at mouseup. This single argument is the feature.
+      const at = this.idxForDate(expiration)
       const st =
-        ia !== undefined && ib !== undefined && at !== null
-          ? legStrikeOnTrend(ia, host.points[0].price, ib, host.points[1].price, at)
+        ia !== null && ib !== null && at !== null
+          ? legStrikeOnTrend(ia, ph.points[0].price, ib, ph.points[1].price, at)
           : null
       if (st !== null) {
         strike = st
-        hosted = 'trend'
+        priceHosted = 'trend'
       }
     }
-    return { expiration, strike, hosted }
+
+    return {
+      expiration, strike, timeHosted, priceHosted,
+      timeHostId: timeId, priceHostId: priceId,
+      hosted: priceHosted ?? timeHosted,
+    }
   }
 
   /** Fold every leg's resolved values back into its stored snapshot. Runs in
@@ -1888,10 +1957,25 @@ export class ChartDraw {
    *  and a later host deletion degrades to exactly there. */
   private syncLegs(b: Bucket): void {
     for (const leg of b.legs) {
-      if (!leg.hostId) continue
+      if (!leg.hostId && !leg.timeHostId && !leg.priceHostId) continue
       const r = this.legResolved(leg)
-      leg.strike = r.strike
+      // Both come from the one resolution above, so the ORDER of these two is
+      // not load-bearing — the sequencing that matters lives inside
+      // legResolved, where the price host is read at the time host's answer.
       leg.expiration = r.expiration
+      leg.strike = r.strike
+      // MIGRATE ON EVIDENCE, never on a guess: only once the legacy host has
+      // resolved against a LIVE drawing is its role known for certain. A
+      // dangling legacy id keeps its ambiguity and its snapshot, forever.
+      if (leg.hostId && !leg.timeHostId && !leg.priceHostId) {
+        if (r.timeHosted) {
+          leg.timeHostId = leg.hostId
+          delete leg.hostId
+        } else if (r.priceHosted) {
+          leg.priceHostId = leg.hostId
+          delete leg.hostId
+        }
+      }
     }
   }
 
@@ -1916,16 +2000,26 @@ export class ChartDraw {
     const b = this.bucket()
     const leg = b.legs.find((l) => l.id === id)
     if (!leg) return
-    if (leg.hostId !== undefined &&
-        (patch.strike !== undefined || patch.expiration !== undefined) &&
-        patch.hostId === undefined) {
-      const hosted = this.legResolved(leg).hosted
-      const strikeTyped = patch.strike !== undefined && (hosted === 'hline' || hosted === 'trend')
-      const expTyped = patch.expiration !== undefined && hosted === 'vline'
-      if (strikeTyped || expTyped) leg.hostId = undefined
+    // PER ROLE. Detaching both bindings because one value was typed is the bug
+    // the single hostId made unavoidable: typing a strike on a leg that also
+    // rides a vline would silently release its expiration too, and the next
+    // drag of that vline would quietly stop moving the filter.
+    const r = this.legResolved(leg)
+    const explicit = (k: 'hostId' | 'timeHostId' | 'priceHostId'): boolean => k in patch
+    if (patch.strike !== undefined && !explicit('priceHostId') && r.priceHosted) {
+      leg.priceHostId = undefined
+      if (leg.hostId && r.priceHostId === leg.hostId) leg.hostId = undefined
+    }
+    if (patch.expiration !== undefined && !explicit('timeHostId') && r.timeHosted) {
+      leg.timeHostId = undefined
+      if (leg.hostId && r.timeHostId === leg.hostId) leg.hostId = undefined
     }
     Object.assign(leg, patch)
-    if (patch.hostId === undefined && 'hostId' in patch) leg.hostId = undefined
+    // Explicit-clear twins: `undefined` in a patch is erased by Object.assign,
+    // so "detach this binding" has to be read from the KEY's presence.
+    for (const k of ['hostId', 'timeHostId', 'priceHostId'] as const) {
+      if (explicit(k) && patch[k] === undefined) leg[k] = undefined
+    }
     this.commit()
   }
 

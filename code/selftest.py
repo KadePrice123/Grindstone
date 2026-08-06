@@ -3125,7 +3125,13 @@ def _chart_legs():
     KEY = "SPY|1Day"
     LEG = {"id": "lg9", "side": "short", "right": "P", "expiration": "2026-09-18",
            "strike": 560.0, "dteTol": 3, "strikeTol": 5.0, "slot": 1,
-           "hostId": "gone-with-the-trend"}
+           "hostId": "gone-with-the-trend", "timeHostId": "dw7", "priceHostId": "dw8",
+           "group": "gp3"}
+    # A leg-minted guide. The flag is what lets the engine sweep it when no leg
+    # rides it any more, and it must survive the database or every restored
+    # chart leaks the lines its legs made.
+    GUIDE = {"id": "dw7", "kind": "vline", "legOwned": True,
+             "points": [{"time": 1789000000, "price": 560.0}]}
 
     # -- 1. store: round-trip, reachable legs-only doc, refusals -------------
     with tempfile.TemporaryDirectory() as tmp:
@@ -3137,7 +3143,7 @@ def _chart_legs():
         A = {**B, "Authorization": f"Bearer {token}"}
 
         r = client.put("/api/chart-objects", headers=A,
-                       json={"key": KEY, "doc": {"legs": [LEG]}})
+                       json={"key": KEY, "doc": {"legs": [LEG], "drawings": [GUIDE]}})
         assert r.status_code == 200, r.text
         back = client.get("/api/chart-objects", headers=A,
                           params={"key": KEY}).json()["doc"]
@@ -3148,6 +3154,15 @@ def _chart_legs():
             and got["strikeTol"] == 5.0 and got["slot"] == 1, got
         # The dangling hostId SURVIVED — measures policy, not constraints.
         assert got["hostId"] == "gone-with-the-trend", got
+        # EACH new field, by exact value. The vocabulary harvest compares enum
+        # unions and is structurally blind to a scalar the validator simply
+        # forgets to copy — which is exactly how `group` was lost: every condor
+        # came back from the database as four unrelated legs, and no check
+        # could see it because no vocabulary string had changed.
+        assert got["timeHostId"] == "dw7", got
+        assert got["priceHostId"] == "dw8", got
+        assert got["group"] == "gp3", got
+        assert back["drawings"][0].get("legOwned") is True, back["drawings"]
 
         # A legs-only doc is NOT empty: the row must exist after the save above.
         keys = client.get("/api/chart-objects/keys", headers=A).json()["charts"]
@@ -3163,6 +3178,9 @@ def _chart_legs():
             "absurd dteTol": {**LEG, "dteTol": 400},
             "negative strikeTol": {**LEG, "strikeTol": -1},
             "float slot": {**LEG, "slot": 1.5},
+            "numeric timeHostId": {**LEG, "timeHostId": 123},
+            "numeric priceHostId": {**LEG, "priceHostId": 123},
+            "numeric group": {**LEG, "group": 42},
         }
         for name, leg in bad.items():
             rr = client.put("/api/chart-objects", headers=A,
@@ -3387,8 +3405,69 @@ ok('a deleted host leaves the leg exactly where it was',
 ok('and the leg itself SURVIVES the deletion — measures policy, not pruning',
    b.legs.length === 1, b.legs.length)
 
-// An hline host drives the strike and leaves expiration alone.
-b.legs[0].hostId = 'h1'
+// ---- KADE'S SENTENCE, AS ARITHMETIC --------------------------------------
+// "if I want to go further DTE the strike must also drop with the trend line."
+// Two hosts on ONE leg: a vline gives the expiration, a FALLING trend gives the
+// strike AT that expiration. Move the vline alone and the strike must fall by
+// the trend's slope times the bar delta. Nothing else in the suite can see
+// this: with a single host, kind decided the role and the combination was
+// unrepresentable.
+const e2 = mkEngine('TH|1Day')
+e2.barsOpt = () => bars
+const b2 = e2.bucket()
+// A trend falling $2/bar, drawn across bars 10..20 and EXTRAPOLATED past both.
+b2.drawings.push({ id: 'tr2', kind: 'trend',
+  points: [{ time: day(10), price: 700 }, { time: day(20), price: 680 }] })
+b2.drawings.push({ id: 'vl2', kind: 'vline',
+  points: [{ time: day(30), price: 0 }] })
+const legT = e2.addLeg({ side: 'short', right: 'P',
+  expiration: new Date(day(30) * 1000).toISOString().slice(0, 10),
+  strike: 1, dteTol: 3, strikeTol: 5,
+  timeHostId: 'vl2', priceHostId: 'tr2' }).id
+const t1 = e2.legResolved(b2.legs.find((l) => l.id === legT))
+// bar 30 on a $2/bar decline from 700@bar10 -> 700 - 2*20 = 660
+ok('two hosts drive one leg: strike is the trend price AT the vline\'s date',
+   Math.abs(t1.strike - 660) < 1e-9, t1.strike)
+ok('and both roles are reported separately',
+   t1.timeHosted === 'vline' && t1.priceHosted === 'trend',
+   `${t1.timeHosted}/${t1.priceHosted}`)
+ok('while `hosted` still summarises as the PRICE host for existing consumers',
+   t1.hosted === 'trend', t1.hosted)
+
+// PUSH THE EXPIRATION OUT — move ONLY the vline. The strike must follow the
+// trend DOWN. Reading the STORED expiration here instead of the freshly
+// resolved one leaves the strike a commit behind, which is the whole bug this
+// ordering exists to prevent.
+b2.drawings.find((d) => d.id === 'vl2').points[0].time = day(35)
+const t2 = e2.legResolved(b2.legs.find((l) => l.id === legT))
+ok('further DTE moves the expiration', t2.expiration > t1.expiration,
+   `${t1.expiration} -> ${t2.expiration}`)
+ok('AND THE STRIKE DROPS WITH THE TREND: 5 bars x -$2 = -$10',
+   Math.abs(t2.strike - 650) < 1e-9, t2.strike)
+
+// A trend endpoint drawn PAST THE LAST CANDLE must still drive the leg. It
+// stopped: legResolved looked its endpoints up in the exact loaded-bar hash,
+// which extended-lattice times are not in, so the leg silently froze.
+b2.drawings.find((d) => d.id === 'tr2').points[1].time =
+  e2.timeAtIdx(bars.length + 10)
+const t3 = e2.legResolved(b2.legs.find((l) => l.id === legT))
+ok('a trend with an endpoint past the last candle still drives its leg',
+   t3.priceHosted === 'trend', `${t3.priceHosted} strike=${t3.strike}`)
+
+// Typing one value releases ONE binding, not both.
+e2.updateLeg(legT, { strike: 642 })
+const t4 = e2.legResolved(b2.legs.find((l) => l.id === legT))
+ok('typing a strike detaches the PRICE host only',
+   t4.priceHosted === null && t4.timeHosted === 'vline',
+   `${t4.timeHosted}/${t4.priceHosted}`)
+ok('so the vline still drives the expiration after a typed strike',
+   t4.expiration === t2.expiration, t4.expiration)
+
+// An hline host drives the strike and leaves expiration alone. Bound through
+// priceHostId, the current vocabulary — this leg's legacy hostId was already
+// consumed by syncLegs' migrate-on-evidence during the commit above, which is
+// the point of that migration and is asserted directly further down.
+b.legs[0].priceHostId = 'h1'
 const r4 = e.legResolved(b.legs[0])
 ok('an hline host drives the strike', r4.strike === 580, r4.strike)
 ok('and does not touch the expiration', r4.expiration === b.legs[0].expiration, '')
@@ -3396,8 +3475,44 @@ ok('and does not touch the expiration', r4.expiration === b.legs[0].expiration, 
 // Typing a strike into a hosted leg means "stop riding the line".
 e.updateLeg(legA, { strike: 555 })
 ok('typing a strike unbinds a strike-driven leg',
-   b.legs[0].hostId === undefined && b.legs[0].strike === 555,
-   JSON.stringify({ hostId: b.legs[0].hostId, strike: b.legs[0].strike }))
+   b.legs[0].priceHostId === undefined && b.legs[0].strike === 555,
+   JSON.stringify({ priceHostId: b.legs[0].priceHostId, strike: b.legs[0].strike }))
+
+// ---- THE LEGACY FOLD: documents saved before the two-host split ----------
+// A stored leg carries ONE hostId whose role followed the drawing's kind. It
+// must keep working with no rewrite of the document and no DOC_VERSION bump —
+// and then migrate on EVIDENCE, once the host has resolved against a live
+// drawing so its role is known rather than guessed.
+const e3 = mkEngine('LEGACY|1Day')
+e3.barsOpt = () => bars
+const b3 = e3.bucket()
+b3.drawings.push({ id: 'oldh', kind: 'hline', points: [{ time: day(5), price: 512 }] })
+b3.drawings.push({ id: 'oldv', kind: 'vline', points: [{ time: day(12), price: 0 }] })
+b3.legs.push({ id: 'lgOldP', side: 'long', right: 'C', expiration: '2026-09-18',
+               strike: 1, dteTol: 3, strikeTol: 5, slot: 0, hostId: 'oldh' })
+b3.legs.push({ id: 'lgOldT', side: 'long', right: 'C', expiration: '2026-09-18',
+               strike: 400, dteTol: 3, strikeTol: 5, slot: 1, hostId: 'oldv' })
+b3.legs.push({ id: 'lgOldX', side: 'long', right: 'C', expiration: '2026-09-18',
+               strike: 404, dteTol: 3, strikeTol: 5, slot: 2, hostId: 'gone' })
+const lp = e3.legResolved(b3.legs[0])
+const lt = e3.legResolved(b3.legs[1])
+ok('a legacy hline hostId still drives the strike', lp.strike === 512, lp.strike)
+ok('a legacy vline hostId still drives the expiration',
+   lt.expiration === new Date(day(12) * 1000).toISOString().slice(0, 10), lt.expiration)
+e3.commit()
+ok('and migrates on evidence: the hline host became priceHostId',
+   b3.legs[0].priceHostId === 'oldh' && b3.legs[0].hostId === undefined,
+   JSON.stringify(b3.legs[0]))
+ok('the vline host became timeHostId',
+   b3.legs[1].timeHostId === 'oldv' && b3.legs[1].hostId === undefined,
+   JSON.stringify(b3.legs[1]))
+// A DANGLING legacy id keeps its ambiguity rather than guessing a role: there
+// is no drawing to ask, so a guess could silently make a strike out of an
+// expiration the next time a line with that id came back.
+ok('a dangling legacy hostId is left alone, not guessed at',
+   b3.legs[2].hostId === 'gone' &&
+   b3.legs[2].priceHostId === undefined && b3.legs[2].timeHostId === undefined,
+   JSON.stringify(b3.legs[2]))
 
 // Slots: first free slot is reused so the palette does not drift. The scene
 // must DISCRIMINATE reuse from slot-by-count: after deleting the slot-0 leg,
@@ -3428,7 +3543,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 45, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 58, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")
