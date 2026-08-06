@@ -1798,6 +1798,17 @@ try {
   check(chainEmpty !== null, 'legs: the no-creds chain state names its reason',
     String(chainEmpty).slice(0, 80))
 
+  // NOT covered here: drawing a line PAST the last candle. The engine change
+  // is real and Kade confirmed it by hand, and selftest's _chart_legs pins the
+  // extended-lattice arithmetic with nine assertions (seven of them
+  // mutation-proven). But reaching the whitespace from this harness needs a
+  // drag-pan, and every attempt at one wedged the renderer — the CDP eval
+  // after it never settled and the run died on its timeout. A hanging test is
+  // worse than an absent one, so this gap is declared rather than faked.
+  // Closing it means finding out why a held-button pan over this chart wedges
+  // CDP, which is its own investigation.
+
+
   // Clear, then leave exactly ONE leg for the reload block to prove
   // persistence with — the reload assertion checks it came back from the DB.
   await legView.eval(

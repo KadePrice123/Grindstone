@@ -424,11 +424,28 @@ export function Chart({
   // Re-open the right-hand whitespace AFTER each rebuild: fitContent() above
   // fits the DATA, which closes it, and the future-dated leg zones live out
   // there. Ordering is guaranteed — effects run in declaration order.
+  //
+  // rightOffset, NOT setVisibleLogicalRange: the range setter competes with
+  // fitContent and with the user's own scrolling, and measurably lost — legs
+  // rendered 160px off the right edge of the canvas while the visible range
+  // still ended at the last bar. rightOffset is the library's own "bars of
+  // space after the data" and survives a refit, so the whitespace stays open
+  // and the crosshair reports a point out there (which is what lets a line be
+  // drawn at an expiration at all).
   useEffect(() => {
     const c = chart.current
-    if (!c || rightReserveBars <= 0) return
-    const vr = c.timeScale().getVisibleLogicalRange()
-    if (vr) c.timeScale().setVisibleLogicalRange({ from: vr.from, to: vr.to + rightReserveBars })
+    const el = box.current
+    if (!c || !el) return
+    const ts = c.timeScale()
+    ts.applyOptions({ rightOffset: rightReserveBars })
+    const vr = ts.getVisibleLogicalRange()
+    // Reported, not assumed: this attribute lets a test tell "the whitespace
+    // opened" from "the call was made". A ResizeObserver re-assert was tried
+    // here and removed — it thrashed layout badly enough to wedge the renderer
+    // (the e2e hung on an unsettled CDP eval), and it was solving a test's
+    // problem rather than a user's. The reserve holds; reaching it is a matter
+    // of scrolling, which the user does for free and a test must do explicitly.
+    if (vr) el.setAttribute('data-vis-range', `${Math.round(vr.from)}..${Math.round(vr.to)}`)
   }, [bars, indicators, indicatorParams, compact, lines, normalize, rightReserveBars])
 
   // Working charts declare themselves to the gesture wheel here — these
@@ -464,6 +481,7 @@ export function Chart({
       data-leg-count={legCount}
       data-leg-strike={legStrike ?? ''}
       data-leg-dte={legDte ?? ''}
+      data-right-reserve={rightReserveBars}
     />
   )
 }

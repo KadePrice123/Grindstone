@@ -727,6 +727,11 @@ function saveNow(store: ChartStore, key: string): void {
   store.save(key, doc).catch(() => savedDocs.delete(key))
 }
 
+/** How far past the last candle the extended lattice will answer, in trading
+ *  days — about six years. The day-stepping helpers this bounds are O(days),
+ *  and the crosshair calls them on every move over the whitespace. */
+const MAX_FUTURE_TRADING_DAYS = 1500
+
 const SVG_NS = 'http://www.w3.org/2000/svg'
 /** A press that travelled further than this before release is a pan. */
 const CLICK_SLOP_PX = 4
@@ -1111,7 +1116,14 @@ export class ChartDraw {
     const onMove = (p: MouseEventParams) => {
       const ok = p.point !== undefined && (p.paneIndex ?? 0) === 0
       const next = ok
-        ? { x: p.point!.x, y: p.point!.y, time: typeof p.time === 'number' ? p.time : null }
+        ? {
+            x: p.point!.x,
+            y: p.point!.y,
+            // Same fallback as the click, so the PREVIEW is live in the
+            // whitespace too — a tool that dims out exactly where you mean to
+            // draw reads as broken.
+            time: typeof p.time === 'number' ? p.time : this.timeAtX(p.point!.x),
+          }
         : null
       if (this.tool === 'pointer') {
         // Pointer is the resting mode of the whole app, and it now picks, so
@@ -1364,7 +1376,7 @@ export class ChartDraw {
     const want = d.kind === 'trend' || d.kind === 'circle' ? 2 : 1
     if (points.length !== want) return
     d.points = points.map((p) => ({
-      time: (this.nearestBarTime(p.time) ?? p.time) as UTCTimestamp,
+      time: (this.snapDrawTime(p.time) ?? p.time) as UTCTimestamp,
       price: p.price,
     }))
     propagate(this.bucket().drawings, this.bucket().constraints, new Set([id]))
@@ -1813,19 +1825,12 @@ export class ChartDraw {
    *  weekday count extrapolates, off by one bar around an unmodelled holiday
    *  and honest about that in tradingDayOffset's contract. */
   private idxForDate(date: string): number | null {
-    const idx = this.barsIdx()
-    const per = this.barMinutes()
-    if (!idx || per === null || idx.times.length === 0) return null
-    const last = idx.times.length - 1
-    const lastDate = new Date(idx.times[last] * 1000).toISOString().slice(0, 10)
-    if (date <= lastDate) {
-      const near = this.nearestBarTime(Date.parse(date + 'T12:00:00Z') / 1000)
-      const i = near === null ? undefined : idx.map.get(near)
-      return i === undefined ? null : i
-    }
-    const off = tradingDayOffset(lastDate, date)
-    if (off === null) return null
-    return last + off * (390 / per) // trading days -> bars of this timeframe
+    // DELEGATES, deliberately. A leg's expiration and a vline drawn at that
+    // expiration must land on the same pixel, and two copies of this
+    // extrapolation would eventually disagree by a bar. Noon UTC keeps the
+    // date unambiguous on both sides of the conversion.
+    const t = Date.parse(date + 'T12:00:00Z')
+    return Number.isFinite(t) ? this.idxForTime(t / 1000) : null
   }
 
   /** The inverse: a (possibly future, possibly fractional) bar index back to a
@@ -2163,19 +2168,104 @@ export class ChartDraw {
 
   private xForTime(t: UTCTimestamp): number | null {
     try {
-      return this.chart.timeScale().timeToCoordinate(t)
+      const x = this.chart.timeScale().timeToCoordinate(t)
+      if (x !== null) return x
     } catch {
       return null
     }
+    // Not on the scale — which for a future time is normal, not an error.
+    // logicalToCoordinate is alive out in the whitespace where every
+    // expiration, and now every line drawn beside one, lives.
+    const i = this.idxForTime(t)
+    return i === null ? null : this.xAtIdx(i)
   }
 
   private timeAtX(x: number): UTCTimestamp | null {
     try {
       const t = this.chart.timeScale().coordinateToTime(x)
-      return typeof t === 'number' ? t : null
+      if (typeof t === 'number') return t as UTCTimestamp
     } catch {
       return null
     }
+    const i = this.logicalAtX(x)
+    const t = i === null ? null : this.timeAtIdx(i)
+    return t === null ? null : (t as UTCTimestamp)
+  }
+
+  /** Fractional bar index for a TIMESTAMP, the lattice EXTENDED past the last
+   *  candle.
+   *
+   *  In range this is the nearest real bar, so drawings quantize exactly as
+   *  they always have. Past the data the lattice continues at the timeframe's
+   *  own cadence — trading days scaled by bars-per-session — which is the same
+   *  extrapolation idxForDate uses for expirations. The two MUST agree: a
+   *  vline placed at a leg's expiration has to land on that leg's zone, and
+   *  two different extrapolations would put them a bar apart. */
+  private idxForTime(t: number): number | null {
+    const idx = this.barsIdx()
+    if (!idx || idx.times.length === 0) return null
+    const ts = idx.times
+    const last = ts.length - 1
+    if (t <= ts[last]) {
+      const near = this.nearestBarTime(t)
+      const i = near === null ? undefined : idx.map.get(near)
+      return i === undefined ? null : i
+    }
+    const per = this.barMinutes()
+    if (per === null) return null
+    const off = tradingDayOffset(
+      new Date(ts[last] * 1000).toISOString().slice(0, 10),
+      new Date(t * 1000).toISOString().slice(0, 10)
+    )
+    // Same horizon as timeAtIdx, for the same reason: tradingDayOffset also
+    // walks a day at a time, so an absurd date must not become a long loop.
+    if (off === null || off > MAX_FUTURE_TRADING_DAYS) return null
+    return last + off * (390 / per)
+  }
+
+  /** The inverse: a (possibly future, possibly fractional) index back to a
+   *  timestamp. Future slots inherit the last bar's time-of-day, so they read
+   *  as bar times and sort naturally beside real ones. */
+  private timeAtIdx(i: number): number | null {
+    const idx = this.barsIdx()
+    if (!idx || idx.times.length === 0) return null
+    const ts = idx.times
+    const last = ts.length - 1
+    if (i <= last) return ts[Math.max(0, Math.round(i))]
+    const per = this.barMinutes()
+    if (per === null) return null
+    const days = Math.round(((i - last) * per) / 390)
+    // BOUNDED, and this is not defensive padding — it is a fix.
+    // dateAtTradingOffset walks ONE DAY AT A TIME, and timeAtX now calls this
+    // on every crosshair move over the whitespace. Scrolled far enough right,
+    // `days` reaches the tens of thousands and the renderer stops answering at
+    // all: the e2e hung on a CDP eval that never returned while the app itself
+    // looked perfectly healthy. Nothing real lives out there — the furthest
+    // option expiration is a couple of years — so beyond the horizon there is
+    // no honest answer to give, and null is one.
+    if (!Number.isFinite(days) || days > MAX_FUTURE_TRADING_DAYS) return null
+    const d = dateAtTradingOffset(
+      new Date(ts[last] * 1000).toISOString().slice(0, 10),
+      days
+    )
+    if (d === null) return null
+    const secOfDay = ((ts[last] % 86400) + 86400) % 86400
+    return Math.floor(Date.parse(d + 'T00:00:00Z') / 1000) + secOfDay
+  }
+
+  /** Quantize a time for STORAGE on a drawing: the nearest bar in range, the
+   *  nearest extended slot beyond it.
+   *
+   *  This is what nearestBarTime cannot do — that one CLAMPS to the last
+   *  candle and never says so, which is exactly why a line could not be drawn
+   *  past the data. It keeps its clamping contract for the paths that want a
+   *  real bar (inspect pins a bar's OHLC; a measure's candle snap names one). */
+  private snapDrawTime(t: number): number | null {
+    const idx = this.barsIdx()
+    if (!idx || idx.times.length === 0) return null
+    if (t <= idx.times[idx.times.length - 1]) return this.nearestBarTime(t)
+    const i = this.idxForTime(t)
+    return i === null ? null : this.timeAtIdx(Math.round(i))
   }
 
   private yForPrice(p: number): number | null {
@@ -2725,7 +2815,11 @@ export class ChartDraw {
     }
     const x = p.point.x
     const y = p.point.y
-    const time = typeof p.time === 'number' ? p.time : null
+    // p.time is undefined past the last candle. It used to end the story —
+    // clickTwoPoint and clickVline returned, so nothing could be drawn out
+    // there, which is precisely where an expiration is. timeAtX now answers
+    // on the extended lattice.
+    const time = typeof p.time === 'number' ? p.time : this.timeAtX(x)
 
     switch (this.tool) {
       case 'trend':
@@ -2878,7 +2972,7 @@ export class ChartDraw {
         const t = this.timeAtX(px.x + dx)
         const price = this.priceAtY(px.y + dy)
         if (t === null || price === null) break
-        next.push({ time: (this.nearestBarTime(t) ?? t) as UTCTimestamp, price })
+        next.push({ time: (this.snapDrawTime(t) ?? t) as UTCTimestamp, price })
       }
       if (next.length !== orig.length) continue // partial move would deform it
       d.points = next
@@ -2950,7 +3044,7 @@ export class ChartDraw {
     }
     if (axis === 'time') {
       const t = this.timeAtX(x)
-      const snapped = t === null ? null : this.nearestBarTime(t)
+      const snapped = t === null ? null : this.snapDrawTime(t)
       if (snapped === null) return
       m.place = { axis: 'time', at: snapped as UTCTimestamp }
     } else {

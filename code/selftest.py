@@ -1536,7 +1536,13 @@ def _chart_selection():
         "moveDragged translates in DATA units again - the x axis is affine in " \
         "bar index, so a constant time delta is not a constant pixel delta " \
         "across a weekend and the drawing would drift from the cursor"
-    assert "nearestBarTime" in mv, \
+    # snapDrawTime, not nearestBarTime: the snap must still happen, but onto
+    # the lattice EXTENDED past the last candle. nearestBarTime clamps a future
+    # time back onto the last bar, which is what made it impossible to draw
+    # where an option leg's expiration lives — see _chart_legs, which pins the
+    # difference. The invariant here is unchanged: a dragged point lands on a
+    # slot, never between them.
+    assert "snapDrawTime" in mv, \
         "a dragged point is no longer snapped to a bar, so it can land between " \
         "bars and stop being projectable"
     assert "justDragged" in draw, \
@@ -3164,6 +3170,19 @@ def _chart_legs():
             assert rr.status_code == 422, \
                 f"{name}: expected 422, got {rr.status_code} {rr.text[:160]}"
 
+    # -- 1b. WIRING, not behaviour -------------------------------------------
+    # The probe below runs the lattice arithmetic under plain node, where there
+    # is no timeScale — so it proves the maths and says nothing about the
+    # projection actually reaching it. The e2e draws a real vline in the
+    # whitespace; these two lines are what make that possible.
+    draw_src_ws = (CODE / "app/src/renderer/src/components/ChartDraw.ts").read_text(
+        encoding="utf-8")
+    assert "return i === null ? null : this.xAtIdx(i)" in draw_src_ws, \
+        "xForTime lost its whitespace fallback — nothing past the last candle projects"
+    assert "this.timeAtX(p.point!.x)" in draw_src_ws, \
+        "the crosshair no longer resolves a time in the whitespace, so the " \
+        "placement preview dims out exactly where a leg's expiration lives"
+
     # -- 2. vocabulary lockstep ----------------------------------------------
     draw_src = (CODE / "app/src/renderer/src/components/ChartDraw.ts").read_text(
         encoding="utf-8")
@@ -3220,6 +3239,84 @@ const mkEngine = (key) => Object.assign(Object.create(ChartDraw.prototype), {
   tool: 'pointer', selected: [], hidden: false, barsOpt: () => bars,
   render() {}, applyCursor() {},
 })
+// ---- THE WHITESPACE BUG: drawing past the last candle ---------------------
+// Kade: "you can only draw where candles exist, so you cant draw past the last
+// candle." That is where every expiration lives, so the lines that drive a leg
+// could not be placed where the leg is. The bar lattice now EXTENDS past the
+// data, and the two extrapolations — the one legs use for expirations and the
+// one drawings use for times — are the same code, because a vline drawn at a
+// leg's expiration has to land on that leg's zone.
+const wsBars = Array.from({ length: 40 }, (_, i) => ({
+  ts: new Date(Date.UTC(2024, 0, 2 + i, 14, 30)).toISOString(),
+}))
+const ws = mkEngine('WS|1Day')
+ws.barsOpt = () => wsBars
+const lastT = Math.floor(Date.parse(wsBars[39].ts) / 1000)
+
+ok('an in-range time resolves to its own bar', ws.idxForTime(lastT) === 39, ws.idxForTime(lastT))
+// bars[39] is 2024-02-10, a Saturday; 2024-02-14 is three WEEKDAYS later.
+const futT = Math.floor(Date.UTC(2024, 1, 14, 9, 0) / 1000)
+ok('a future time extends the lattice by trading days',
+   ws.idxForTime(futT) === 42, ws.idxForTime(futT))
+ok('and the index inverts back to that date',
+   new Date(ws.timeAtIdx(42) * 1000).toISOString().slice(0, 10) === '2024-02-14',
+   new Date(ws.timeAtIdx(42) * 1000).toISOString())
+ok('a future slot inherits the bars own time of day (14:30)',
+   ws.timeAtIdx(42) % 86400 === lastT % 86400, ws.timeAtIdx(42) % 86400)
+
+// THE BUG ITSELF, named by the contrast: nearestBarTime CLAMPS a future time
+// back onto the last candle — correct for pinning a bar's OHLC, fatal for
+// placing a line — and snapDrawTime does not.
+ok('nearestBarTime still clamps to the last candle (unchanged contract)',
+   ws.nearestBarTime(futT) === lastT, ws.nearestBarTime(futT))
+ok('snapDrawTime does NOT clamp: a line can be placed past the data',
+   ws.snapDrawTime(futT) > lastT, `${ws.snapDrawTime(futT)} vs ${lastT}`)
+ok('and it lands on the extended lattice, not wherever the cursor was',
+   ws.snapDrawTime(futT) === ws.timeAtIdx(42), ws.snapDrawTime(futT))
+ok('in range it is still the nearest real bar',
+   ws.snapDrawTime(lastT - 100) === lastT, ws.snapDrawTime(lastT - 100))
+
+// A FRACTIONAL in-range index takes the NEAREST bar, not the one below it —
+// the cursor is between two candles far more often than on one.
+ok('an in-range fractional index rounds to the nearest bar',
+   ws.timeAtIdx(38.6) === lastT, `${ws.timeAtIdx(38.6)} vs ${lastT}`)
+ok('and rounds down below the midpoint',
+   ws.timeAtIdx(38.4) === Math.floor(Date.parse(wsBars[38].ts) / 1000), '')
+
+// AND IT HAS A HORIZON. The day-stepping helpers underneath are O(days), and
+// timeAtX calls them on every crosshair move over the whitespace — scrolled far
+// enough right, an unbounded version stopped answering entirely: the e2e hung
+// on a CDP eval that never returned while the app itself looked healthy. There
+// is nothing real out there to name, so null is the honest answer.
+const t0 = Date.now()
+ok('an absurd future index is refused, not walked to',
+   ws.timeAtIdx(1e9) === null, ws.timeAtIdx(1e9))
+ok('and an absurd future time likewise',
+   ws.idxForTime(4e9) === null, ws.idxForTime(4e9))
+ok('both answer immediately (an O(days) walk would not)', Date.now() - t0 < 250,
+   `${Date.now() - t0}ms`)
+
+// The agreement that makes an intersection possible at all.
+ok('a leg expiration and a drawn time map to the SAME index',
+   ws.idxForDate('2024-02-14') === ws.idxForTime(futT),
+   `${ws.idxForDate('2024-02-14')} vs ${ws.idxForTime(futT)}`)
+
+// A DAY IS NOT A BAR on an intraday chart: one trading day past the data is
+// 78 five-minute bars, not one. A daily fixture cannot see this — 390/390 is
+// 1, so dropping the conversion entirely looks correct there.
+const m5 = mkEngine('WS|5Min')
+const m5Bars = Array.from({ length: 12 }, (_, i) => ({
+  ts: new Date(Date.UTC(2024, 0, 3, 14, 30 + i * 5)).toISOString(), // Wed
+}))
+m5.barsOpt = () => m5Bars
+const m5Last = m5Bars.length - 1
+ok('one trading day ahead on a 5Min chart is 78 bars',
+   m5.idxForTime(Math.floor(Date.UTC(2024, 0, 4, 14, 30) / 1000)) === m5Last + 78,
+   m5.idxForTime(Math.floor(Date.UTC(2024, 0, 4, 14, 30) / 1000)))
+ok('and it inverts back to that day',
+   new Date(m5.timeAtIdx(m5Last + 78) * 1000).toISOString().slice(0, 10) === '2024-01-04',
+   new Date(m5.timeAtIdx(m5Last + 78) * 1000).toISOString())
+
 // ---- presets: deterministic placement from bar data alone -----------------
 const { PRESETS, placePreset, expirationForDte } =
   await import('./src/renderer/src/presets.ts')
@@ -3331,7 +3428,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 29, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 45, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")
