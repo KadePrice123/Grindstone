@@ -172,12 +172,27 @@ class AlpacaData:
                           timeout=self._timeout)
         except httpx.HTTPError as e:
             raise BrokerError(f"alpaca data: network error — {e.__class__.__name__}") from e
-        if r.status_code in (401, 403):
-            raise BrokerError("alpaca data: keys rejected (401/403)")
-        if r.status_code == 429:
-            raise BrokerError("alpaca data: rate limited (429)")
         if r.status_code >= 400:
-            raise BrokerError(f"alpaca data: HTTP {r.status_code}")
+            # Carry Alpaca's own words. 401 and 403 mean different things -
+            # rejected keys versus a key that works but is not entitled to THIS
+            # feed - and lumping them sent a real debugging session looking at
+            # the wrong half. The body is Alpaca's message, never our secret.
+            detail = ""
+            try:
+                body = r.json()
+                if isinstance(body, dict):
+                    detail = str(body.get("message") or body.get("msg") or "")[:160]
+            except ValueError:
+                detail = r.text[:160]
+            tail = f" - {detail}" if detail else ""
+            if r.status_code == 401:
+                raise BrokerError(f"alpaca data: keys rejected (401){tail}")
+            if r.status_code == 403:
+                raise BrokerError(
+                    f"alpaca data: key not entitled to this data (403){tail}")
+            if r.status_code == 429:
+                raise BrokerError(f"alpaca data: rate limited (429){tail}")
+            raise BrokerError(f"alpaca data: HTTP {r.status_code}{tail}")
         try:
             return r.json()
         except ValueError as e:

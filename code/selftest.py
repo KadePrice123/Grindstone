@@ -520,10 +520,49 @@ def _recorder_logic():
 @check("market-data parsers: snapshot, chain w/ optional greeks, OCC, bars")
 def _alpaca_data_parsers():
     sys.path.insert(0, str(CODE))
-    from backend.brokers.alpaca_data import (parse_bars, parse_chain_snapshot,
+    from backend.brokers import alpaca_data as ad
+    from backend.brokers.alpaca_data import (AlpacaData, parse_bars,
+                                             parse_chain_snapshot,
                                              parse_news_item, parse_occ,
                                              parse_stock_snapshot)
     from backend.brokers.base import BrokerError
+
+    # ---- what a failure SAYS, which is half of what it is ------------------
+    # 401 and 403 mean different things: rejected keys versus keys that work
+    # but are not entitled to THIS feed. Lumping them sent a real debugging
+    # session at the wrong half (the options chain 401'd while the account
+    # test passed), so the distinction is pinned here.
+    class _Resp:
+        def __init__(self, code, payload):
+            self.status_code = code
+            self._payload = payload
+            self.text = str(payload)
+
+        def json(self):
+            if isinstance(self._payload, dict):
+                return self._payload
+            raise ValueError("not json")
+
+    real_get = ad.httpx.get
+    try:
+        for code, payload, want in (
+            (401, {"message": "forbidden"}, "keys rejected (401)"),
+            (403, {"message": "subscription does not permit"}, "not entitled"),
+            (429, {"message": "too many"}, "rate limited (429)"),
+            (500, "gateway blew up", "HTTP 500"),
+        ):
+            ad.httpx.get = lambda *a, _c=code, _p=payload, **k: _Resp(_c, _p)
+            try:
+                AlpacaData("k", "s").stock_snapshot("SPY")
+                raise AssertionError(f"HTTP {code} did not raise")
+            except BrokerError as e:
+                assert want in str(e), f"HTTP {code} said {e!r}, wanted {want!r}"
+                # Alpaca's own words reach the user, not just our status code.
+                if isinstance(payload, dict):
+                    assert payload["message"][:20] in str(e), \
+                        f"upstream message dropped from {e!r}"
+    finally:
+        ad.httpx.get = real_get
 
     s = parse_stock_snapshot("SPY", {
         "latestTrade": {"p": 746.79, "t": "T", "c": ["@"]},
@@ -2982,6 +3021,48 @@ def _options_chain():
             raise AssertionError(f"{name}: accepted")
         except ValueError:
             pass
+
+    # ---- the CREDS-PRESENT path -------------------------------------------
+    # THE GAP THAT SHIPPED A BUG: every assertion above runs with creds=None,
+    # so the branch that actually builds a client was never exercised. It did
+    # `AlpacaData(*creds)` on a DICT, which unpacks the KEYS — the app
+    # authenticated with the literal strings "key_id"/"secret_key" and Alpaca
+    # answered 401 on every chain fetch while the account test passed.
+    seen: dict[str, Any] = {}
+
+    class _FakeClient:
+        def __init__(self, key_id, secret_key):  # noqa: ANN001
+            seen["ctor"] = (key_id, secret_key)
+
+        def chain_snapshot(self, underlying, **kw):  # noqa: ANN001
+            seen.setdefault("calls", []).append({"underlying": underlying, **kw})
+            return rows
+
+    real_client = options_mod.AlpacaData
+    options_mod._cache.clear()
+    try:
+        options_mod.AlpacaData = _FakeClient  # type: ignore[misc]
+        creds = {"key_id": "PKTESTKEYID", "secret_key": "test-secret-value"}
+        got = options_mod.fetch(creds, "SPY", d(10), d(17), 550.0, 560.0, "P")
+        assert seen.get("ctor") == ("PKTESTKEYID", "test-secret-value"), (
+            f"the client was built with {seen.get('ctor')!r} — credentials must "
+            "be passed by NAME; unpacking the dict sends its keys as the key")
+        assert got["available"] is True and len(got["contracts"]) == 3, got
+        # The window rides UPSTREAM as query params — that is what keeps one
+        # leg's fetch to a page instead of the ~10k-row full chain.
+        call = seen["calls"][0]
+        assert call["underlying"] == "SPY", call
+        assert call["exp_gte"] == d(10) and call["exp_lte"] == d(17), call
+        assert call["strike_gte"] == 550.0 and call["strike_lte"] == 560.0, call
+        assert call["right"] == "P", call
+        # And the TTL cache means a repeated identical window costs nothing:
+        # a drag-storm of commits must not amplify against the shared budget.
+        options_mod.fetch(creds, "SPY", d(10), d(17), 550.0, 560.0, "P")
+        assert len(seen["calls"]) == 1, \
+            f"cache miss: {len(seen['calls'])} upstream calls for one window"
+    finally:
+        options_mod.AlpacaData = real_client  # type: ignore[misc]
+        options_mod._cache.clear()
 
     # ---- the route ---------------------------------------------------------
     with tempfile.TemporaryDirectory() as tmp:

@@ -68,7 +68,7 @@ def filter_contracts(rows: list[dict[str, Any]], exp_from: dt.date, exp_to: dt.d
     return out
 
 
-def fetch(creds: tuple[str, str] | None, underlying: str,
+def fetch(creds: dict[str, str] | None, underlying: str,
           exp_from: str, exp_to: str, strike_lo: float, strike_hi: float,
           right: str | None) -> dict[str, Any]:
     """One leg's contracts, or an honest reason there are none.
@@ -114,7 +114,11 @@ def fetch(creds: tuple[str, str] | None, underlying: str,
         else:
             rows = None
     if rows is None:
-        client = AlpacaData(*creds)
+        # NAMED fields, like every other call site. `AlpacaData(*creds)` on this
+        # dict unpacks its KEYS, so the client authenticated with the literal
+        # strings "key_id" and "secret_key" and Alpaca answered 401 — a real
+        # bug that shipped, because the gate only ever exercised creds=None.
+        client = AlpacaData(creds["key_id"], creds["secret_key"])
         try:
             raw = client.chain_snapshot(
                 underlying, exp_gte=str(d_from), exp_lte=str(d_to),
