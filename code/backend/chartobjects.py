@@ -336,7 +336,13 @@ def validate(doc: Any) -> dict[str, Any]:
         # The role is now POSITIONAL — which field the id sits in — so no new
         # vocabulary string exists to keep in lockstep. Legacy docs are folded
         # at READ time by the engine, never rewritten, so DOC_VERSION holds.
-        for field in ("hostId", "timeHostId", "priceHostId"):
+        # The FOUR BOUNDING LINES are the filter's interface: two hlines carry
+        # the strike range, two vlines the expiration range, and the strike
+        # pair's vertical ORDER carries the side — so dragging one through the
+        # other flips buy/sell. That ordering lives entirely in the geometry,
+        # which is why no side field has to be kept in step with it here.
+        for field in ("hostId", "timeHostId", "priceHostId",
+                      "strikeHostA", "strikeHostB", "timeHostA", "timeHostB"):
             v = lg.get(field)
             if v is not None:
                 if not isinstance(v, str) or not (1 <= len(v) <= MAX_ID):

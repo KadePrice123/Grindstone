@@ -242,6 +242,19 @@ export interface OptionLeg {
   hostId?: string
   /** The vline whose time IS this leg's expiration. */
   timeHostId?: string
+  /** THE FOUR BOUNDING LINES. This is the filter's real interface: two
+   *  hlines carry the strike range, two vlines the expiration range, and the
+   *  region they enclose IS what the chain is filtered to. Drag any of them.
+   *
+   *  The strike pair's VERTICAL ORDER carries the SIDE, so there is no side
+   *  control anywhere: `strikeHostA` above `strikeHostB` reads SELL, and
+   *  dragging A through B flips it to BUY with the colour change that makes
+   *  the flip impossible to miss. Crossing is a gesture people already make
+   *  by accident; giving it the meaning costs nothing and removes a control. */
+  strikeHostA?: string
+  strikeHostB?: string
+  timeHostA?: string
+  timeHostB?: string
   /** The hline (flat) or trend (sloping) whose price IS this leg's strike.
    *  A trend is evaluated AT the time host's expiration, and that single
    *  ordering is what makes "further DTE means the strike drops with the
@@ -659,6 +672,12 @@ export interface LegResolution {
   timeHostId?: string
   priceHostId?: string
   hosted: Drawing['kind'] | null
+  /** Present when all four bounding lines resolve: the region the chain is
+   *  filtered to, read straight off them. Null leaves the centre+tolerance
+   *  reading in charge, which is what an unbounded (legacy) leg still is. */
+  bounds: { strikeLo: number; strikeHi: number; expFrom: string; expTo: string } | null
+  /** DERIVED from the strike lines' order when bounded, stored otherwise. */
+  side: LegSide
 }
 
 /** A leg as consumers see it: stored fields plus the host-resolved values and
@@ -787,6 +806,15 @@ const MEASURE_STROKE = 'var(--text-dim)'
  *  accent orange (selection/hover channel) - a leg must never look selected,
  *  profitable or losing by accident of its slot. */
 export const LEG_PALETTE = ['#6ba4e8', '#c77dd6', '#e8c55b', '#5bc8c8', '#9aa0a6', '#8ba7f9'] as const
+
+/** BUY and SELL, and they must be tellable apart ACROSS THE CHART at a glance,
+ *  because crossing the two strike lines silently changes which one you are
+ *  looking at. Deliberately not the candle red/green (a leg is not an up or a
+ *  down day) and not the accent orange (that channel means selection). */
+export const SIDE_INK: Record<LegSide, string> = {
+  long: '#35c9c0',   // BUY  - teal
+  short: '#c77dd6',  // SELL - violet
+}
 
 /** Nominal minutes of CHART time in one candle, per timeframe.
  *
@@ -1021,6 +1049,17 @@ export class ChartDraw {
    *  object, or to none. */
   private hotZones: HotZone[] = []
   private zoneDraft: HotZone[] = []
+  /** A leg's four VERTEX handles — where its strike line meets its expiration
+   *  line. Grabbing one drags BOTH, which is how a corner changes two
+   *  dimensions at once. Published/drafted exactly like hotZones, and for the
+   *  same reason: a half-built list would pick the wrong pair. */
+  private corners: { left: number; top: number; w: number; h: number; hId: string; vId: string }[] = []
+  private cornerDraft: typeof ChartDraw.prototype.corners = []
+  /** drawing id -> the ink its owning leg gives it, rebuilt each frame. This
+   *  is how a leg's lines wear its side colour without Drawing storing one:
+   *  the colour is DERIVED from the leg that rides the line, so a side flip
+   *  recolours every line it owns with no stored state to keep in step. */
+  private inkById = new Map<string, string>()
   /** What the cursor is over in pointer mode, or null. This exists to keep the
    *  default tool cheap: pointer now picks, so it has to follow the crosshair,
    *  but re-rendering on every move would put a full overlay rebuild in the
@@ -1197,6 +1236,38 @@ export class ChartDraw {
       // Only pointer grabs. Any armed tool is placing geometry, and a modifier
       // means "extend the selection", never "move it".
       if (e.button !== 0 || this.tool !== 'pointer' || this.downAdditive) return
+      // VERTEX FIRST, ahead of every other pick. A corner sits ON both of its
+      // lines and inside the leg's region, so anything resolved by distance
+      // would hand back one line and quietly halve the gesture — the corner is
+      // the only handle that means "these two together".
+      const corner = this.corners.find(
+        (c) => at.x >= c.left && at.x <= c.left + c.w && at.y >= c.top && at.y <= c.top + c.h
+      )
+      if (corner) {
+        const bC = this.bucket()
+        const { ids, issue } = this.movableIds([corner.hId, corner.vId])
+        if (issue) {
+          this.issue = issue
+          this.emit()
+          return
+        }
+        const orig = new Map<string, Pt[]>()
+        for (const id of ids) {
+          const d = bC.drawings.find((x) => x.id === id)
+          if (d) orig.set(id, d.points.map((p) => ({ ...p })))
+        }
+        if (orig.size > 0) {
+          this.issue = null
+          // moveDragged translates EVERY dragged drawing by the same pixel
+          // delta, so one diagonal gesture moves the strike line vertically
+          // and the expiration line horizontally: two dimensions, one grab.
+          this.drag = { ids, orig, from: at, live: false }
+          try {
+            this.chart.applyOptions({ handleScroll: false, handleScale: false })
+          } catch { /* older builds pan too; the drag still works */ }
+        }
+        return
+      }
       const hit = this.hitAny(at.x, at.y)
       // A pin's position IS its bar, so "dragging" one would mean re-pinning it
       // somewhere else — deliberately not a gesture.
@@ -1944,10 +2015,46 @@ export class ChartDraw {
       }
     }
 
+    // ---- 3. THE BOUNDING LINES, when the leg has them.
+    let bounds: LegResolution['bounds'] = null
+    let side: LegSide = leg.side
+    const sa = find(leg.strikeHostA)
+    const sb = find(leg.strikeHostB)
+    const ta = find(leg.timeHostA)
+    const tb = find(leg.timeHostB)
+    if (sa?.kind === 'hline' && sb?.kind === 'hline' &&
+        ta?.kind === 'vline' && tb?.kind === 'vline') {
+      const pa = sa.points[0].price
+      const pb = sb.points[0].price
+      // A ABOVE B reads SELL; drag A through B and it is BUY. Strict '>' so
+      // the degenerate equal case keeps the last unambiguous reading rather
+      // than strobing between two colours while the lines are exactly level.
+      side = pa > pb ? 'short' : pa < pb ? 'long' : leg.side
+      const d = (t: number): string =>
+        new Date(t * 1000).toISOString().slice(0, 10)
+      const da = d(ta.points[0].time)
+      const db = d(tb.points[0].time)
+      bounds = {
+        strikeLo: Math.min(pa, pb),
+        strikeHi: Math.max(pa, pb),
+        expFrom: da <= db ? da : db,
+        expTo: da <= db ? db : da,
+      }
+      // PER AXIS, and the explicit host wins. The bounding lines are the
+      // default interface; binding an axis to a trend or a single vline is
+      // the deliberate override, so a leg locked to a trend keeps following
+      // the trend even though it still owns strike lines. Letting the bounds
+      // win here would silently un-bind every leg the moment it grew its own
+      // lines — which is exactly what it did.
+      if (priceHosted === null) strike = (bounds.strikeLo + bounds.strikeHi) / 2
+      if (timeHosted === null) expiration = bounds.expFrom
+    }
+
     return {
       expiration, strike, timeHosted, priceHosted,
       timeHostId: timeId, priceHostId: priceId,
       hosted: priceHosted ?? timeHosted,
+      bounds, side,
     }
   }
 
@@ -1964,6 +2071,13 @@ export class ChartDraw {
       // legResolved, where the price host is read at the time host's answer.
       leg.expiration = r.expiration
       leg.strike = r.strike
+      // KEEP THE LINES WITH IT. When a trend or a vline drives an axis, the
+      // leg's own bounding lines for that axis follow, carrying their span and
+      // their order (which is the side) unchanged. Without this the lines sit
+      // where they were minted while the filter is somewhere else, and the
+      // moment the host is deleted the region snaps back to a stale position
+      // that nothing on screen ever showed.
+      this.reseatGuides(b, leg, r)
       // MIGRATE ON EVIDENCE, never on a guess: only once the legacy host has
       // resolved against a LIVE drawing is its role known for certain. A
       // dangling legacy id keeps its ambiguity and its snapshot, forever.
@@ -1987,9 +2101,89 @@ export class ChartDraw {
     let slot = partial.slot ?? 0
     if (partial.slot === undefined) while (used.has(slot)) slot++
     const id = mkId('lg')
-    b.legs.push({ ...partial, id, slot })
+    // FOUR LINES, minted with the leg. They are the filter's controls, so the
+    // leg arrives ready to drag rather than as a shape you then have to learn
+    // to expand by typing. Guides FIRST: the leg references them by id, and
+    // minting them afterwards would render one frame of an unbound leg and
+    // debounce a second save.
+    const bounds = this.mintLegGuides(b, partial)
+    b.legs.push({ ...partial, ...bounds, id, slot })
     this.commit()
     return { ok: true, id }
+  }
+
+  /** Mint a leg's four bounding lines from its centre+tolerance intent.
+   *
+   *  The SIDE is expressed as the strike pair's order, not stored twice: a
+   *  SELL is born with A above B, a BUY with A below. That is what makes
+   *  dragging one through the other a real side change rather than a display
+   *  trick — there is nowhere else for the answer to disagree with the lines. */
+  private mintLegGuides(
+    b: Bucket,
+    spec: { expiration: string; strike: number; dteTol: number; strikeTol: number; side: LegSide }
+  ): Pick<OptionLeg, 'strikeHostA' | 'strikeHostB' | 'timeHostA' | 'timeHostB'> {
+    const tF = this.timeForDate(spec.expiration)
+    const tT = this.timeForDate(
+      new Date((Date.parse(spec.expiration + 'T00:00:00Z') +
+        Math.max(1, Math.round(spec.dteTol)) * 86400000)).toISOString().slice(0, 10)
+    )
+    // No bars means no lattice means no lines. The leg is still creatable and
+    // still runs on its stored window, exactly as it did before.
+    if (tF === null || tT === null) return {}
+    const hi = spec.strike + Math.max(0.01, spec.strikeTol)
+    const lo = spec.strike - Math.max(0.01, spec.strikeTol)
+    const mk = (kind: DrawKind, time: number, price: number): string => {
+      const gid = mkId('dw')
+      b.drawings.push({
+        id: gid, kind, legOwned: true,
+        points: [{ time: time as UTCTimestamp, price }],
+      })
+      return gid
+    }
+    const aPrice = spec.side === 'short' ? hi : lo
+    const bPrice = spec.side === 'short' ? lo : hi
+    return {
+      strikeHostA: mk('hline', tF, aPrice),
+      strikeHostB: mk('hline', tF, bPrice),
+      timeHostA: mk('vline', tF, spec.strike),
+      timeHostB: mk('vline', tT, spec.strike),
+    }
+  }
+
+  /** Slide a leg's bounding lines to match an axis its HOST just drove.
+   *
+   *  Only for hosted axes: a leg whose lines are its own interface must never
+   *  have them moved out from under a drag. Span and order are preserved, so
+   *  the region keeps its width and the side stays whatever the user set. */
+  private reseatGuides(b: Bucket, leg: OptionLeg, r: LegResolution): void {
+    if (r.priceHosted !== null && leg.strikeHostA && leg.strikeHostB) {
+      const a = b.drawings.find((d) => d.id === leg.strikeHostA)
+      const bb = b.drawings.find((d) => d.id === leg.strikeHostB)
+      if (a?.kind === 'hline' && bb?.kind === 'hline') {
+        const half = Math.abs(a.points[0].price - bb.points[0].price) / 2
+        const up = a.points[0].price >= bb.points[0].price
+        a.points[0].price = r.strike + (up ? half : -half)
+        bb.points[0].price = r.strike + (up ? -half : half)
+      }
+    }
+    if (r.timeHosted !== null && leg.timeHostA && leg.timeHostB) {
+      const a = b.drawings.find((d) => d.id === leg.timeHostA)
+      const bb = b.drawings.find((d) => d.id === leg.timeHostB)
+      const t = this.timeForDate(r.expiration)
+      if (a?.kind === 'vline' && bb?.kind === 'vline' && t !== null) {
+        const span = (bb.points[0].time as number) - (a.points[0].time as number)
+        a.points[0].time = t as UTCTimestamp
+        bb.points[0].time = (t + span) as UTCTimestamp
+      }
+    }
+  }
+
+  /** The bar time a calendar date lands on, EXTENDED lattice included. One
+   *  minter, so a guide's stored time round-trips to the same date and its x
+   *  is the leg's x by construction. */
+  private timeForDate(date: string): number | null {
+    const i = this.idxForDate(date)
+    return i === null ? null : this.timeAtIdx(Math.round(i))
   }
 
   /** The type-in path. Patching strike/expiration on a HOSTED leg is answered
@@ -3377,6 +3571,14 @@ export class ChartDraw {
     // of this method: hitAny() may be called at any time and must always see a
     // COMPLETE frame (the last one), never this one half-built.
     this.zoneDraft = []
+    this.cornerDraft = []
+    // Rebuilt before anything paints, because renderDrawing consults it.
+    this.inkById = new Map()
+    for (const l of this.bucket().legs) {
+      const ink = SIDE_INK[this.legResolved(l).side]
+      for (const id of [l.strikeHostA, l.strikeHostB, l.timeHostA, l.timeHostB])
+        if (id) this.inkById.set(id, ink)
+    }
 
     const b = this.bucket()
     const cur = this.cursor
@@ -3430,6 +3632,7 @@ export class ChartDraw {
     this.renderPreview(pane)
     // Frame complete — swap the chip hit-zones in atomically.
     this.hotZones = this.zoneDraft
+    this.corners = this.cornerDraft
   }
 
   /** The "held here" marker.
@@ -3466,68 +3669,86 @@ export class ChartDraw {
    *  under the first. */
   private renderLeg(pane: { width: number; height: number }, leg: OptionLeg): void {
     const r = this.legResolved(leg)
-    const w = legWindow(r.expiration, r.strike, leg.dteTol, leg.strikeTol)
+    // BOUNDED legs take their region straight off their four lines. The
+    // fallback is the old centre+tolerance window, which is what a legacy or
+    // half-deleted leg still is.
+    const w = r.bounds ?? legWindow(r.expiration, r.strike, leg.dteTol, leg.strikeTol)
     if (!w) return
-    const iC = this.idxForDate(r.expiration)
     const iF = this.idxForDate(w.expFrom)
     const iT = this.idxForDate(w.expTo)
-    if (iC === null || iF === null || iT === null) return
-    const xC = this.xAtIdx(iC)
-    // The zone's own edges, clamped to the pane so a half-scrolled zone still
-    // shows its visible part instead of vanishing whole.
+    if (iF === null || iT === null) return
     let xF = this.xAtIdx(iF)
     let xT = this.xAtIdx(iT)
-    if (xC === null && xF === null && xT === null) return
+    if (xF === null && xT === null) return
     xF = xF ?? 0
     xT = xT ?? pane.width
     const yLo = this.yForPrice(w.strikeHi) // high strike = smaller y
     const yHi = this.yForPrice(w.strikeLo)
     if (yLo === null || yHi === null) return
-    const color = LEG_PALETTE[leg.slot % LEG_PALETTE.length]
+    const color = SIDE_INK[r.side]
     const picked = this.selected.includes(leg.id)
     const hot = this.hoverId === leg.id
     const left = Math.min(xF, xT)
     const wpx = Math.max(Math.abs(xT - xF), 6)
     const top = Math.min(yLo, yHi)
     const hpx = Math.max(Math.abs(yHi - yLo), 6)
+    // A WASH, not a box. The lines are the object; this is only the region
+    // they enclose, so it carries no border of its own and nothing to grab —
+    // a bordered rectangle reads as a separate thing floating near the lines,
+    // which is exactly the "blue box" that had to go.
     this.el('rect', {
       class: 'cd-leg-zone',
-      x: left, y: top, width: wpx, height: hpx, rx: 3,
-      fill: color, 'fill-opacity': picked || hot ? 0.16 : 0.09,
-      stroke: color, 'stroke-width': picked ? 2 : 1.25,
-      'stroke-opacity': picked || hot ? 0.9 : 0.55,
-      ...(leg.side === 'short' ? { 'stroke-dasharray': '5 3' } : {}),
+      x: left, y: top, width: wpx, height: hpx,
+      fill: color, 'fill-opacity': picked || hot ? 0.20 : 0.11,
+      stroke: color, 'stroke-width': 0, 'stroke-opacity': 0,
     })
-    // Centre mark on the exact (expiration, strike) - the point the window is
-    // +- around, and the thing a drag moves.
-    if (xC !== null) {
-      const yC = this.yForPrice(r.strike)
-      if (yC !== null) {
-        this.el('line', { x1: xC - 5, y1: yC, x2: xC + 5, y2: yC, stroke: color, 'stroke-width': 1.5 })
-        this.el('line', { x1: xC, y1: yC - 5, x2: xC, y2: yC + 5, stroke: color, 'stroke-width': 1.5 })
-      }
-    }
-    // Chip above the zone; slot-stepped so stacked same-strike legs interleave.
+    // One label, on the region, naming what it accepts. No centre cross: there
+    // is no centre any more, only bounds.
     const rows: ChipRow[] = [
       {
-        text: `${leg.side === 'short' ? 'SELL' : 'BUY'} ${leg.right === 'P' ? 'PUT' : 'CALL'} ${fmtNum(r.strike)}`,
+        text: `${r.side === 'short' ? 'SELL' : 'BUY'} ${leg.right === 'P' ? 'PUT' : 'CALL'}`,
         cls: 'em',
       },
-      { text: `${r.expiration} \u00b1${Math.round(leg.dteTol)}d \u00b1$${fmtNum(leg.strikeTol)}`, cls: 'dim' },
+      { text: `${fmtNum(w.strikeLo)} - ${fmtNum(w.strikeHi)}`, cls: 'dim' },
+      { text: `${w.expFrom} - ${w.expTo}`, cls: 'dim' },
     ]
-    const chipX = Math.max(left + 4, Math.min((xC ?? left + wpx / 2), left + wpx - 4))
     const box = this.chip(
-      chipX, top - 6 - (leg.slot % 4) * 30, rows,
+      left + wpx / 2, top - 4, rows,
       `cd-leg${picked ? ' cd-sel' : hot ? ' cd-hot' : ''}`, 0.5, 1, pane
     )
-    this.el('line', {
-      x1: chipX, y1: box.top + box.h, x2: chipX, y2: top,
-      stroke: color, 'stroke-width': 1, 'stroke-opacity': 0.6,
-    })
     this.zoneDraft.push({ ...box, kind: 'leg', id: leg.id })
-    // The zone rectangle is itself grabbable - a chip alone is a small target
-    // for what Kade called drag-and-drop stuff.
-    this.zoneDraft.push({ left, top, w: wpx, h: hpx, kind: 'leg', id: leg.id })
+
+    // VERTEX HANDLES. Each corner is where one strike line crosses one
+    // expiration line, so grabbing it drags that PAIR — two dimensions at
+    // once — while grabbing an edge still moves the single line. Only drawn
+    // when all four lines are live; a legacy leg has no vertices to offer.
+    const hA = leg.strikeHostA
+    const hB = leg.strikeHostB
+    const vA = leg.timeHostA
+    const vB = leg.timeHostB
+    if (r.bounds && hA && hB && vA && vB) {
+      const yFor = (id: string): number | null => {
+        const d = this.bucket().drawings.find((x) => x.id === id)
+        return d ? this.yForPrice(d.points[0].price) : null
+      }
+      const xFor = (id: string): number | null => {
+        const d = this.bucket().drawings.find((x) => x.id === id)
+        return d ? this.xForTime(d.points[0].time as UTCTimestamp) : null
+      }
+      for (const hId of [hA, hB]) {
+        for (const vId of [vA, vB]) {
+          const y = yFor(hId)
+          const x = xFor(vId)
+          if (x === null || y === null) continue
+          this.el('rect', {
+            x: x - 4, y: y - 4, width: 8, height: 8,
+            fill: 'var(--surface)', stroke: color, 'stroke-width': 1.75,
+            class: 'cd-leg-vertex',
+          })
+          this.cornerDraft.push({ left: x - 7, top: y - 7, w: 14, h: 14, hId, vId })
+        }
+      }
+    }
   }
 
   /** Move the dragged LEG. What the drag may change follows the host, the
@@ -3622,8 +3843,12 @@ export class ChartDraw {
     d: Drawing,
     st: { selected: boolean; hover: boolean; danger: boolean }
   ): void {
-    const stroke = st.danger ? STROKE_DANGER : STROKE
-    const width = st.selected || st.hover || st.danger ? 2.5 : 1.5
+    // Danger and selection keep their channels — a line about to be deleted
+    // must look deleted whoever owns it — but at rest a leg's line wears its
+    // leg's side colour, which is the whole point of colour-coding them.
+    const ink = this.inkById.get(d.id)
+    const stroke = st.danger ? STROKE_DANGER : st.selected || st.hover ? STROKE : ink ?? STROKE
+    const width = st.selected || st.hover || st.danger ? 2.5 : ink ? 2 : 1.5
     const halo = st.danger ? HALO_DANGER : HALO
     const wantHalo = st.selected || st.hover || st.danger
 

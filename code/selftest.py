@@ -3126,7 +3126,9 @@ def _chart_legs():
     LEG = {"id": "lg9", "side": "short", "right": "P", "expiration": "2026-09-18",
            "strike": 560.0, "dteTol": 3, "strikeTol": 5.0, "slot": 1,
            "hostId": "gone-with-the-trend", "timeHostId": "dw7", "priceHostId": "dw8",
-           "group": "gp3"}
+           "group": "gp3",
+           "strikeHostA": "dwA", "strikeHostB": "dwB",
+           "timeHostA": "dwC", "timeHostB": "dwD"}
     # A leg-minted guide. The flag is what lets the engine sweep it when no leg
     # rides it any more, and it must survive the database or every restored
     # chart leaks the lines its legs made.
@@ -3162,6 +3164,9 @@ def _chart_legs():
         assert got["timeHostId"] == "dw7", got
         assert got["priceHostId"] == "dw8", got
         assert got["group"] == "gp3", got
+        for f in ("strikeHostA", "strikeHostB", "timeHostA", "timeHostB"):
+            assert got[f] == {"strikeHostA": "dwA", "strikeHostB": "dwB",
+                              "timeHostA": "dwC", "timeHostB": "dwD"}[f], (f, got)
         assert back["drawings"][0].get("legOwned") is True, back["drawings"]
 
         # A legs-only doc is NOT empty: the row must exist after the save above.
@@ -3181,6 +3186,8 @@ def _chart_legs():
             "numeric timeHostId": {**LEG, "timeHostId": 123},
             "numeric priceHostId": {**LEG, "priceHostId": 123},
             "numeric group": {**LEG, "group": 42},
+            "numeric strikeHostA": {**LEG, "strikeHostA": 1},
+            "numeric timeHostB": {**LEG, "timeHostB": 1},
         }
         for name, leg in bad.items():
             rr = client.put("/api/chart-objects", headers=A,
@@ -3222,7 +3229,7 @@ def _chart_legs():
     assert exe, "no node runtime on PATH — the leg arithmetic cannot be run"
 
     probe = r"""
-import { ChartDraw, legStrikeOnTrend, legWindow }
+import { ChartDraw, legStrikeOnTrend, legWindow, SIDE_INK }
   from './src/renderer/src/components/ChartDraw.ts'
 const out = []
 const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail })
@@ -3478,6 +3485,44 @@ ok('typing a strike unbinds a strike-driven leg',
    b.legs[0].priceHostId === undefined && b.legs[0].strike === 555,
    JSON.stringify({ priceHostId: b.legs[0].priceHostId, strike: b.legs[0].strike }))
 
+// ---- THE SIDE IS THE LINES' ORDER ----------------------------------------
+// Kade: "having the top line go below the bottom line would swap from buy to
+// sell or sell to buy with a noticeable color change." There is no side
+// control and no stored answer that could disagree with the picture: the two
+// strike lines' vertical order IS the side.
+const e4 = mkEngine('SIDE|1Day')
+e4.barsOpt = () => bars
+const b4 = e4.bucket()
+const legS = e4.addLeg({ side: 'short', right: 'P',
+  expiration: new Date(day(20) * 1000).toISOString().slice(0, 10),
+  strike: 600, dteTol: 3, strikeTol: 10 }).id
+const L = () => b4.legs.find((l) => l.id === legS)
+const s0 = e4.legResolved(L())
+ok('a leg is born with four bounding lines',
+   !!(L().strikeHostA && L().strikeHostB && L().timeHostA && L().timeHostB),
+   JSON.stringify(L()))
+ok('and its region comes off those lines, not a typed tolerance',
+   s0.bounds !== null && Math.abs(s0.bounds.strikeHi - 610) < 1e-9 &&
+   Math.abs(s0.bounds.strikeLo - 590) < 1e-9, JSON.stringify(s0.bounds))
+ok('a SELL is born with strike line A above B', s0.side === 'short', s0.side)
+
+// DRAG A THROUGH B. Nothing else changes — no field is set, no toggle pressed.
+const dA = b4.drawings.find((d) => d.id === L().strikeHostA)
+dA.points[0].price = 585   // now BELOW B (590)
+const s1 = e4.legResolved(L())
+ok('dragging the top strike line below the bottom one FLIPS the side to BUY',
+   s1.side === 'long', s1.side)
+ok('and the region is still the pair, lo/hi re-read from the lines',
+   Math.abs(s1.bounds.strikeLo - 585) < 1e-9 &&
+   Math.abs(s1.bounds.strikeHi - 590) < 1e-9, JSON.stringify(s1.bounds))
+ok('the two sides get visibly different ink',
+   SIDE_INK.long !== SIDE_INK.short, `${SIDE_INK.long}/${SIDE_INK.short}`)
+
+// Dragging it back flips back: the gesture is symmetric, not a latch.
+dA.points[0].price = 615
+ok('and dragging it back above flips back to SELL',
+   e4.legResolved(L()).side === 'short', e4.legResolved(L()).side)
+
 // ---- THE LEGACY FOLD: documents saved before the two-host split ----------
 // A stored leg carries ONE hostId whose role followed the drawing's kind. It
 // must keep working with no rewrite of the document and no DOC_VERSION bump —
@@ -3543,7 +3588,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 58, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 65, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")
