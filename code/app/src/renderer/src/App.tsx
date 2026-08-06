@@ -18,6 +18,7 @@ export type Route =
   | { name: 'accounts' }
   | { name: 'data' }
   | { name: 'symbol'; symbol: string }
+  | { name: 'opt'; symbol: string }
   | { name: 'search'; query: string }
   | { name: 'settings' }
   | { name: 'news' }
@@ -29,6 +30,9 @@ export type Route =
 export function parseRoute(raw: string | null): Route {
   if (!raw) return { name: 'idle' }
   if (raw.startsWith('symbol:')) return { name: 'symbol', symbol: raw.slice(7).toUpperCase() }
+  // The options workstation for a symbol. Its own route rather than a mode
+  // of the symbol page, so it is addressable, linkable and has its own Back.
+  if (raw.startsWith('opt:')) return { name: 'opt', symbol: raw.slice(4).toUpperCase() }
   if (raw.startsWith('search:')) return { name: 'search', query: raw.slice(7) }
   if (raw.startsWith('article:')) {
     const rest = raw.slice(8)
@@ -47,6 +51,7 @@ export function parseRoute(raw: string | null): Route {
 
 export function routeKey(r: Route): string {
   if (r.name === 'symbol') return `symbol:${r.symbol}`
+  if (r.name === 'opt') return `opt:${r.symbol}`
   if (r.name === 'search') return `search:${r.query}`
   if (r.name === 'article') return `article:${r.id ?? r.url ?? ''}`
   if (r.name === 'help') return r.section ? `help:${r.section}` : 'help'

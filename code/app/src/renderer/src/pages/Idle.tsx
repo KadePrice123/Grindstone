@@ -107,7 +107,10 @@ export function Idle({
   }
 
   const openResult = (r: SearchResult) => {
-    if ((r.type === 'symbol' || r.type === 'action') && r.symbol) {
+    if (r.type === 'action' && r.action === 'symbol-opt' && r.symbol) {
+      // "SPY Opt" lands on the workstation, not the chart.
+      onNavigate({ name: 'opt', symbol: r.symbol })
+    } else if ((r.type === 'symbol' || r.type === 'action') && r.symbol) {
       onNavigate({ name: 'symbol', symbol: r.symbol })
     } else if (r.type === 'news' && typeof r.id === 'number') {
       onNavigate({ name: 'article', id: r.id }) // our news: reader view

@@ -266,6 +266,18 @@ export interface OptionLeg {
   group?: string
   /** Color slot in the leg palette (assignment by slot, like compare lines). */
   slot: number
+  /** The contract the user CHOSE, as an OCC symbol.
+   *
+   *  A leg is a filter window and matches many contracts; this is the one
+   *  picked out of them, and it is what lets the analytics price a real trade
+   *  instead of guessing at a representative. Absent means "no pick yet", and
+   *  the panel then prices the match nearest the leg's own anchor — a stated
+   *  fallback, not a silent one.
+   *
+   *  Never validated against the live chain. Windows get dragged, contracts
+   *  expire, markets close; a pick that no longer matches simply stops being
+   *  found and the leg falls back, rather than the document being rejected. */
+  pick?: string
   /** Hidden from the chart: this leg's zone, chips and bounding lines stop
    *  painting and stop being pickable. PERSISTED, unlike the global
    *  drawings-hidden switch, because that one is a lens over the whole chart
@@ -295,6 +307,98 @@ export interface OptionLeg {
 export const LEG_HOST_FIELDS: ReadonlyArray<
   'strikeHostA' | 'strikeHostB' | 'timeHostA' | 'timeHostB'
 > = ['strikeHostA', 'strikeHostB', 'timeHostA', 'timeHostB']
+
+/** A leg resolved from a STORED DOCUMENT alone — no chart, no engine.
+ *
+ *  This exists because the stored `side` and `strike` are NOT the answer, and
+ *  reading them as if they were is a bug this codebase has now shipped twice.
+ *  The bounding lines are the leg's real interface: their vertical order IS
+ *  the side, and their midpoint IS the strike. `syncLegs` deliberately skips
+ *  legs that have only those lines and no explicit host, so for the common leg
+ *  the stored fields are its BIRTH values and nothing has refreshed them since.
+ *
+ *  Pure, and it takes the drawings array rather than a bucket, so the Opt page
+ *  — which has a document and no engine — gets exactly what the chart draws.
+ *
+ *  ONE case it cannot answer: a strike hosted on a TREND, whose price depends
+ *  on bar-index arithmetic that needs a loaded chart. That returns
+ *  `trendHosted: true` with the stored snapshot, so a caller can say the value
+ *  is the last one seen rather than pretend it is live. */
+export function resolveLegDoc(
+  leg: OptionLeg, drawings: Drawing[]
+): {
+  strike: number
+  expiration: string
+  side: LegSide
+  trendHosted: boolean
+  /** THE FILTER ITSELF — the rectangle the four lines actually enclose,
+   *  matching the engine's legResolved().bounds exactly. The ±tolerances are
+   *  only the leg's BIRTH window; once the lines exist they are the filter,
+   *  and a reader that rebuilds a window from the tolerances shows a
+   *  different chain than the chart is drawing (8 matches vs 204, in the
+   *  screenshot that caught this). */
+  window: { expFrom: string; expTo: string; strikeLo: number; strikeHi: number } | null
+} {
+  const find = (id?: string): Drawing | undefined =>
+    id ? drawings.find((d) => d.id === id) : undefined
+
+  // The same legacy fold legResolved does, at read time.
+  let timeId = leg.timeHostId
+  let priceId = leg.priceHostId
+  if (timeId === undefined && priceId === undefined && leg.hostId) {
+    const h = find(leg.hostId)
+    if (h?.kind === 'vline') timeId = leg.hostId
+    else priceId = leg.hostId
+  }
+
+  let expiration = leg.expiration
+  let timeHosted = false
+  const th = find(timeId)
+  if (th?.kind === 'vline') {
+    expiration = new Date(th.points[0].time * 1000).toISOString().slice(0, 10)
+    timeHosted = true
+  }
+
+  let strike = leg.strike
+  let priceHosted = false
+  let trendHosted = false
+  const ph = find(priceId)
+  if (ph?.kind === 'hline') {
+    strike = ph.points[0].price
+    priceHosted = true
+  } else if (ph?.kind === 'trend') {
+    trendHosted = true // needs bar indices; the snapshot stands in
+  }
+
+  let side: LegSide = leg.side
+  let window: { expFrom: string; expTo: string; strikeLo: number; strikeHi: number } | null = null
+  const sa = find(leg.strikeHostA)
+  const sb = find(leg.strikeHostB)
+  const ta = find(leg.timeHostA)
+  const tb = find(leg.timeHostB)
+  if (sa?.kind === 'hline' && sb?.kind === 'hline' &&
+      ta?.kind === 'vline' && tb?.kind === 'vline') {
+    const pa = sa.points[0].price
+    const pb = sb.points[0].price
+    // A ABOVE B reads SELL. Strict comparison, so exactly-level lines keep the
+    // last unambiguous reading instead of strobing between two colours.
+    side = pa > pb ? 'short' : pa < pb ? 'long' : leg.side
+    const d = (t: number): string => new Date(t * 1000).toISOString().slice(0, 10)
+    const da = d(ta.points[0].time)
+    const db = d(tb.points[0].time)
+    window = {
+      strikeLo: Math.min(pa, pb),
+      strikeHi: Math.max(pa, pb),
+      expFrom: da <= db ? da : db,
+      expTo: da <= db ? db : da,
+    }
+    // The explicit host still wins per axis — the bounds are the default
+    // interface, not an override of a deliberate binding.
+    if (!priceHosted && !trendHosted) strike = (window.strikeLo + window.strikeHi) / 2
+    if (!timeHosted) expiration = window.expFrom
+  }
+  return { strike, expiration, side, trendHosted, window }
+}
 
 /** Strike read off a trend at a given bar index, the segment EXTRAPOLATED.
  *
@@ -1558,6 +1662,23 @@ export class ChartDraw {
       }
     }
     return out
+  }
+
+  /** Choose (or clear) the contract this leg represents.
+   *
+   *  Clicking the SAME contract again clears it, so the gesture that made a
+   *  choice can also take it back — otherwise a leg could never return to its
+   *  nearest-match default once picked. Persisted, so it survives a restart
+   *  the way the rest of the leg does. */
+  setLegPick(id: string, occ: string | null): void {
+    const b = this.bucket()
+    const leg = b.legs.find((l) => l.id === id)
+    if (!leg) return
+    const next = occ !== null && leg.pick !== occ ? occ : undefined
+    if (leg.pick === next) return
+    if (next === undefined) delete leg.pick
+    else leg.pick = next
+    this.commit()
   }
 
   /** Show or hide one leg. Ends in commit() because the flag is persisted; a

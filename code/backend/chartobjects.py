@@ -373,6 +373,24 @@ def validate(doc: Any) -> dict[str, Any]:
         # next 400ms autosave then DELETES the row that still held the user's
         # work. An optional field costs nothing here — _list gives [] for an
         # absent list and a leg dict simply lacks the key.
+        # THE CHOSEN CONTRACT. A leg is a filter WINDOW and routinely matches
+        # dozens of contracts; `pick` is the one the user actually clicked, and
+        # it is what turns a filter into a trade the analytics can price. An
+        # OCC symbol ('SPY260918P00770000'), not one of this document's ids, so
+        # it is validated as a bounded string and NOT run through _id() — it
+        # references a contract at the provider, not an object in this doc, and
+        # feeding it to the id checker would demand uniqueness against drawings.
+        #
+        # Deliberately NOT checked against the current chain: the window may be
+        # dragged away from the pick, the market closes, a contract expires. A
+        # pick that no longer matches degrades to "no pick" at read time in the
+        # renderer, which is the measures' dangle-and-degrade policy again —
+        # never a validation failure that would reject the whole document.
+        pick = lg.get("pick")
+        if pick is not None:
+            if not isinstance(pick, str) or not (1 <= len(pick) <= MAX_ID):
+                _fail(f"leg {lid}: pick must be a contract symbol, got {pick!r}")
+            out_leg["pick"] = pick
         hid = lg.get("hidden")
         if hid is not None and not isinstance(hid, bool):
             _fail(f"leg {lid}: hidden must be true/false, got {hid!r}")

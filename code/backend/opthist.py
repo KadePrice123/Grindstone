@@ -1,0 +1,247 @@
+"""Archived option-chain history — the data behind the Opt page's history side.
+
+Reads ``<data>/options_history.db``, which ``tools/loadhist.py`` builds from
+the workspace vault (daily EOD chains; SPY back to 2010). This is the ONLY
+source of an option's price/spread through time: Alpaca sells no historical
+option quotes on any plan (RESEARCH.md, verified 2026-08-06), so when this
+database is absent the honest answer is a named reason, never an empty chart.
+
+Read-only throughout — the sqlite URI carries mode=ro, so no code path here
+can create, grow or lock the database the loader owns. Pure stdlib.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+from .db import data_dir
+
+NO_DB_REASON = ("no archived chain history is loaded — the live feed cannot "
+                "provide it (Alpaca sells no historical option quotes), so "
+                "history comes from your own archive once it is imported")
+
+# Mirrors loadhist.BUCKETS; read from hist_meta at query time when present so
+# the two cannot drift silently after a loader change.
+DEFAULT_BUCKETS = [(0.005, 0.05), (0.05, 0.15), (0.15, 0.25),
+                   (0.25, 0.35), (0.35, 0.50), (0.50, 1.01)]
+
+
+def db_path() -> Path:
+    return data_dir() / "options_history.db"
+
+
+def _open() -> sqlite3.Connection | None:
+    p = db_path()
+    if not p.exists():
+        return None
+    con = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _meta(con: sqlite3.Connection) -> dict[str, str]:
+    try:
+        return {r["key"]: r["value"] for r in con.execute("SELECT key, value FROM hist_meta")}
+    except sqlite3.Error:
+        return {}
+
+
+def _refuse(reason: str) -> dict[str, Any]:
+    return {"available": False, "reason": reason, "rows": [], "source": "none"}
+
+
+def history(underlying: str, expiration: str, strike: float,
+            right: str) -> dict[str, Any]:
+    """One contract's daily row through its archived life.
+
+    The rows carry both the calendar date and the DTE at that date, because the
+    two views chart different x-axes: price history runs on the date, the fan
+    chart runs on days-to-expiry. Spread is None on any day with no real bid —
+    a one-sided market has no spread, and the chart draws that as a gap.
+    """
+    con = _open()
+    if con is None:
+        return _refuse(NO_DB_REASON)
+    try:
+        exp = dt.date.fromisoformat(expiration)
+        rows = con.execute(
+            "SELECT date, bid, ask, last, iv, delta, volume, open_interest"
+            " FROM hist_chain WHERE underlying=? AND expiration=? AND right=?"
+            " AND strike BETWEEN ? AND ? ORDER BY date",
+            (underlying.upper(), expiration, right, strike - 0.005, strike + 0.005),
+        ).fetchall()
+        meta = _meta(con)
+    finally:
+        con.close()
+    if not rows:
+        return _refuse(f"no archived rows for {underlying.upper()} {strike:g}"
+                       f" {right} {expiration} — the archive's recent window may"
+                       " not reach this contract")
+    out = []
+    for r in rows:
+        day = dt.date.fromisoformat(r["date"])
+        bid, ask = r["bid"], r["ask"]
+        two_sided = bid is not None and ask is not None and bid > 0 and ask >= bid
+        out.append({
+            "date": r["date"],
+            "dte": (exp - day).days,
+            "bid": bid, "ask": ask, "last": r["last"],
+            "mid": round((bid + ask) / 2, 4) if two_sided else None,
+            "spread": round(ask - bid, 4) if two_sided else None,
+            "iv": r["iv"], "delta": r["delta"],
+            "volume": r["volume"], "open_interest": r["open_interest"],
+        })
+    return {"available": True, "rows": out,
+            "source": meta.get("source", "your archive"),
+            "first": out[0]["date"], "last": out[-1]["date"]}
+
+
+def series_history(underlying: str, right: str, dte: int,
+                   delta: float | None = None, strike: float | None = None,
+                   dte_tol: int = 3, delta_tol: float = 0.08,
+                   strike_tol: float = 1.0) -> dict[str, Any]:
+    """The CONSTANT-SHAPE series: what "a contract like this one" has cost,
+    day by day, across the archive's recent window.
+
+    "Like this one" is |DELTA| + DTE when a delta is known — Kade's call, and
+    the industry's: a fixed strike drifts through moneyness as the underlying
+    moves, so its series mostly re-plots the underlying (a 765P was $75 when
+    SPY sat at 690 — that number is moneyness, not richness). Constant delta
+    holds the trade's RISK SHAPE fixed, which is the apples-to-apples line.
+    Strike matching remains the fallback for contracts whose delta the feed
+    omitted (0DTE intraday, dead wings).
+
+    Per day, one best match: nearest DTE, then nearest |delta| (or strike) —
+    and each point CARRIES what it actually used, so a day matched at D.27
+    instead of D.30 says so rather than pretending the series is constant.
+    """
+    if dte <= 0 or dte > 400:
+        raise ValueError("dte out of range")
+    if delta is None and strike is None:
+        raise ValueError("need a delta or a strike to define the shape")
+    con = _open()
+    if con is None:
+        return _refuse(NO_DB_REASON)
+    adelta = abs(delta) if delta is not None else None
+    try:
+        if adelta is not None:
+            rows = con.execute(
+                "SELECT date, expiration, strike, bid, ask, iv, delta"
+                " FROM hist_chain WHERE underlying=? AND right=?"
+                " AND delta IS NOT NULL AND ABS(ABS(delta) - ?) <= ?"
+                # The DTE window in SQL keeps the scan proportional to the
+                # answer: julianday prunes the 7M-row table to candidates.
+                " AND julianday(expiration) - julianday(date) BETWEEN ? AND ?",
+                (underlying.upper(), right, adelta, delta_tol,
+                 dte - dte_tol, dte + dte_tol),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT date, expiration, strike, bid, ask, iv, delta"
+                " FROM hist_chain WHERE underlying=? AND right=?"
+                " AND strike BETWEEN ? AND ?"
+                " AND julianday(expiration) - julianday(date) BETWEEN ? AND ?",
+                (underlying.upper(), right, strike - strike_tol, strike + strike_tol,
+                 dte - dte_tol, dte + dte_tol),
+            ).fetchall()
+        meta = _meta(con)
+    finally:
+        con.close()
+    if not rows:
+        what = (f"delta {adelta:.2f}+-{delta_tol:g}" if adelta is not None
+                else f"${strike:g}+-{strike_tol:g}")
+        return _refuse(f"no archived {underlying.upper()} {right} near {what}"
+                       f" at {dte}+-{dte_tol} DTE")
+
+    best: dict[str, sqlite3.Row] = {}
+
+    def score(r: sqlite3.Row) -> tuple[float, float]:
+        d = (dt.date.fromisoformat(r["expiration"]) - dt.date.fromisoformat(r["date"])).days
+        near = (abs(abs(r["delta"]) - adelta) if adelta is not None
+                else abs(r["strike"] - strike))
+        return (abs(d - dte), near)
+
+    for r in rows:
+        cur = best.get(r["date"])
+        if cur is None or score(r) < score(cur):
+            best[r["date"]] = r
+
+    out = []
+    for date in sorted(best):
+        r = best[date]
+        bid, ask = r["bid"], r["ask"]
+        two_sided = bid is not None and ask is not None and bid > 0 and ask >= bid
+        d = (dt.date.fromisoformat(r["expiration"]) - dt.date.fromisoformat(date)).days
+        out.append({
+            "date": date,
+            "mid": round((bid + ask) / 2, 4) if two_sided else None,
+            "bid": bid, "ask": ask,
+            "spread": round(ask - bid, 4) if two_sided else None,
+            "used_dte": d, "used_strike": r["strike"],
+            "used_delta": r["delta"],
+            "iv": r["iv"], "delta": r["delta"],
+        })
+    return {"available": True, "rows": out,
+            "source": meta.get("source", "your archive"),
+            "mode": "delta" if adelta is not None else "strike",
+            "target": {"delta": adelta, "strike": strike, "right": right,
+                       "dte": dte, "dte_tol": dte_tol,
+                       "delta_tol": delta_tol, "strike_tol": strike_tol},
+            "first": out[0]["date"], "last": out[-1]["date"]}
+
+
+def fanchart(underlying: str, expiration: str, strike: float,
+             right: str) -> dict[str, Any]:
+    """The fan chart: this contract's spread path over its life, drawn against
+    the archive-wide spread percentiles of SIMILAR contracts at each DTE.
+
+    Similar means the same |delta| bucket, chosen from the MEDIAN |delta| of the
+    contract's own archived life — a contract drifts across deltas as the
+    underlying moves, and the median is the band it actually lived in. The band
+    says how contracts like this one have historically been priced at each
+    point of their life; the path says how this one actually was.
+    """
+    hist = history(underlying, expiration, strike, right)
+    if not hist["available"]:
+        return {**hist, "band": [], "path": []}
+    deltas = sorted(abs(r["delta"]) for r in hist["rows"] if r["delta"])
+    if not deltas:
+        return {"available": False, "band": [], "path": [], "source": hist["source"],
+                "reason": "this contract's archived rows carry no delta, so there"
+                          " is nothing to pool it with"}
+    med = deltas[len(deltas) // 2]
+
+    con = _open()
+    if con is None:  # raced away since history() — treat as absent
+        return _refuse(NO_DB_REASON) | {"band": [], "path": []}
+    try:
+        meta = _meta(con)
+        try:
+            buckets = [tuple(b) for b in json.loads(meta.get("buckets", ""))]
+        except (ValueError, TypeError):
+            buckets = DEFAULT_BUCKETS
+        bucket = next((i for i, (lo, hi) in enumerate(buckets) if lo <= med < hi), None)
+        band_rows = [] if bucket is None else con.execute(
+            "SELECT dte, p10, p25, p50, p75, p90, n FROM hist_spread_pct"
+            " WHERE underlying=? AND right=? AND bucket=? ORDER BY dte",
+            (underlying.upper(), right, bucket),
+        ).fetchall()
+    finally:
+        con.close()
+
+    lo, hi = (buckets[bucket] if bucket is not None else (None, None))
+    return {
+        "available": True,
+        "source": hist["source"],
+        "path": [{"dte": r["dte"], "spread": r["spread"], "date": r["date"]}
+                 for r in hist["rows"]],
+        "band": [dict(r) for r in band_rows],
+        "bucket": {"median_delta": round(med, 3), "lo": lo, "hi": hi},
+        # An empty band with a real path is a legitimate state (thin bucket);
+        # say why rather than leaving a bare line where bands were promised.
+        **({} if band_rows else
+           {"band_reason": "not enough similar archived contracts to draw a band"}),
+    }

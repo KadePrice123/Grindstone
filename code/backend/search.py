@@ -103,6 +103,11 @@ def _help_match(q: str) -> list[dict[str, Any]]:
     return out
 
 NEWS_WORDS = {"news", "headlines", "articles", "article"}
+# "SPY Opt" — the options workstation for a symbol, reached the same way its
+# news is. A bare word with a space stays a SEARCH by the omnibox's own
+# conservative rule, so the destination has to be offered here rather than by
+# address parsing; this is the grammar that makes Kade's "SPY Opt" land.
+OPT_WORDS = {"opt", "opts", "option", "options", "chain", "chains", "greeks"}
 
 
 def _sym_row(e: dict[str, Any]) -> dict[str, Any]:
@@ -359,6 +364,24 @@ def query(q: str, uni: Universe, con: sqlite3.Connection,
                      "subtitle": f'Latest headlines for {hit["name"] or hit["symbol"]}'},
                     _sym_row(hit),
                     *[_news_row(it) for it in items],
+                ]
+                return {"results": results[:limit], "intent": intent}
+
+    # ---- intent grammar: "<TICKER> opt" / "opt <TICKER>" ------------------
+    # Below the news branch deliberately: "SPY options news" is a news query
+    # about options, and the more specific reading should win.
+    if len(tokens) >= 2:
+        opt_toks = [t for t in tokens if t.lower() in OPT_WORDS]
+        other = [t for t in tokens if t.lower() not in OPT_WORDS]
+        if opt_toks and other:
+            hit = uni.exact(other[0])
+            if hit:
+                intent = {"kind": "symbol-opt", "symbol": hit["symbol"]}
+                results = [
+                    {"type": "action", "action": "symbol-opt", "symbol": hit["symbol"],
+                     "title": f'{hit["symbol"]} Opt',
+                     "subtitle": "Options analytics for the trade drawn on this chart"},
+                    _sym_row(hit),
                 ]
                 return {"results": results[:limit], "intent": intent}
 

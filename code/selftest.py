@@ -437,6 +437,24 @@ def _search_engine():
                              live_news=lambda s: (called.append(s), [])[1])
         assert called == ["TSLA"], "empty local news must consult live_news"
 
+        # -- "SPY Opt" reaches the workstation ---------------------------
+        # The omnibox keeps anything containing a space as a SEARCH by its own
+        # conservative rule, so this grammar is the only thing that makes
+        # Kade's "SPY Opt" land somewhere. Same shape as the "<TICKER> news"
+        # intent it sits beside.
+        for phrase in ("SPY opt", "opt SPY", "SPY options", "spy chain"):
+            r = search_mod.query(phrase, uni, con)
+            assert r["intent"] == {"kind": "symbol-opt", "symbol": "SPY"}, (phrase, r["intent"])
+            top = r["results"][0]
+            assert top["action"] == "symbol-opt" and top["symbol"] == "SPY", (phrase, top)
+            assert top["title"] == "SPY Opt", (phrase, top)
+        # NEWS still wins where both words appear: "SPY options news" is a news
+        # query about options, and the more specific reading must not be stolen.
+        assert search_mod.query("SPY options news", uni, con)["intent"] == {
+            "kind": "symbol-news", "symbol": "SPY"}, "the opt grammar swallowed a news query"
+        # A bare word is not a destination — no ticker, no intent.
+        assert search_mod.query("options", uni, con)["intent"] is None
+
         r = search_mod.query("aple", uni, con)
         syms = [x.get("symbol") for x in r["results"] if x["type"] == "symbol"]
         assert "AAPL" in syms, f"one-typo company name lost: {syms}"
@@ -2997,6 +3015,7 @@ def _options_chain():
       - Malformed parameters are 422, never a fetch.
     """
     import datetime as _dt
+    import sqlite3
     import tempfile
 
     sys.path.insert(0, str(CODE))
@@ -3100,6 +3119,146 @@ def _options_chain():
         options_mod.fetch(creds, "SPY", d(10), d(17), 550.0, 560.0, "P")
         assert len(seen["calls"]) == 1, \
             f"cache miss: {len(seen['calls'])} upstream calls for one window"
+
+        # -- the fields the heatmap draws its COLUMNS from -------------------
+        # Real listed dates come from the data, never from a weekday rule: SPY
+        # has Good-Friday Thursdays and daily expiries, and any generated
+        # calendar gets those wrong.
+        assert got["expirations"] == sorted({c["expiration"] for c in got["contracts"]}), \
+            f"expirations must be the distinct dates of the filtered rows: {got}"
+        # And they come from the FULL filtered set, before the MAX_ROWS slice.
+        # Reading them off the truncated list would drop whole columns while
+        # `total` still counted the contracts in them — a grid quietly missing
+        # its far month. Proven by truncating hard and checking the far date
+        # survives even though its rows do not.
+        real_max = options_mod.MAX_ROWS
+        try:
+            options_mod.MAX_ROWS = 1
+            options_mod._cache.clear()
+            cut = options_mod.fetch(creds, "SPY", d(10), d(17), 550.0, 560.0, "P")
+            assert cut["truncated"] is True and len(cut["contracts"]) == 1, cut
+            assert len(cut["expirations"]) > len(
+                {c["expiration"] for c in cut["contracts"]}), (
+                "expirations were taken AFTER the row cap, so a truncated "
+                f"response loses whole columns: {cut['expirations']}")
+        finally:
+            options_mod.MAX_ROWS = real_max
+        # Staleness is the server's to declare — only it knows whether it
+        # served a live call or a cached region.
+        assert isinstance(got.get("age_seconds"), (int, float)), got
+
+        # -- archived history: the Opt page's history side --------------------
+        # opthist reads <data>/options_history.db, which loadhist.py builds from
+        # the vault. The gate is HERMETIC: data_dir is patched to a temp dir, so a
+        # 588MB real database on this machine can neither help nor hurt.
+        from backend import opthist as opthist_mod
+        real_dd = opthist_mod.data_dir
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                opthist_mod.data_dir = lambda: Path(tmp)
+                # ABSENT database: a named refusal, never an empty chart. This is
+                # every fresh install, because Alpaca sells no historical option
+                # quotes at any plan — the reason must say where history comes from.
+                r = opthist_mod.history("SPY", "2026-09-18", 560.0, "P")
+                assert r["available"] is False and "no archived" in r["reason"], r
+                fr = opthist_mod.fanchart("SPY", "2026-09-18", 560.0, "P")
+                assert fr["available"] is False and fr["band"] == [] and fr["path"] == [], fr
+
+                hdb = sqlite3.connect(Path(tmp) / "options_history.db")
+                hdb.executescript(
+                    "CREATE TABLE hist_chain (underlying TEXT, date TEXT, expiration TEXT,"
+                    " strike REAL, right TEXT, bid REAL, ask REAL, last REAL, iv REAL,"
+                    " delta REAL, volume REAL, open_interest REAL,"
+                    " PRIMARY KEY (underlying, expiration, strike, right, date));"
+                    "CREATE TABLE hist_spread_pct (underlying TEXT, right TEXT, dte INT,"
+                    " bucket INT, p10 REAL, p25 REAL, p50 REAL, p75 REAL, p90 REAL, n INT,"
+                    " PRIMARY KEY (underlying, right, dte, bucket));"
+                    "CREATE TABLE hist_meta (key TEXT PRIMARY KEY, value TEXT);")
+                hist_rows = [
+                    # three days of one contract; the middle day has NO BID
+                    ("SPY", "2026-08-01", "2026-09-18", 560.0, "P", 3.40, 3.50, 3.45, .14, -.28, 10, 100),
+                    ("SPY", "2026-08-04", "2026-09-18", 560.0, "P", 0.0, 3.60, None, .15, -.30, 0, 100),
+                    ("SPY", "2026-08-05", "2026-09-18", 560.0, "P", 3.80, 3.90, 3.85, .15, -.32, 5, 90),
+                ]
+                hdb.executemany("INSERT INTO hist_chain VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", hist_rows)
+                # two buckets of band rows; only the contract's own bucket may return.
+                # median |delta| of (.28,.30,.32) is .30 -> bucket 3 (0.25-0.35)
+                hdb.executemany("INSERT INTO hist_spread_pct VALUES (?,?,?,?,?,?,?,?,?,?)", [
+                    ("SPY", "P", 40, 3, .05, .08, .10, .14, .20, 500),
+                    ("SPY", "P", 45, 3, .05, .08, .11, .15, .22, 480),
+                    ("SPY", "P", 40, 1, .01, .02, .03, .04, .05, 900),  # wrong bucket
+                ])
+                hdb.commit()
+                hdb.close()
+
+                h = opthist_mod.history("SPY", "2026-09-18", 560.0, "P")
+                assert h["available"] is True and len(h["rows"]) == 3, h
+                assert [x["date"] for x in h["rows"]] == ["2026-08-01", "2026-08-04", "2026-08-05"]
+                assert h["rows"][0]["dte"] == 48, h["rows"][0]   # 08-01 -> 09-18
+                # THE GAP RULE: a one-sided market has no mid and no spread. A zero
+                # bid averaged into either would poison both charts downstream.
+                assert h["rows"][1]["mid"] is None and h["rows"][1]["spread"] is None, h["rows"][1]
+                assert abs(h["rows"][0]["spread"] - 0.10) < 1e-9, h["rows"][0]
+
+                    # THE CONSTANT-SHAPE SERIES, delta-first (Kade's call): per day,
+                # nearest DTE wins, then nearest |delta| — and the chosen strike
+                # WALKS with the market, which is the whole point of the mode.
+                hdb2 = sqlite3.connect(Path(tmp) / "options_history.db")
+                hdb2.executemany(
+                    "INSERT INTO hist_chain VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [
+                    # day 1: two candidates — dte 21 @ .31 must beat dte 23 @ .30
+                    ("SPY", "2026-07-01", "2026-07-22", 600.0, "P", 2.0, 2.1, None, .2, -.31, 1, 1),
+                    ("SPY", "2026-07-01", "2026-07-24", 601.0, "P", 2.2, 2.3, None, .2, -.30, 1, 1),
+                    # day 2: same dte twice — nearer |delta| (.29) must win
+                    ("SPY", "2026-07-02", "2026-07-23", 590.0, "P", 1.9, 2.0, None, .2, -.29, 1, 1),
+                    ("SPY", "2026-07-02", "2026-07-23", 595.0, "P", 2.4, 2.5, None, .2, -.38, 1, 1),
+                    # a no-delta row must never enter delta mode
+                    ("SPY", "2026-07-06", "2026-07-27", 592.0, "P", 2.0, 2.1, None, .2, None, 1, 1),
+                ])
+                hdb2.commit(); hdb2.close()
+                sr = opthist_mod.series_history("SPY", "P", 21, delta=-0.30)
+                assert sr["available"] is True and sr["mode"] == "delta", sr
+                days = {r["date"]: r for r in sr["rows"]}
+                assert days["2026-07-01"]["used_dte"] == 21, days["2026-07-01"]
+                assert abs(days["2026-07-02"]["used_delta"]) == 0.29, days["2026-07-02"]
+                # the strike is an OUTPUT here, not a filter — it must differ by day
+                assert days["2026-07-01"]["used_strike"] != days["2026-07-02"]["used_strike"]
+                assert "2026-07-06" not in days, "a delta-less row entered the delta series"
+                # no shape at all is a caller error, not an empty 200
+                try:
+                    opthist_mod.series_history("SPY", "P", 21)
+                    raise AssertionError("series without delta or strike must refuse")
+                except ValueError:
+                    pass
+
+                f = opthist_mod.fanchart("SPY", "2026-09-18", 560.0, "P")
+                assert f["available"] is True and len(f["path"]) == 3, f
+                assert f["bucket"]["median_delta"] == 0.3, f["bucket"]
+                # only the median-delta bucket's band rows — never the wrong pool
+                assert len(f["band"]) == 2 and all(b["p50"] >= 0.10 for b in f["band"]), f["band"]
+                # an unknown contract refuses with its own reason, not an empty 200
+                miss = opthist_mod.history("SPY", "2026-09-18", 999.0, "P")
+                assert miss["available"] is False and "no archived rows" in miss["reason"], miss
+        finally:
+            opthist_mod.data_dir = real_dd
+
+
+        # -- asset classes that have no chain, answered BEFORE the network ---
+        seen["calls"].clear()
+        for klass, word in (("index", "index"), ("future", "futures"), ("crypto", "crypto")):
+            r = options_mod.fetch(creds, "SPX", d(10), d(17), 550.0, 560.0, "P",
+                                  asset_class=klass)
+            assert r["available"] is False and word in r["reason"], (klass, r)
+            assert r["expirations"] == [], r
+        assert not seen["calls"], \
+            "an asset class with no chain still called the provider — the point " \
+            "is to answer without one, so an empty list can never be confused " \
+            "with a filter that matched nothing"
+        # An UNKNOWN class passes through: the universe is not exhaustive, and
+        # refusing on absence would block every ticker it has not heard of.
+        options_mod._cache.clear()
+        assert options_mod.fetch(creds, "SPY", d(10), d(17), 550.0, 560.0, "P",
+                                 asset_class=None)["available"] is True
     finally:
         options_mod.AlpacaData = real_client  # type: ignore[misc]
         options_mod._cache.clear()
@@ -3229,7 +3388,7 @@ def _chart_legs():
     LEG = {"id": "lg9", "side": "short", "right": "P", "expiration": "2026-09-18",
            "strike": 560.0, "dteTol": 3, "strikeTol": 5.0, "slot": 1,
            "hostId": "gone-with-the-trend", "timeHostId": "dw7", "priceHostId": "dw8",
-           "group": "gp3", "hidden": True,
+           "group": "gp3", "hidden": True, "pick": "SPY260918P00560000",
            "strikeHostA": "dwA", "strikeHostB": "dwB",
            "timeHostA": "dwC", "timeHostB": "dwD"}
     # A leg-minted guide. The flag is what lets the engine sweep it when no leg
@@ -3274,6 +3433,10 @@ def _chart_legs():
         # anywhere reporting a loss. True, not False, on purpose — the field is
         # stored truthy-only, so False normalizes away and would prove nothing.
         assert got["hidden"] is True, got
+        # The CHOSEN contract. A leg is a filter matching dozens of contracts;
+        # this is the one turning it into a priceable trade, so losing it on
+        # restart would silently move the analytics back onto a guess.
+        assert got["pick"] == "SPY260918P00560000", got
         for f in ("strikeHostA", "strikeHostB", "timeHostA", "timeHostB"):
             assert got[f] == {"strikeHostA": "dwA", "strikeHostB": "dwB",
                               "timeHostA": "dwC", "timeHostB": "dwD"}[f], (f, got)
@@ -3302,6 +3465,8 @@ def _chart_legs():
             # store it and hand the renderer a non-boolean for a boolean field.
             "numeric hidden": {**LEG, "hidden": 1},
             "stringy hidden": {**LEG, "hidden": "yes"},
+            "numeric pick": {**LEG, "pick": 12345},
+            "oversized pick": {**LEG, "pick": "X" * 500},
         }
         for name, leg in bad.items():
             rr = client.put("/api/chart-objects", headers=A,
@@ -3359,7 +3524,7 @@ def _chart_legs():
     assert exe, "no node runtime on PATH — the leg arithmetic cannot be run"
 
     probe = r"""
-import { ChartDraw, legStrikeOnTrend, legWindow, SIDE_INK }
+import { ChartDraw, legStrikeOnTrend, legWindow, resolveLegDoc, SIDE_INK, tradingDayOffset }
   from './src/renderer/src/components/ChartDraw.ts'
 const out = []
 const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail })
@@ -3783,6 +3948,230 @@ const legC = e.addLeg({ side: 'long', right: 'P', expiration: '2026-09-18', stri
 ok('the freed slot 0 is reused rather than drifting the palette',
    b.legs.find((l) => l.id === legC).slot === 0, JSON.stringify(b.legs.map((l) => l.slot)))
 
+// ---- THE HEATMAP: mid, capital base, annualisation ------------------------
+const og = await import('./src/renderer/src/optgrid.ts')
+
+// A ZERO BID HAS NO MID. The single most load-bearing rule on the surface:
+// averaging a fabricated 0 against a real ask paints a confident half-price
+// exactly out in the wings, which is where the eye-catching kinks live.
+ok('a normal book has a mid', og.midOf(3.40, 3.50) === 3.45, og.midOf(3.40, 3.50))
+ok('a ZERO bid has no mid', og.midOf(0, 0.05) === null, og.midOf(0, 0.05))
+ok('a missing bid has no mid', og.midOf(null, 0.05) === null, og.midOf(null, 0.05))
+ok('a missing ask has no mid', og.midOf(1.0, null) === null, '')
+ok('a crossed book is not averaged', og.midOf(2.0, 1.0) === null, og.midOf(2.0, 1.0))
+ok('cellState separates no-bid from no-quote',
+   og.cellStateOf({ bid: 0, ask: 0.05 }) === 'no-bid' &&
+   og.cellStateOf({ bid: 1, ask: null }) === 'no-quote' &&
+   og.cellStateOf({ bid: 1, ask: 2 }) === 'priced', '')
+
+// THE CAPITAL BASE IS THE STRIKE, PER SHARE. Premium and strike are both
+// per-share quotes, so the x100 appears on both sides of premium/capital and
+// cancels; carrying it bought nothing but a units mistake waiting to happen.
+ok('the capital base is the bare strike', og.capitalFor(560) === 560, og.capitalFor(560))
+ok('a nonsense strike has no base', og.capitalFor(0) === null, og.capitalFor(0))
+
+// THE POINT OF THE DENOMINATOR: a higher strike must be pitted against a lower
+// one on rate, not on bare premium. These are the real quotes from the panel —
+// the 770 put pays 1.32 more than the 766, which LOOKS like the better trade
+// until each is divided by the capital it ties up.
+const r770 = 13.39 / 770
+const r766 = 12.07 / 766
+ok('the richer bare credit is also the better RATE here',
+   r770 > r766, `${(r770 * 100).toFixed(3)}% vs ${(r766 * 100).toFixed(3)}%`)
+// And the case that matters more, constructed rather than quoted: a LARGER
+// credit on a LARGER strike can still be the worse trade. 12.20 beats 12.07 on
+// the bare number and loses on the rate, which is the whole reason the
+// denominator exists and the reason a bare-premium heatmap misleads.
+ok('a bigger credit on a bigger strike can still be the worse rate',
+   12.20 > 12.07 && 12.20 / 780 < r766,
+   `${((12.20 / 780) * 100).toFixed(3)}% vs ${(r766 * 100).toFixed(3)}%`)
+
+// COMPOUNDED OVER SESSIONS, because "is one 15-DTE better than rolling the
+// 5-DTE three times" is a compounding question, and a position can only be
+// rolled when the market opens.
+ok('a year is 252 sessions, not 365 days', og.TRADING_DAYS_PER_YEAR === 252, '')
+// LINEAR, not compounded. Compounding quoted 831%/yr on a real spread — a rate
+// that assumes eight consecutive winning rolls, so it could never be collected.
+const a21 = og.annualise(0.01, 21)          // ~30 calendar days
+ok('1% over 21 sessions scales to 12%/yr, linearly',
+   Math.abs(a21 - 0.12) < 1e-9, a21)
+ok('and it stays LINEAR: half the horizon is exactly twice the rate',
+   Math.abs(og.annualise(0.01, 10.5) - 2 * a21) < 1e-9, og.annualise(0.01, 10.5))
+ok('a rich short-tenor return no longer explodes past all meaning',
+   og.annualise(0.316, 31) < 3.0, og.annualise(0.316, 31))
+ok('a non-positive horizon has no annual rate', og.annualise(0.01, 0) === null, '')
+// WEEKENDS ARE WHERE THE TWO CONVENTIONS DIVERGE, and it is at short tenors —
+// exactly where the surface is most tempting. 2026-08-06 is a Thursday.
+ok('a span over one weekend counts its sessions, not its dates',
+   og.tradingDaysTo('2026-08-06', '2026-08-14') === 6,
+   og.tradingDaysTo('2026-08-06', '2026-08-14'))
+ok('a span over two weekends holds FEWER sessions per calendar day',
+   og.tradingDaysTo('2026-08-06', '2026-08-21') === 11,
+   og.tradingDaysTo('2026-08-06', '2026-08-21'))
+// 0DTE is one session of risk, not zero — it must annualise, not divide by nothing.
+ok('a same-day expiry is one session, never zero',
+   og.tradingDaysTo('2026-08-06', '2026-08-06') === 1, '')
+// TWO WALKS, ONE ANSWER. optgrid repeats ChartDraw's weekday count because it
+// must load under plain node and ChartDraw's extensionless imports will not.
+// Duplication is normally drift waiting to happen, so pin them together: change
+// one and this fails until the other follows.
+for (const [from, to] of [['2026-08-06', '2026-08-14'], ['2026-08-06', '2026-08-21'],
+                          ['2026-01-01', '2026-03-31'], ['2026-08-06', '2026-08-08']]) {
+  ok(`both trading-day walks agree over ${from}..${to}`,
+     og.tradingDaysTo(from, to) === Math.max(1, tradingDayOffset(from, to)),
+     `${og.tradingDaysTo(from, to)} vs ${tradingDayOffset(from, to)}`)
+}
+// A 0DTE credit scaled by 252 sessions is large but FINITE and honest — under
+// the old compounding it was a number with hundreds of digits.
+ok('a 0DTE 5% credit scales to 1260%/yr, not to a nonsense',
+   Math.abs(og.annualise(0.05, 1) - 12.6) < 1e-9, og.annualise(0.05, 1))
+// The cap still guards the tail: past it the figure is noise, so it is reported
+// AS capped rather than plotted.
+ok('a genuinely absurd rate is CAPPED', og.annualise(0.5, 1) === og.ANNUAL_CAP,
+   og.annualise(0.5, 1))
+ok('and prints as capped rather than as a number',
+   og.fmtAnnual(og.ANNUAL_CAP) === '>10000%', og.fmtAnnual(og.ANNUAL_CAP))
+ok('no mid means no yield', og.annualYield(null, 56000, 30) === null, '')
+
+// THE GRID.
+const today = '2026-08-06'
+const gc = (strike, expiration, right, bid, ask, delta) => ({
+  occ_symbol: `SPY${expiration.replace(/-/g, '')}${right}${strike}`,
+  expiration, strike, right, bid, ask, delta,
+})
+const g = og.buildGrid([
+  gc(560, '2026-09-18', 'P', 3.40, 3.50, -0.27),
+  gc(555, '2026-09-18', 'P', 2.40, 2.50, -0.21),
+  gc(560, '2026-08-21', 'P', 1.40, 1.50, -0.19),
+  gc(550, '2026-09-18', 'P', 0, 0.05, -0.02),   // zero bid: priced-out
+], { today, side: 'short' })
+ok('strikes descend, so the chain reads top-down',
+   JSON.stringify(g.strikes) === '[560,555,550]', JSON.stringify(g.strikes))
+ok('columns ascend by DTE',
+   g.columns.map((c) => c.dte).join(',') === '15,43', g.columns.map((c) => c.dte).join(','))
+ok('a pair with no contract is ABSENT, not zero',
+   g.cells.get(og.cellKey(555, '2026-08-21')) === undefined, '')
+ok('the zero-bid cell exists but carries no mid and no yield', (() => {
+  const c = g.cells.get(og.cellKey(550, '2026-09-18'))
+  return c && c.state === 'no-bid' && c.mid === null && c.annual === null
+})(), JSON.stringify(g.cells.get(og.cellKey(550, '2026-09-18'))))
+// The ramp is stretched over PRICED cells only — a zero-bid cell folded into
+// the extremes would drag the whole surface toward a yield nobody can collect.
+ok('the ramp extremes ignore unpriced cells',
+   g.annualLo !== null && g.annualHi !== null && g.annualLo > 0,
+   `${g.annualLo} .. ${g.annualHi}`)
+ok('ramp position is 0..1 across the priced range',
+   og.rampPosition(g.annualHi, g.annualLo, g.annualHi) === 1 &&
+   og.rampPosition(g.annualLo, g.annualLo, g.annualHi) === 0, '')
+ok('a flat surface shades nothing rather than painting one cell best',
+   og.rampPosition(5, 5, 5) === null, '')
+ok('credit is the gain token, debit the loss token',
+   og.sideInk('short') === 'var(--gain)' && og.sideInk('long') === 'var(--loss)', '')
+
+// ---- PAYOFF: known-answer structures, checked against hand arithmetic -----
+const pf = await import('./src/renderer/src/payoff.ts')
+const PL = (side, right, strike, premium) => ({ side, right, strike, premium })
+const near = (a, b, tol = 1e-6) => Math.abs(a - b) < tol
+
+// LONG CALL. Debit 5, breakeven 105, loss capped at the premium, profit runs.
+{
+  const r = pf.analyse([PL('long', 'C', 100, 5)])
+  ok('long call is a debit', near(r.net, -5), r.net)
+  ok('long call max loss is the premium and NOTHING more',
+     r.maxLoss.bounded && near(r.maxLoss.value, -5), JSON.stringify(r.maxLoss))
+  ok('long call profit is UNLIMITED, not a large number',
+     r.maxProfit.bounded === false && r.maxProfit.value === null, JSON.stringify(r.maxProfit))
+  ok('long call breaks even at strike + premium',
+     r.breakevens.length === 1 && near(r.breakevens[0], 105), JSON.stringify(r.breakevens))
+}
+// NAKED SHORT CALL. The mirror, and the case a "max loss" number must refuse.
+{
+  const r = pf.analyse([PL('short', 'C', 100, 5)])
+  ok('naked short call is a credit', near(r.net, 5), r.net)
+  ok('naked short call LOSS is unlimited — never a big number with a decimal point',
+     r.maxLoss.bounded === false && r.maxLoss.value === null, JSON.stringify(r.maxLoss))
+  ok('and its profit is capped at the credit',
+     r.maxProfit.bounded && near(r.maxProfit.value, 5), JSON.stringify(r.maxProfit))
+}
+// CASH-SECURED PUT. Downside is bounded because the underlying stops at zero,
+// which is exactly why only the upside can ever run away.
+{
+  const r = pf.analyse([PL('short', 'P', 100, 3)])
+  ok('short put max loss is bounded by a zero underlying',
+     r.maxLoss.bounded && near(r.maxLoss.value, -97), JSON.stringify(r.maxLoss))
+  ok('short put breaks even at strike - credit',
+     near(r.breakevens[0], 97), JSON.stringify(r.breakevens))
+}
+// PUT CREDIT SPREAD, 5 wide, 1.50 credit: the defined-risk workhorse.
+{
+  const r = pf.analyse([PL('short', 'P', 100, 2.50), PL('long', 'P', 95, 1.00)])
+  ok('spread nets the difference of the two premiums', near(r.net, 1.5), r.net)
+  ok('spread max profit is the credit', r.maxProfit.bounded && near(r.maxProfit.value, 1.5), '')
+  ok('spread max loss is width minus credit, and it is BOUNDED',
+     r.maxLoss.bounded && near(r.maxLoss.value, -3.5), JSON.stringify(r.maxLoss))
+  ok('spread breaks even at short strike - credit',
+     r.breakevens.length === 1 && near(r.breakevens[0], 98.5), JSON.stringify(r.breakevens))
+}
+// IRON CONDOR: two breakevens, both wings bounded.
+{
+  const r = pf.analyse([
+    PL('long', 'P', 90, 0.50), PL('short', 'P', 95, 1.50),
+    PL('short', 'C', 105, 1.50), PL('long', 'C', 110, 0.50),
+  ])
+  ok('condor nets both credits less both wings', near(r.net, 2.0), r.net)
+  ok('condor is bounded on BOTH sides',
+     r.maxProfit.bounded && r.maxLoss.bounded, JSON.stringify([r.maxProfit, r.maxLoss]))
+  ok('condor max loss is width minus credit', near(r.maxLoss.value, -3.0), r.maxLoss.value)
+  ok('condor has two breakevens, one per wing',
+     r.breakevens.length === 2 && near(r.breakevens[0], 93) && near(r.breakevens[1], 107),
+     JSON.stringify(r.breakevens))
+}
+// A BREAKEVEN PAST THE LAST STRIKE must still be found — it lives on the tail,
+// beyond every evaluated point.
+{
+  const r = pf.analyse([PL('long', 'C', 100, 20)])
+  ok('a breakeven beyond the highest strike is still reported',
+     r.breakevens.length === 1 && near(r.breakevens[0], 120), JSON.stringify(r.breakevens))
+}
+// NO MID, NO ANSWER. The rule that keeps a fabricated price out of a P&L.
+{
+  const r = pf.analyse([PL('short', 'P', 100, 2.5), PL('long', 'P', 95, null)])
+  ok('a leg with no mid makes the whole structure unpriced',
+     r.net === null && r.maxLoss.value === null, JSON.stringify(r))
+  ok('and it says WHY, naming the count',
+     typeof r.reason === 'string' && r.reason.includes('1 leg'), r.reason)
+}
+// RETURN ON RISK: one ratio — max gain over max risk — so a spread, a naked
+// short and a heatmap cell are all measured the same way.
+{
+  const spread = pf.analyse([PL('short', 'P', 100, 2.50), PL('long', 'P', 95, 1.00)])
+  // 1.50 credit against 3.50 at risk = 42.857% for the period.
+  // THE PLAIN RATIO leads — what it pays against what it risks, no assumption
+  // about repeating it. 1.50 credit on 3.50 at risk.
+  ok('a credit spread returns credit / width-less-credit',
+     Math.abs(pf.returnOnRisk(spread) - 0.428571) < 1e-5, pf.returnOnRisk(spread))
+  const debit = pf.analyse([PL('long', 'C', 100, 1.50), PL('short', 'C', 105, 0.50)])
+  ok('a DEBIT spread uses the same ratio: max gain over the debit risked',
+     Math.abs(pf.returnOnRisk(debit) - 4.0) < 1e-9, pf.returnOnRisk(debit))
+  // Kade's own spread, the one that read 831%/yr under compounding.
+  const real = pf.analyse([PL('short', 'P', 750, 1.52), PL('long', 'P', 746, 0.56)])
+  ok('the real spread pays ~31.6% of its risk', Math.abs(pf.returnOnRisk(real) - 0.32) < 0.01,
+     pf.returnOnRisk(real))
+  // The banner shows this ratio ALONE — no annualised twin. A per-year figure
+  // on a single trade was noise: it answered a question nobody asks of one
+  // position, and it crowded out the two numbers that matter.
+  // No denominator, no percentage — never an invented one.
+  ok('an unlimited loss has no return on risk',
+     pf.returnOnRisk(pf.analyse([PL('short', 'C', 100, 5)])) === null, '')
+  ok('an unlimited gain has no return on risk either',
+     pf.returnOnRisk(pf.analyse([PL('long', 'C', 100, 5)])) === null, '')
+}
+ok('unbounded prints as a word, not a number', pf.fmtExtreme({ bounded: false, value: null })
+   === 'unlimited', '')
+ok('a credit reads as a credit in contract dollars',
+   pf.fmtNet(1.5) === '$150.00 credit', pf.fmtNet(1.5))
+ok('a debit reads as a debit', pf.fmtNet(-5) === '$500.00 debit', pf.fmtNet(-5))
+
 // ---- THE COUPLING: a leg and its four lines are ONE object ----------------
 // Kade: "deleting a leg leaves the lines we use to filter, and we can delete a
 // single line from the filter control without deleting the whole leg."
@@ -3865,6 +4254,52 @@ ok('the spared leg still resolves through its bounds, not a stale snapshot',
 c.clearLegs()
 ok('and Clear legs takes the lines with it', owned().length === 0, JSON.stringify(owned()))
 
+// ---- RESOLVING A LEG FROM A STORED DOC ALONE -----------------------------
+// The Opt page has a document and no engine, and reading the stored `side`
+// showed BUY 769.8 for a chart drawing SELL 756.1. The lines are the answer.
+{
+  const e = mkEngine('DOC|1Day')
+  const eb = e.bucket()
+  const id = e.addLeg({ side: 'short', right: 'P', expiration: '2026-09-18',
+                        strike: 560, dteTol: 3, strikeTol: 5 }).id
+  const leg = eb.legs.find((l) => l.id === id)
+  const A = eb.drawings.find((d) => d.id === leg.strikeHostA)
+  const B = eb.drawings.find((d) => d.id === leg.strikeHostB)
+  ok('a short leg is born with A above B', A.points[0].price > B.points[0].price, '')
+  const r1 = resolveLegDoc(leg, eb.drawings)
+  ok('resolving from the document alone reads SELL', r1.side === 'short', r1.side)
+  ok('and takes the strike from the line MIDPOINT, not the stored field',
+     Math.abs(r1.strike - 560) < 1e-9, r1.strike)
+
+  // DRAG A THROUGH B: the side flips, and the stored field never moves.
+  A.points[0].price = 540
+  B.points[0].price = 580
+  const r2 = resolveLegDoc(leg, eb.drawings)
+  ok('crossing the strike lines flips the side to BUY', r2.side === 'long', r2.side)
+  ok('while the STORED side still says short — which is why it must not be read',
+     leg.side === 'short', leg.side)
+  ok('and the strike follows the new midpoint', Math.abs(r2.strike - 560) < 1e-9, r2.strike)
+
+  // Move the pair somewhere else entirely: the stored strike is stale, the
+  // resolved one is not. This is the 769.8-vs-756.1 case exactly.
+  A.points[0].price = 760
+  B.points[0].price = 752
+  const r3 = resolveLegDoc(leg, eb.drawings)
+  ok('a moved pair resolves to where the lines ARE, not where the leg was born',
+     Math.abs(r3.strike - 756) < 1e-9, `${r3.strike} (stored ${leg.strike})`)
+  ok('and that disagrees with the stored strike, proving the check is not vacuous',
+     Math.abs(leg.strike - r3.strike) > 1, `${leg.strike} vs ${r3.strike}`)
+  // THE WINDOW IS THE LINES' RECTANGLE — engine parity for any doc-only
+  // reader. The Opt page once rebuilt a window from the birth tolerances and
+  // showed 8 matches while the chart showed 204 for the same filter.
+  ok('the doc resolution carries the lines rectangle as the filter window',
+     r3.window !== null &&
+     Math.abs(r3.window.strikeLo - 752) < 1e-9 &&
+     Math.abs(r3.window.strikeHi - 760) < 1e-9 &&
+     typeof r3.window.expFrom === 'string' && typeof r3.window.expTo === 'string',
+     JSON.stringify(r3.window))
+}
+
 // ---- PER-LEG VISIBILITY ---------------------------------------------------
 // The same rider count, over the VISIBLE legs instead of the surviving ones.
 const v = mkEngine('VIS|1Day')
@@ -3908,7 +4343,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 94, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 159, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")

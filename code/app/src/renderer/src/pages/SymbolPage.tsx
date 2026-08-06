@@ -92,7 +92,8 @@ export function SymbolPage({
   onNavigate,
 }: {
   symbol: string
-  onNavigate: (r: { name: 'article'; id?: number; url?: string }) => void
+  onNavigate: (r: { name: 'article'; id?: number; url?: string }
+    | { name: 'opt'; symbol: string }) => void
 }) {
   const [data, setData] = useState<SymbolSummary | null>(null)
   const [bars, setBars] = useState<Bar[]>([])
@@ -399,6 +400,17 @@ export function SymbolPage({
         <div className="page-head">
           <ChartMiniIcon />
           <h1>{symbol}</h1>
+          {/* The workstation for this symbol, one click from its chart. Same
+              tab: the Opt page is an extension of this one, not a departure,
+              and its own Back comes straight back here. */}
+          <button
+            type="button"
+            className="seg-btn ph-opt"
+            title={`${symbol} Opt — options analytics (opens a new tab)`}
+            onClick={() => window.grindstone.openTab?.(`opt:${symbol}`)}
+          >
+            Opt
+          </button>
           <span className="dim">{data?.name}</span>
         </div>
         <div className="ph-metrics">
@@ -632,6 +644,10 @@ export function SymbolPage({
                 symbol={symbol}
                 legs={legsEnabled ? legs : []}
                 onToggleHidden={(id, hidden) => draw.current?.setLegHidden(id, hidden)}
+                // Clicking a cell chooses that contract for the leg; clicking
+                // the chosen one again clears it. The engine persists it, so
+                // the trade you built is still there after a restart.
+                onPick={(legId, c) => draw.current?.setLegPick(legId, c.occ_symbol)}
               />
             ) : (
               <div className="sp-news">

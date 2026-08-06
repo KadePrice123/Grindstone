@@ -20,7 +20,7 @@ const TLD =
 
 /** Platform pages that are addressable by name. */
 const PAGES = ['home', 'accounts', 'data', 'settings', 'search', 'article', 'news',
-  'charts', 'help', 'backtest'] as const
+  'charts', 'help', 'backtest', 'opt'] as const
 
 /**
  * Bare words that are addresses in their own right. A browser bar navigates
@@ -119,6 +119,10 @@ export function gsRoute(gs: GsTarget): string {
       return `search:${gs.query}`
     case 'article':
       return `article:${gs.query}`
+    // opt.gs?s=SPY. A bare `opt.gs` has no symbol to analyse, so it falls back
+    // to the multi-chart page rather than opening an empty workstation.
+    case 'opt':
+      return gs.query ? `opt:${gs.query.toUpperCase()}` : 'charts'
     case 'help':
       return gs.query ? `help:${gs.query}` : 'help'
     default:

@@ -52,19 +52,26 @@ _GREEKS = ("bid", "ask", "last", "iv", "delta", "gamma", "theta", "vega", "rho")
 
 def cache_lookup(con: sqlite3.Connection, underlying: str, d_from: dt.date,
                  d_to: dt.date, strike_lo: float, strike_hi: float,
-                 right: str | None, ttl_minutes: float) -> list[dict[str, Any]] | None:
-    """Rows for this window if some fetched region CONTAINS it and is fresh.
+                 right: str | None, ttl_minutes: float
+                 ) -> tuple[list[dict[str, Any]], float] | None:
+    """Rows for this window, and their AGE in seconds, if some fetched region
+    CONTAINS it and is fresh.
 
     Containment, not equality: a leg dragged a few dollars asks a different
     question with the same answer, and equality keying is what made the old
     in-memory cache miss on every drag. None means "ask the provider" — never
     an empty list, because a covered window with no contracts is a real answer
     and must not look like a miss.
+
+    The age rides along because only this function knows it. A cached chain is
+    a real answer, but a caller deciding on it should be told whether it was
+    fetched a moment ago or a quarter of an hour ago, and the alternative is a
+    second query asking what the first already read.
     """
     cutoff = (dt.datetime.now(dt.timezone.utc)
               - dt.timedelta(minutes=ttl_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
     cover = con.execute(
-        "SELECT 1 FROM chain_cover WHERE underlying=?"
+        "SELECT fetched_at FROM chain_cover WHERE underlying=?"
         " AND exp_from<=? AND exp_to>=? AND strike_lo<=? AND strike_hi>=?"
         " AND (right='' OR right=?) AND fetched_at>=? LIMIT 1",
         (underlying, str(d_from), str(d_to), strike_lo, strike_hi,
@@ -79,7 +86,16 @@ def cache_lookup(con: sqlite3.Connection, underlying: str, d_from: dt.date,
         " AND strike>=? AND strike<=?",
         (underlying, str(d_from), str(d_to), strike_lo, strike_hi),
     ).fetchall()
-    return [dict(r) for r in rows]
+    # Stamps are written as UTC 'Z' strings; parsed back the same way rather
+    # than trusting the process's local zone, which would put the age out by
+    # whole hours depending on where the machine is.
+    try:
+        when = dt.datetime.strptime(cover["fetched_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=dt.timezone.utc)
+        age = (dt.datetime.now(dt.timezone.utc) - when).total_seconds()
+    except (ValueError, TypeError, KeyError):
+        age = 0.0  # unreadable stamp: report fresh rather than invent a number
+    return [dict(r) for r in rows], age
 
 
 def cache_store(con: sqlite3.Connection, underlying: str, d_from: dt.date,
@@ -178,10 +194,57 @@ def filter_contracts(rows: list[dict[str, Any]], exp_from: dt.date, exp_to: dt.d
     return out
 
 
+# Asset classes that have no listed options chain at all. Answering these
+# before any network call is not an optimisation — it is the difference between
+# "we asked and there is nothing" and "there was never anything to ask about",
+# and the recorder already refuses them in exactly these words.
+NO_CHAIN_CLASSES = {
+    "index": "an index has no listed options chain of its own — trade the ETF or the index options product",
+    "future": "futures options are not carried by this data feed",
+    "crypto": "crypto has no options chain",
+}
+
+
+def _answer(underlying: str, rows: list[dict[str, Any]], source: str, *,
+            reason: str | None = None, age_s: float | None = None) -> dict[str, Any]:
+    """The one success shape, built in one place.
+
+    Three paths reach it — the database cache, the in-memory cache and a live
+    fetch — and they previously each spelled the dict out. That is how a field
+    added for one path silently goes missing from the other two.
+
+    `expirations` is taken from the FULL filtered set, deliberately BEFORE the
+    MAX_ROWS slice. The heatmap draws one column per expiration; reading them
+    off the truncated list would drop whole columns while `total` still
+    reported the contracts in them, so a grid would quietly lose its far month
+    with nothing anywhere saying it had. This is also what stops the client
+    inventing expirations from a weekday rule — real listed dates come from the
+    data, never from a calendar guess.
+    """
+    total = len(rows)
+    out: dict[str, Any] = {
+        "underlying": underlying,
+        "available": True,
+        "contracts": rows[:MAX_ROWS],
+        "total": total,
+        "truncated": total > MAX_ROWS,
+        "expirations": sorted({r["expiration"] for r in rows if r.get("expiration")}),
+        "source": source,
+    }
+    if reason is not None:
+        out["reason"] = reason
+    # How stale the quotes are, in seconds. A cached chain is a real answer, but
+    # "12 minutes old" and "just now" support different decisions, and only the
+    # server knows which one it handed over.
+    if age_s is not None:
+        out["age_seconds"] = round(max(0.0, age_s), 1)
+    return out
+
+
 def fetch(creds: dict[str, str] | None, underlying: str,
           exp_from: str, exp_to: str, strike_lo: float, strike_hi: float,
           right: str | None, con: sqlite3.Connection | None = None,
-          ttl_minutes: float = 0.0) -> dict[str, Any]:
+          ttl_minutes: float = 0.0, asset_class: str | None = None) -> dict[str, Any]:
     """One leg's contracts, or an honest reason there are none.
 
     Raises ValueError on malformed parameters (the route turns that into 422);
@@ -207,13 +270,28 @@ def fetch(creds: dict[str, str] | None, underlying: str,
         d_from = today
         if d_to < d_from:
             return {"underlying": underlying, "available": True, "contracts": [],
-                    "total": 0, "truncated": False, "source": "alpaca (indicative)",
+                    "total": 0, "truncated": False, "expirations": [],
+                    "source": "alpaca (indicative)",
                     "reason": "that window is entirely in the past — every "
                               "contract in it has expired"}
 
+    # ASSET CLASS, before creds and before any network call. An index or a
+    # future has no listed chain here at all, and asking Alpaca produces an
+    # empty list that is indistinguishable from a filter matching nothing —
+    # so the user retunes a window that was never going to match. An unknown
+    # symbol passes through: the universe is not exhaustive, and refusing on
+    # absence would block every ticker it has not heard of.
+    if asset_class:
+        refusal = NO_CHAIN_CLASSES.get(asset_class.lower())
+        if refusal:
+            return {"underlying": underlying, "available": False, "contracts": [],
+                    "total": 0, "truncated": False, "expirations": [],
+                    "source": "none", "reason": refusal}
+
     if creds is None:
         return {"underlying": underlying, "available": False, "contracts": [],
-                "total": 0, "truncated": False, "source": "none",
+                "total": 0, "truncated": False, "expirations": [],
+                "source": "none",
                 "reason": "no data key — add an Alpaca account to see live chains"}
 
     # ---- the DATABASE cache, tried first --------------------------------
@@ -234,22 +312,22 @@ def fetch(creds: dict[str, str] | None, underlying: str,
             LOG.warning("chain cache read failed, falling back to live: %s", e)
             cached = None
         if cached is not None:
-            rows = filter_contracts(cached, d_from, d_to, strike_lo, strike_hi, right)
-            total = len(rows)
-            out = {"underlying": underlying, "available": True,
-                   "contracts": rows[:MAX_ROWS], "total": total,
-                   "truncated": total > MAX_ROWS,
-                   "source": "alpaca (indicative, cached)"}
-            if clamped:
-                out["reason"] = "window clamped to today — expired contracts are not shown"
-            return out
+            cached_rows, cached_age = cached
+            rows = filter_contracts(cached_rows, d_from, d_to, strike_lo, strike_hi, right)
+            return _answer(
+                underlying, rows, "alpaca (indicative, cached)",
+                reason=("window clamped to today — expired contracts are not shown"
+                        if clamped else None),
+                age_s=cached_age)
 
     key = (underlying, str(d_from), str(d_to), strike_lo, strike_hi, right)
     now = time.monotonic()
+    fetched_at = now  # a live fetch below is, by definition, current
     with _cache_lock:
         hit = _cache.get(key)
         if hit and now - hit[0] < _TTL_S:
             rows = hit[1]
+            fetched_at = hit[0]
         else:
             rows = None
     if rows is None:
@@ -277,8 +355,8 @@ def fetch(creds: dict[str, str] | None, underlying: str,
                 strike_gte=p_lo, strike_lte=p_hi, right=right)
         except BrokerError as e:
             return {"underlying": underlying, "available": False, "contracts": [],
-                    "total": 0, "truncated": False, "source": "alpaca (indicative)",
-                    "reason": str(e)}
+                    "total": 0, "truncated": False, "expirations": [],
+                    "source": "alpaca (indicative)", "reason": str(e)}
         if con is not None and ttl_minutes > 0:
             try:
                 cache_store(con, underlying, p_from, p_to, p_lo, p_hi, right, raw)
@@ -292,10 +370,8 @@ def fetch(creds: dict[str, str] | None, underlying: str,
             for k in [k for k, (ts, _) in _cache.items() if now - ts >= _TTL_S]:
                 del _cache[k]
 
-    total = len(rows)
-    out = {"underlying": underlying, "available": True,
-           "contracts": rows[:MAX_ROWS], "total": total,
-           "truncated": total > MAX_ROWS, "source": "alpaca (indicative)"}
-    if clamped:
-        out["reason"] = "window clamped to today — expired contracts are not shown"
-    return out
+    return _answer(
+        underlying, rows, "alpaca (indicative)",
+        reason=("window clamped to today — expired contracts are not shown"
+                if clamped else None),
+        age_s=time.monotonic() - fetched_at)

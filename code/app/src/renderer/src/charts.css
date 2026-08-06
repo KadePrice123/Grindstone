@@ -378,6 +378,32 @@
 .cp-source {
   font-size: 11px;
   margin-bottom: 6px;
+  /* A row, not a bare line of text: the source label sits left and the view
+     toggle is pushed to the right rail, so the panel header reads as one
+     control strip instead of buttons trailing a sentence. */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+}
+.cp-views {
+  display: inline-flex;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+/* Joined segments, matching the chart toolbar's grouping so the panel does not
+   introduce a second button idiom. */
+.cp-views .seg-btn {
+  padding: 2px 8px;
+  font-size: 10px;
+  border-radius: 0;
+}
+.cp-views .seg-btn:first-child {
+  border-radius: 4px 0 0 4px;
+}
+.cp-views .seg-btn:last-child {
+  border-radius: 0 4px 4px 0;
+  margin-left: -1px;
 }
 .cp-leg {
   border-top: 1px solid var(--border);
@@ -408,6 +434,351 @@
 .cp-leg.hidden .cp-leg-head .dim {
   opacity: 0.45;
 }
+/* The whole structure, priced at mid. One line, because it answers one
+   question: what does this cost and what can it do. */
+.cp-book {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  font-variant-numeric: tabular-nums;
+}
+/* The two figures a trade is judged on, given the weight to match: what it
+   pays, and what that is worth per year on the capital it risks. */
+.cp-book-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.cp-book-roi {
+  color: var(--text);
+}
+.cp-book-roi i {
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-dim);
+  margin-left: 3px;
+}
+.cp-book-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.cp-book-row b {
+  font-weight: 600;
+}
+.cp-book .gain {
+  color: var(--gain);
+}
+.cp-book .loss {
+  color: var(--loss);
+}
+
+/* ---- the Opt page ------------------------------------------------------ */
+/* One card, two tabs, right-rail selector — the ticker page's own grammar.
+   Heights are RESERVED so switching tabs or picking a contract never moves
+   the controls under the cursor. */
+.opt-shell {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  min-width: 0;
+}
+.opt-main {
+  flex: 1;
+  min-width: 0;
+}
+.opt-side {
+  width: 380px;
+  flex-shrink: 0;
+  max-height: 80vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+@media (max-width: 1100px) {
+  .opt-shell {
+    flex-direction: column;
+  }
+  .opt-side {
+    width: auto;
+    align-self: stretch;
+    max-height: none;
+  }
+}
+/* A WORKSTATION, not a document: .page's 860px centered column is right for
+   settings and news, and exactly wrong for two charts and a selector rail.
+   Full width, modest padding, its own scroll. */
+.page.opt-page {
+  max-width: none;
+  margin: 0;
+  padding: 14px 18px;
+  height: 100%;
+  overflow-y: auto;
+}
+.opt-page .page-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+/* The trade as a stat strip in the head — every figure on one line, styled
+   like the ticker page's metrics strip. */
+.opt-strip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  margin-left: 8px;
+}
+.opt-strip b {
+  font-weight: 600;
+}
+.opt-strip .gain {
+  color: var(--gain);
+}
+.opt-strip .loss {
+  color: var(--loss);
+}
+.opt-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+  min-height: 480px;
+  display: flex;
+  flex-direction: column;
+}
+.opt-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.opt-card-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  flex: 1;
+  text-align: center;
+}
+.opt-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.opt-note {
+  font-size: 10px;
+  margin: -4px 0 12px 46px;
+}
+.lc-empty {
+  padding: 18px 0;
+}
+.opt-hint {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  max-width: 46ch;
+  margin: 0 auto;
+}
+.opt-selector-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+.opt-selector-head .cp-views {
+  margin-left: auto;
+}
+.opt-leg {
+  margin-bottom: 16px;
+}
+.opt-leg-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.opt-leg-head .cp-count {
+  margin-left: auto;
+}
+.opt-chosen {
+  font-size: 11px;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.opt-chain tr {
+  cursor: pointer;
+}
+.opt-chain tr:hover td {
+  background: var(--surface-raised);
+}
+.opt-chain tr.on td {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* ---- options heatmap -------------------------------------------------- */
+/* Rows are strikes, columns are expirations. Hue says which way the money
+   moves (credit green, debit red — the app's existing vocabulary); depth says
+   how large the annualised rate is. Every priced cell also PRINTS its mid and
+   rate, so colour is never the only channel carrying the answer. */
+.oh {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.oh-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.oh-ramp {
+  display: inline-flex;
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.oh-ramp i {
+  width: 14px;
+  height: 10px;
+  display: block;
+}
+.oh-scroll {
+  overflow: auto;
+  max-height: 52vh;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.oh-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  width: max-content;
+  min-width: 100%;
+}
+/* Both headers stick, so a wide grid never loses which strike or which
+   expiration you are looking at — the whole point of a surface this size. */
+.oh-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: center;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.oh-table th.oh-strike,
+.oh-table th.oh-corner {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface-raised);
+  border-right: 1px solid var(--border);
+  padding: 3px 8px;
+  text-align: right;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.oh-table th.oh-corner {
+  z-index: 3;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+.oh-dte {
+  display: block;
+}
+.oh-exp {
+  display: block;
+  font-size: 10px;
+  font-weight: 400;
+}
+.oh-cell {
+  padding: 3px 8px;
+  text-align: right;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+  cursor: pointer;
+  white-space: nowrap;
+  min-width: 74px;
+}
+.oh-cell:hover {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.oh-mid {
+  display: block;
+  color: var(--text);
+  font-weight: 600;
+}
+/* The rate and the delta. NOT --text-dim: this line sits on a saturated tint,
+   and dim grey over a mid-ramp green is the first thing to disappear — which
+   is fatal here, because the delta is the whole qualifier on the yield the
+   colour is advertising. Held at high contrast against the cell instead. */
+.oh-sub {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--text) 82%, transparent);
+  letter-spacing: -0.1px;
+}
+/* Not listed at this strike/expiration pair. Deliberately distinct from
+   'quoted but nobody is bidding', which is a different fact. */
+.oh-absent {
+  cursor: default;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent, transparent 4px,
+    color-mix(in srgb, var(--border) 40%, transparent) 4px,
+    color-mix(in srgb, var(--border) 40%, transparent) 5px
+  );
+}
+.oh-no-bid .oh-mid,
+.oh-no-quote .oh-mid {
+  color: var(--text-dim);
+  font-style: italic;
+}
+/* The leg's own anchor, so every other cell is read as a comparison to it. */
+.oh-anchor {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.oh-sel {
+  box-shadow: inset 0 0 0 2px var(--text);
+}
+.oh-foot {
+  font-size: 10px;
+}
+
 .cp-eye {
   background: none;
   border: none;

@@ -97,7 +97,10 @@ export function SearchPage({
   }, [load])
 
   const open = (r: SearchResult) => {
-    if (r.type === 'symbol' && r.symbol) onNavigate({ name: 'symbol', symbol: r.symbol })
+    if (r.type === 'action' && r.action === 'symbol-opt' && r.symbol) {
+      // "SPY Opt" lands on the workstation, not the chart.
+      onNavigate({ name: 'opt', symbol: r.symbol })
+    } else if (r.type === 'symbol' && r.symbol) onNavigate({ name: 'symbol', symbol: r.symbol })
     else if (r.type === 'news' && typeof r.id === 'number') {
       // Our own news has clean article text — read it in-app.
       onNavigate({ name: 'article', id: r.id })

@@ -15,6 +15,7 @@ import { ArticlePage } from '../pages/ArticlePage'
 import { BacktestPage } from '../pages/BacktestPage'
 import { DataPage } from '../pages/DataPage'
 import { ChartsPage } from '../pages/ChartsPage'
+import { OptPage } from '../pages/OptPage'
 import { HelpPage } from '../pages/HelpPage'
 import { Idle } from '../pages/Idle'
 import { NewsPage } from '../pages/NewsPage'
@@ -30,6 +31,8 @@ function meta(route: Route): { title: string; icon: string } {
       return { title: 'Data management', icon: 'data' }
     case 'symbol':
       return { title: route.symbol, icon: 'chart' }
+    case 'opt':
+      return { title: `${route.symbol} Opt`, icon: 'chart' }
     case 'search':
       return { title: route.query, icon: 'search' }
     case 'settings':
@@ -110,6 +113,8 @@ export function ContentApp({ initial }: { initial: Route }) {
         return <DataPage />
       case 'symbol':
         return <SymbolPage symbol={route.symbol} onNavigate={navigate} />
+      case 'opt':
+        return <OptPage symbol={route.symbol} onNavigate={navigate} />
       case 'search':
         return <SearchPage query={route.query} onNavigate={navigate} />
       case 'settings':

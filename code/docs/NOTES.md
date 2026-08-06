@@ -5,6 +5,54 @@ gate count it is stale — **the gate is 46/46** as of 2026-08-06. (Bump BOTH
 this line and `checkpoint.json` when you add a check; this line has been stale
 by two before.)
 
+## NEXT UP — options analytics, then the data layer (planned 2026-08-06)
+
+Seven stages, in this order. Kade answered the four open forks; **do not
+relitigate them**: heatmap colour = annualised yield at mid with the delta
+readable per cell (raw yield alone always flatters the front week, and the
+2026-07-28 live-ticket calibration found short-tenor selling is structurally
+sell-low/mark-high); heatmap scope = filtered contracts now, wide browse grid on
+the Opt page; **1x per leg** for payoff math; the Opt page opens **in the same
+tab** with Back returning to the chart.
+
+1. **Heatmap toggle in the chain panel** — renderer only, no backend, no new
+   fetches. `ChainPanel` already holds bid/ask for exactly the filtered
+   contracts. Zero-bid cells get no mid and no colour.
+2. **Endpoint honesty** — `expirations` (computed BEFORE the MAX_ROWS slice, or
+   the grid invents a weekday rule), cache age, asset-class guard. All three are
+   already designed in OPTIONS.md §Backend/ADDITIONS and unlanded.
+3. **`payoff.ts`** — debit/credit, max profit, max loss, breakevens. Renderer,
+   NOT the sidecar: the gate pins that numpy never reaches it. Unbounded stays
+   unbounded.
+4. **`pick?: string` on OptionLeg** — the chosen contract, so a filter window
+   becomes a trade. **Validator first**, or it repeats the `group` incident.
+5. **The Opt page, `opt.gs?s=SPY`.** First move is extracting the leg
+   RESOLUTION: host-applied strike/expiration and the chain window exist only
+   inside `getState()`, which needs a live chart, and `sessionStore` is not
+   exported — so the page cannot reach it until that math is a pure module.
+6. ~~**Fan chart**~~ — **DONE 2026-08-06.** `tools/loadhist.py` builds
+   `data/options_history.db` from the vault (39.2M rows parsed → 7.25M recent
+   history rows + 25k percentile band rows; 588MB, gitignored, Drive-synced).
+   `backend/opthist.py` serves `/options/history` and `/options/fanchart`;
+   the Opt page is a workstation (chart card with Future/History tabs, right
+   selector rail), the fan chart draws 10–90/25–75 bands + median + the
+   contract's own spread path, the price-history chart carries the underlying
+   as a right-axis indicator. **Visually verified via `e2e/optshot.mjs`** —
+   a CDP screenshot harness on a scratch profile; four real rendering bugs
+   were found by LOOKING (pixel padding inside a 100-unit viewBox, unflipped
+   reverse-axis labels, sub-zero y floor on spreads, `.page`'s 860px column
+   strangling the workstation). Screenshots or it did not happen. Alpaca sells no historical option
+   quotes at any plan (verified; see the corrected RESEARCH.md line). But the
+   VAULT has SPY daily chains with bid+ask+greeks from 2010-01-04, extended
+   through 2026-08-05 by `tools/fetchchains.py`. Precompute the percentile
+   distribution — a band needs a distribution, not 45M rows — and do not
+   bulk-load raw rows into `projects/dashboard/data/`, which is Drive-synced.
+7. **THE DATA LAYER — deferred by Kade to its own session.** In-app OnclickMedia
+   puller, OFF by default, user-named tickers, ONE ticker-day per 5-10s; CSV/JSON
+   upload (format specified in [DATA_IMPORT.md](DATA_IMPORT.md)); an equity-cache
+   retention setting. The puller must reuse `fetchchains.py`'s header guard —
+   today's session returns NO GREEKS and must never enter the history.
+
 ## 2026-08-06 — the leg/line coupling, edge tags, arrow keys, per-leg hiding
 
 Six bugs Kade reported in one message, plus one the scouting found underneath

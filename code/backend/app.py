@@ -32,6 +32,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import backtests as backtests_mod
 from . import chartobjects as chartobjects_mod
 from . import options as options_mod
+from . import opthist as opthist_mod
 from . import favorites as favorites_mod
 from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
@@ -644,11 +645,65 @@ def create_app(state: State) -> FastAPI:
             ttl = float(settings_mod.get_all(db, s.user_id)
                         .get("options_cache_minutes", 15.0))
         try:
+            # The universe knows what an index or a future is; unknown symbols
+            # come back None and pass straight through, which is the
+            # setup-recording precedent — do not hard-require the universe.
+            known = state.universe.exact(symbol)
             return options_mod.fetch(
                 state.creds_for(s.user_id), symbol,
                 exp_from, exp_to, strike_from, strike_to,
                 right.upper() if right else None,
-                con=state.market(), ttl_minutes=ttl)
+                con=state.market(), ttl_minutes=ttl,
+                asset_class=(known or {}).get("asset_class"))
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+
+    @app.get("/api/symbols/{symbol}/options/history")
+    def symbol_option_history(symbol: str, expiration: str, strike: float,
+                              right: str, s=Depends(current_session)) -> dict[str, Any]:
+        """One contract's archived daily rows — price/spread through its life.
+        Comes from the imported archive, never the live feed: Alpaca sells no
+        historical option quotes, so absence is answered with the reason."""
+        if right.upper() not in ("C", "P"):
+            raise HTTPException(422, "right must be C or P")
+        try:
+            dt_check = expiration  # validated inside; ValueError -> 422
+            return opthist_mod.history(symbol, dt_check, strike, right.upper())
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+
+    @app.get("/api/symbols/{symbol}/options/serieshistory")
+    def symbol_option_series(symbol: str, right: str, dte: int,
+                             delta: float | None = None,
+                             strike: float | None = None,
+                             dte_tol: int = 3, delta_tol: float = 0.08,
+                             strike_tol: float = 1.0,
+                             s=Depends(current_session)) -> dict[str, Any]:
+        """The constant-shape series: ~this DTE at ~this |delta| (strike is
+        the fallback shape when no delta is known), priced day by day across
+        the archive — the history a TRADE has, not the history one contract
+        has."""
+        if right.upper() not in ("C", "P"):
+            raise HTTPException(422, "right must be C or P")
+        try:
+            return opthist_mod.series_history(
+                symbol, right.upper(), dte,
+                delta=delta, strike=strike,
+                dte_tol=max(0, min(30, dte_tol)),
+                delta_tol=max(0.01, min(0.25, delta_tol)),
+                strike_tol=max(0.0, min(50.0, strike_tol)))
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+
+    @app.get("/api/symbols/{symbol}/options/fanchart")
+    def symbol_option_fanchart(symbol: str, expiration: str, strike: float,
+                               right: str, s=Depends(current_session)) -> dict[str, Any]:
+        """The fan chart: this contract's spread path against the archive-wide
+        percentiles of similar (same |delta| bucket) contracts at each DTE."""
+        if right.upper() not in ("C", "P"):
+            raise HTTPException(422, "right must be C or P")
+        try:
+            return opthist_mod.fanchart(symbol, expiration, strike, right.upper())
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
 

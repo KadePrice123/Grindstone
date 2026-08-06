@@ -26,6 +26,22 @@
   padding: 0;
   box-sizing: border-box;
 }
+/* Scrollbars, themed once for the whole app.
+ *
+ *  Without this every overflow box in the shell wears the platform default —
+ *  an opaque white trough that is the single brightest thing on a dark chart
+ *  page, and reads as an unstyled surface rather than a deliberate one.
+ *
+ *  The STANDARD properties, not ::-webkit-scrollbar, and that choice matters:
+ *  `scrollbar-color` inherits, so one declaration reaches every scroller,
+ *  while the handful of places that deliberately hide their bar
+ *  (.ph-metrics, .pc-toolbar, .tab-strip) already say `scrollbar-width: none`
+ *  and keep winning on specificity. A webkit rule would have fought them. */
+:root {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
 html,
 body,
 #root {

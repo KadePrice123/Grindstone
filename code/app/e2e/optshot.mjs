@@ -1,0 +1,173 @@
+/** Visual verification for the Opt page: boots the BUILT app on a scratch
+ *  profile, seeds a leg whose pick points at a real archived contract, opens
+ *  opt.gs?s=SPY and screenshots both tabs.
+ *
+ *  A screenshot harness, not a test: it asserts nothing beyond "the page
+ *  exists" — its output is PNGs a person (or Claude) actually looks at,
+ *  because layout is the one thing the offline gate is structurally blind to.
+ *
+ *  The scratch profile has no market keys on purpose; the HISTORY side runs
+ *  entirely on options_history.db (copied in), so what these shots show is
+ *  the archive path — and the live-chain surfaces show their honest empty
+ *  states, which are worth looking at too.
+ *
+ *  Usage: node e2e/optshot.mjs <outDir>
+ */
+import { spawn } from 'node:child_process'
+import { copyFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const APP = path.resolve(HERE, '..')
+const OUT = process.argv[2] ? path.resolve(process.argv[2]) : path.join(HERE, 'shots')
+const PORT = 9455
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+const dataDir = path.join(OUT, 'profile')
+mkdirSync(dataDir, { recursive: true })
+const histSrc = path.resolve(APP, '..', '..', 'data', 'options_history.db')
+if (existsSync(histSrc)) copyFileSync(histSrc, path.join(dataDir, 'options_history.db'))
+else console.log('WARN: no options_history.db to copy — history views will refuse')
+
+const child = spawn(
+  path.join(APP, 'node_modules', 'electron', 'dist', 'electron.exe'),
+  [`--remote-debugging-port=${PORT}`, '.'],
+  { cwd: APP, env: { ...process.env, GRINDSTONE_DATA_DIR: dataDir }, stdio: 'ignore' }
+)
+
+async function targets() {
+  const res = await fetch(`http://127.0.0.1:${PORT}/json`)
+  return (await res.json()).filter((t) => t.type === 'page')
+}
+
+async function connect(target) {
+  const ws = new WebSocket(target.webSocketDebuggerUrl)
+  let id = 0
+  const pending = new Map()
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data)
+    if (m.id && pending.has(m.id)) {
+      pending.get(m.id)(m)
+      pending.delete(m.id)
+    }
+  }
+  await new Promise((res, rej) => {
+    ws.onopen = res
+    ws.onerror = rej
+  })
+  const send = (method, params) =>
+    new Promise((resolve) => {
+      const mid = ++id
+      pending.set(mid, (m) => resolve(m.result))
+      ws.send(JSON.stringify({ id: mid, method, params }))
+    })
+  const evaluate = async (expr) => {
+    const r = await send('Runtime.evaluate', {
+      expression: expr, awaitPromise: true, returnByValue: true,
+    })
+    return r?.result?.value
+  }
+  return { send, eval: evaluate }
+}
+
+async function waitFor(fn, what, ms = 30000) {
+  const t0 = Date.now()
+  for (;;) {
+    const v = await fn().catch(() => null)
+    if (v) return v
+    if (Date.now() - t0 > ms) throw new Error(`timeout: ${what}`)
+    await sleep(400)
+  }
+}
+
+async function shot(conn, name) {
+  const r = await conn.send('Page.captureScreenshot', { format: 'png' })
+  writeFileSync(path.join(OUT, name), Buffer.from(r.data, 'base64'))
+  console.log('shot:', name)
+}
+
+try {
+  // ---- boot + first profile ------------------------------------------------
+  const authT = await waitFor(async () => {
+    const ts = await targets()
+    return ts.find((t) => t.url.includes('mode=auth'))
+  }, 'auth view')
+  const auth = await connect(authT)
+  await waitFor(() => auth.eval(`document.querySelectorAll('input.field').length >= 2`),
+    'the signup form')
+  await sleep(1200)
+  const submitted = await auth.eval(`(() => {
+    const set = (el, v) => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+        .set.call(el, v)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    const inputs = document.querySelectorAll('input.field')
+    set(inputs[0], 'shot')
+    for (let i = 1; i < inputs.length; i++) set(inputs[i], 'optshot-pass-1')
+    const btn = [...document.querySelectorAll('button')]
+      .find((b) => /create profile|unlock/i.test(b.textContent || ''))
+    btn.click()
+    return 'ok'
+  })()`)
+  console.log('auth:', submitted)
+
+  const homeT = await waitFor(async () => {
+    const ts = await targets()
+    return ts.find((t) => t.url.includes('mode=content'))
+  }, 'a content view')
+  const home = await connect(homeT)
+
+  // ---- seed the trade: one short put whose pick is a real archived contract
+  const put = await home.eval(`window.grindstone.request('PUT', '/api/chart-objects', {
+    key: 'SPY|1Day',
+    doc: { legs: [{
+      id: 'lg1', side: 'short', right: 'P', expiration: '2026-09-18',
+      strike: 761, dteTol: 3, strikeTol: 4, slot: 0,
+      pick: 'SPY260918P00761000'
+    }] }
+  }).then(r => JSON.stringify(r).slice(0, 120))`)
+  console.log('seed:', put)
+
+  await home.eval(`window.grindstone.openTab('opt:SPY')`)
+  const optT = await waitFor(async () => {
+    const ts = await targets()
+    for (const t of ts.filter((x) => x.url.includes('mode=content'))) {
+      const c = await connect(t)
+      const is = await c.eval(`!!document.querySelector('[data-opt-symbol="SPY"]')`)
+      if (is) return { t, c }
+    }
+    return null
+  }, 'the opt page')
+  const opt = optT.c
+
+  // A workstation needs its width: below 1100px the right rail collapses
+  // under the chart. Electron implements neither Browser.setWindowBounds nor
+  // window sizing over CDP, but Emulation.setDeviceMetricsOverride reshapes
+  // the CONTENT's layout viewport — which is the thing being photographed.
+  await opt.send('Emulation.setDeviceMetricsOverride', {
+    width: 1680, height: 1050, deviceScaleFactor: 1, mobile: false,
+  })
+  await sleep(900)
+
+  // Let the poll, auto-pick and fetches land, then look at both tabs.
+  await waitFor(() => opt.eval(
+    `document.querySelectorAll('.opt-leg').length > 0`), 'the selector legs')
+  await sleep(2500)
+  await shot(opt, 'opt-future.png')
+
+  await opt.eval(`[...document.querySelectorAll('button')]
+    .find((b) => b.textContent === 'History')?.click()`)
+  await waitFor(() => opt.eval(
+    `document.querySelectorAll('.opt-card canvas').length >= 1`), 'a history chart', 20000)
+  await sleep(2500)
+  await shot(opt, 'opt-history.png')
+} catch (e) {
+  console.log('FAILED:', e.message)
+} finally {
+  try {
+    child.kill()
+  } catch { /* gone */ }
+}
+console.log('done')

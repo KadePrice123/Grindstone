@@ -267,7 +267,7 @@ export interface TabInfo {
  *  urls.ts PAGES — a data.gs tab must not offer "add DATA to chart". */
 const PAGE_NAMES = new Set([
   'home', 'accounts', 'data', 'settings', 'search', 'article', 'news', 'charts',
-  'help', 'backtest',
+  'help', 'backtest', 'opt',
 ])
 
 /**
