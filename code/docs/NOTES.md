@@ -1,9 +1,69 @@
 # Pickup notes — installers, then chart dimensions (2026-08-05)
 
 Newest session first. Older sections are accurate history; where they quote a
-gate count it is stale — **the gate is 44/44** as of 2026-08-05. (The 41/41
-this line used to claim was itself stale by two: bump BOTH this line and
-`checkpoint.json` when you add a check.)
+gate count it is stale — **the gate is 46/46** as of 2026-08-06. (Bump BOTH
+this line and `checkpoint.json` when you add a check; this line has been stale
+by two before.)
+
+## 2026-08-06 — the leg/line coupling, edge tags, arrow keys, per-leg hiding
+
+Six bugs Kade reported in one message, plus one the scouting found underneath
+them. **The gate stayed at 46** — everything landed as extensions to the
+existing `_chart_legs` and `_chart_persistence` checks (20 new probe
+assertions; the probe floor moved 74 → 94), which is the discipline OPTIONS.md
+asks for. Every new assertion was mutation-proven: broken, watched go red,
+restored.
+
+- **A leg and its four bounding lines are ONE object now, cascading both ways.**
+  See the amended DANGLING POLICY in [OPTIONS.md](OPTIONS.md) — the rule it
+  replaces is still correct for user-drawn hosts, and only leg-owned lines
+  changed. FOUR paths leaked, not the one reported: `deleteSelected`,
+  `deleteLeg` and `clearLegs` all filtered `b.legs` without `b.drawings`, and
+  `clearDrawings` leaked the *other* way, wiping leg-owned lines and leaving
+  every leg naming four ids that no longer existed. Two holes outside the
+  delete paths were closed with it: `updateLeg` could re-point the four host
+  fields with no bookkeeping (the patch type now excludes them, enforced by the
+  compiler), and `pendingHost` held a drawing id across two clicks that no
+  delete path cleared.
+- **`xAtIdx` now rounds, and this was a live rendering bug on 1Hour charts.**
+  `idxForTime` returns `last + off * (390 / per)`; `TF_MINUTES['1Hour']` is 60,
+  so 390/60 = 6.5 and every future point at an ODD trading-day offset was a
+  half-integer. lightweight-charts' `indexToCoordinate` opens with
+  `if (isEmpty() || !isInteger(index)) return 0` — so it did not fail, it drew
+  at the pane's LEFT EDGE. 1Day/1Min/5Min/15Min all divide 390 evenly, which is
+  exactly why nothing caught it. Rounding lives in `xAtIdx` rather than at the
+  four call sites, which also leaves `selftest.py`'s pinned `xForTime` literal
+  intact.
+- **Per-leg `hidden` is PERSISTED**, unlike the global drawings-hidden switch
+  beside it: that one is a lens over the chart, this is an attribute of the leg
+  (the same line charts.gs draws between its per-symbol eye and `isolated`).
+  The `ChartDoc` comment saying persistence carries "no hidden flag" means the
+  lens, not this. The skip set is consulted in `hitTest`, not only in
+  `render()` — `hitTest` walks the bucket rather than the painted frame, and
+  skipping only in render leaves a line invisible yet selectable, trimmable and
+  snappable, which is the `d366769` bug exactly.
+- **Edge tags are not hot zones and cannot take a pointer event.** They sit
+  where lines cross the edges, so a clickable tag would make the line it names
+  unpickable right where you reach for it (`c5e8bd6` again; the rescue at
+  `hitAny` is hardcoded to `z.kind === 'leg'` and would NOT have saved a tag).
+  They also anchor with CSS instead of measuring themselves — `chip()` reads
+  `offsetWidth` right after `appendChild`, which is one forced layout per
+  instance, and there is now one tag per line on a path that re-runs whenever
+  the hover target changes.
+- **The e2e appends to `e2e/e2e.log`** (Kade asked). Synchronous appends, so a
+  killed or wedged run keeps what it had already proved, and `tail -f` works
+  during a run. Two things this immediately exposed: `npm run e2e | tail` hides
+  every line until exit AND hands back tail's exit code, so a red run reads as
+  green; and the persist block's drawing counts had been stale since `27d3a9d`
+  (they predate legs minting any lines at all).
+- **STILL OPEN: a condor wears 2 colours, not 4.** `render()` colours bounding
+  lines by `SIDE_INK[side]`, so two shorts and two longs give two hues, while
+  the e2e asserts four. Either the assertion or the colouring is stale —
+  a product call, deliberately left for Kade.
+- Known flake P5 confirmed still live: `fanClick` trend-line mid-span select
+  missed once in three runs here, and because `placeOne` retries by CLICKING,
+  one miss inflates every later count and cascades into ~6 unrelated-looking
+  failures. Re-run before believing a tools-block failure.
 
 > **Options-on-chart has its own document: [OPTIONS.md](OPTIONS.md)** — legs,
 > zones, presets, the chain panel, the workstation layout, and what remains

@@ -28,6 +28,10 @@ code/app/out/
 code/app/dist/
 *.tsbuildinfo
 
+# Run logs. The e2e appends every run to code/app/e2e/e2e.log so a killed or
+# piped run does not lose its output; it is a local diagnostic, never shared.
+*.log
+
 # OS / editor noise
 Thumbs.db
 desktop.ini

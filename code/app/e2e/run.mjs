@@ -16,7 +16,7 @@
  *           the live-view marker survives (re-parented, never reloaded)
  */
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,6 +25,49 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(HERE, '..')
 const PORT = 9310 + (process.pid % 300)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// ---------------------------------------------------------------------------
+// The run log
+// ---------------------------------------------------------------------------
+// Every line also goes to a file, APPENDED and flushed on the spot. Three
+// failures this fixes, all of them met in practice:
+//   - a run watched through a pipe (`npm run e2e | tail`) prints NOTHING until
+//     it exits, and the pipe hands back TAIL's exit code, so a red run reads
+//     as green. The log is readable while the run is still going: `tail -f` it.
+//   - a run that is killed, wedges, or dies on a CDP timeout loses every result
+//     it had already proved. appendFileSync — not a write stream — because a
+//     hard kill cannot drop what was never buffered.
+//   - the previous run is gone the moment the next one starts, so "it passed
+//     before my change" is unanswerable. Appending keeps the history; each run
+//     is delimited by its own header.
+// Redirect elsewhere with GRINDSTONE_E2E_LOG; the default is gitignored.
+const LOG = process.env.GRINDSTONE_E2E_LOG ?? path.join(HERE, 'e2e.log')
+try {
+  mkdirSync(path.dirname(LOG), { recursive: true })
+} catch {
+  /* the append below reports it far more usefully than a mkdir race would */
+}
+let logBroken = false
+const fmt = (a) => {
+  if (typeof a === 'string') return a
+  try {
+    return JSON.stringify(a)
+  } catch {
+    return String(a) // circular, or a DOM handle that came back over CDP
+  }
+}
+const rawLog = console.log.bind(console)
+console.log = (...args) => {
+  rawLog(...args)
+  if (logBroken) return
+  try {
+    appendFileSync(LOG, `${new Date().toISOString().slice(11, 23)}  ${args.map(fmt).join(' ')}\n`)
+  } catch (err) {
+    logBroken = true // say it ONCE, on the terminal, and never wedge the run
+    rawLog(`      (run log unavailable at ${LOG}: ${err.message})`)
+  }
+}
+console.log(`\n=== e2e ${new Date().toISOString()} · pid ${process.pid} · cdp ${PORT} ===`)
 
 // A throwaway profile by default, but overridable: when a run fails for a
 // reason only the backend log explains, point this somewhere that survives.
@@ -1839,31 +1882,53 @@ try {
     `(() => { const b = document.querySelector('[data-draw-tool]').getBoundingClientRect();
        return JSON.stringify({ x: b.x, y: b.y, w: b.width, h: b.height }) })()`
   ).then((s) => JSON.parse(s))
+  // THE ARITHMETIC, spelled out because it has been wrong twice. A leg mints
+  // FOUR bounding lines of its own (two hlines for the strike range, two vlines
+  // for the expiration range), and data-draw-count is b.drawings.length, which
+  // counts them. The single leg placed just above therefore contributes 4
+  // before this block draws anything. One hand-drawn h-line makes 5.
+  //
+  // These numbers were written when legs minted no lines at all, and 'Clear
+  // legs' used to leak its guides on top of that — so the counts were stale in
+  // two different directions at once and the block failed for reasons that had
+  // nothing to do with persistence.
+  const LEG_GUIDES = 4
+  const WANT = String(LEG_GUIDES + 1)
   let placed = false
   for (let i = 0; i < 3 && !placed; i++) {
     await persistView.click(pRect.x + pRect.w * 0.5, pRect.y + pRect.h * 0.45)
     await sleep(400)
-    placed = (await pAttr('data-draw-count')) === '1'
+    placed = (await pAttr('data-draw-count')) === WANT
   }
-  check(placed, 'persist: an h-line is placed to be saved')
+  check(placed, 'persist: an h-line is placed to be saved',
+    `count=${await pAttr('data-draw-count')} want=${WANT}`)
 
+  // The USER's line, found by the absence of legOwned rather than by index:
+  // the leg's guides are hlines too, so drawings[0] was satisfied by a guide
+  // and the assertion passed without ever seeing the drawn line.
+  const mine = (doc) => (doc?.drawings ?? []).filter((d) => !d.legOwned)
   const saved = await waitFor(
     async () => {
       const r = await readDoc()
-      return r.status === 200 && (r.doc?.drawings?.length ?? 0) === 1 ? r : null
+      return r.status === 200 && mine(r.doc).length === 1 ? r : null
     },
     'the drawing to reach the backend through the real proxy',
     8000
   ).catch(async () => ({ status: 'timeout', doc: (await readDoc()).doc }))
   check(
-    saved.status === 200 && saved.doc?.drawings?.[0]?.kind === 'hline',
+    saved.status === 200 && mine(saved.doc)[0]?.kind === 'hline',
     'persist: a drawn line crosses the IPC proxy and lands in the database',
     JSON.stringify(saved.doc)
   )
   check(
-    Number.isFinite(saved.doc?.drawings?.[0]?.points?.[0]?.price),
+    (saved.doc?.drawings ?? []).filter((d) => d.legOwned).length === LEG_GUIDES,
+    'persist: the leg saved its four bounding lines with it',
+    JSON.stringify((saved.doc?.drawings ?? []).map((d) => `${d.kind}${d.legOwned ? '*' : ''}`))
+  )
+  check(
+    Number.isFinite(mine(saved.doc)[0]?.points?.[0]?.price),
     'persist: it stores a real data-space point, not a pixel',
-    JSON.stringify(saved.doc?.drawings?.[0]?.points)
+    JSON.stringify(mine(saved.doc)[0]?.points)
   )
   check(
     (saved.doc?.legs?.length ?? 0) === 1 && typeof saved.doc.legs[0].expiration === 'string',
@@ -1901,7 +1966,9 @@ try {
              // does not pass — the leg was placed by the block above.
              return el.getAttribute('data-draw-count') + '/' + el.getAttribute('data-leg-count') })()`
         )
-        if (n === '1/1') {
+        // 5/1 = one hand-drawn h-line + the leg's four bounding lines, and the
+        // one leg. All of it came back from the database or none of it did.
+        if (n === `${WANT}/1`) {
           reloadedView = c
           return 'ok'
         }
@@ -1918,17 +1985,42 @@ try {
   // documents for every chart ever opened. Driven through the reloaded view —
   // the one whose engine actually holds the restored drawing.
   if (reloadedView) persistView = reloadedView
+  // 'Clear every drawing' clears the drawings the USER made and leaves the
+  // lines that ARE a leg. Wiping those left the leg naming four ids that no
+  // longer existed, which silently reverted its filter to the window it was
+  // born with — the bug Kade reported from the other side ("deleting a leg
+  // leaves the lines"). So the row must still hold exactly the four guides.
   const clearBtn = await pTool('Clear every drawing')
+  const keptGuides = await waitFor(
+    async () => {
+      const r = await readDoc()
+      const d = r.doc?.drawings ?? []
+      return d.length === LEG_GUIDES && d.every((x) => x.legOwned) ? 'ok' : null
+    },
+    'the cleared chart to keep only the leg-owned lines',
+    8000
+  ).catch(() => null)
+  check(keptGuides === 'ok', 'persist: clearing drawings spares the lines that ARE a leg',
+    `btn=${clearBtn} domCount=${await pAttr('data-draw-count')} ` +
+    `doc=${JSON.stringify((await readDoc()).doc)}`)
+
+  // And THEN clearing the legs empties the row, so the store does not
+  // accumulate a document for every chart ever opened.
+  await persistView.eval(
+    `(() => { const b = [...document.querySelectorAll('button')]
+        .find(x => (x.title ?? '') === 'Clear legs'); if (!b) return 'missing';
+      b.click(); return 'ok' })()`
+  )
   const emptied = await waitFor(
     async () => {
       const r = await readDoc()
-      return (r.doc?.drawings?.length ?? 0) === 0 ? 'ok' : null
+      return (r.doc?.drawings?.length ?? 0) === 0 && (r.doc?.legs?.length ?? 0) === 0 ? 'ok' : null
     },
     'the cleared chart to empty in the store',
     8000
   ).catch(() => null)
-  check(emptied === 'ok', 'persist: clearing the chart clears the stored document',
-    `btn=${clearBtn} domCount=${await pAttr('data-draw-count')} ` +
+  check(emptied === 'ok', 'persist: clearing the legs too empties the stored document',
+    `domCount=${await pAttr('data-draw-count')} ` +
     `doc=${JSON.stringify((await readDoc()).doc)}`)
 } catch (err) {
   console.log('FAIL  harness error —', err.message)
@@ -1938,4 +2030,7 @@ try {
 }
 
 console.log(failures === 0 ? 'E2E OK' : `E2E FAILED (${failures})`)
+// Name the log on the way out, so the run that just scrolled past is findable
+// without knowing this file. Every earlier run is still in there above it.
+if (!logBroken) console.log(`      run log appended to ${LOG}`)
 process.exit(failures === 0 ? 0 : 1)

@@ -27,6 +27,31 @@ def check(name):
     return wrap
 
 
+def member_body(src: str, sig: str) -> str:
+    """A class member's body, bounded by the NEXT member rather than by a
+    character count.
+
+    A fixed ``[:N]`` slice fails in both directions, and both have happened in
+    this file: it goes RED on correct code once a comment grows past N (the note
+    above `down` records that one), and it goes GREEN-but-blind when the string
+    it asserts drifts in from the following method. The second is the dangerous
+    one — `deleteSelected`'s 600-char window reaches into `clearDrawings`, which
+    filters `b.drawings` too, so the assertion would pass with the body gutted.
+
+    The boundary is the next declaration at the class's own two-space indent: a
+    doc comment, a modifier, or a bare method name. Nothing inside a body sits
+    at that indent except its closing brace, which is not a declaration.
+    """
+    parts = src.split(sig, 1)
+    assert len(parts) > 1, f"member not found in source: {sig!r}"
+    tail = parts[1]
+    nxt = re.search(
+        r"\n  (?:/\*\*|private |public |protected |static |readonly |get |set |[A-Za-z_$][\w$]*[(<])",
+        tail,
+    )
+    return tail[: nxt.start()] if nxt else tail
+
+
 @check("branding.json parses and is complete")
 def _branding():
     b = json.loads((CODE / "assets/branding/branding.json").read_text(encoding="utf-8"))
@@ -1531,7 +1556,7 @@ def _chart_selection():
     # editor - source greps alone would not have caught any of these.
     assert "private moveDragged(" in draw and "private endDrag(" in draw, \
         "drag-to-move is gone"
-    mv = draw.split("private moveDragged(")[1][:900]
+    mv = member_body(draw, "private moveDragged(")
     assert "timeAtX" in mv and "priceAtY" in mv, \
         "moveDragged translates in DATA units again - the x axis is affine in " \
         "bar index, so a constant time delta is not a constant pixel delta " \
@@ -1556,7 +1581,7 @@ def _chart_selection():
     assert "handleScroll: false" in down, \
         "grabbing a drawing no longer suspends the chart's own pan, so a drag " \
         "moves the drawing AND scrolls the chart under it"
-    endd = draw.split("private endDrag(")[1][:700]
+    endd = member_body(draw, "private endDrag(")
     assert "handleScroll: true" in endd, \
         "pan/zoom is never restored after a drag - the chart would be frozen"
 
@@ -1580,11 +1605,20 @@ def _chart_selection():
     assert '"select"' not in tools, \
         "backend still accepts a 'select' chart tool - a stored wheel could fire it"
 
-    # -- one doomed set sweeps all three collections ------------------------
-    seg = draw.split("deleteSelected(): void")[1][:600]
-    for arr in ("b.drawings", "b.measures", "b.pins"):
+    # -- one doomed set sweeps all four collections -------------------------
+    # The filters live in sweep() rather than inline, because three delete
+    # paths need identical bookkeeping and three copies is how one of them ends
+    # up missing an array. BOTH halves are asserted: that the sweep is complete,
+    # AND that deleteSelected actually routes through it — pinning the sweep
+    # alone would pass just as happily on a sweep nobody calls.
+    seg = member_body(draw, "private sweep(")
+    for arr in ("b.drawings", "b.measures", "b.pins", "b.legs"):
         assert f"{arr} = {arr}.filter" in seg, \
-            f"deleteSelected no longer removes {arr} - that is the whole bug"
+            f"sweep no longer removes {arr} - that is the whole bug"
+    dsel = member_body(draw, "deleteSelected(): void")
+    assert "this.sweep(" in dsel and "cascadeDoomed" in dsel, \
+        "deleteSelected stopped routing through cascadeDoomed+sweep, so deleting " \
+        "a leg leaves its four bounding lines orphaned on the chart again"
 
     # -- chips are clickable, and only from a COMPLETE frame ----------------
     assert "hotZones" in draw and "zoneDraft" in draw, "chip hit-zones are gone"
@@ -3195,7 +3229,7 @@ def _chart_legs():
     LEG = {"id": "lg9", "side": "short", "right": "P", "expiration": "2026-09-18",
            "strike": 560.0, "dteTol": 3, "strikeTol": 5.0, "slot": 1,
            "hostId": "gone-with-the-trend", "timeHostId": "dw7", "priceHostId": "dw8",
-           "group": "gp3",
+           "group": "gp3", "hidden": True,
            "strikeHostA": "dwA", "strikeHostB": "dwB",
            "timeHostA": "dwC", "timeHostB": "dwD"}
     # A leg-minted guide. The flag is what lets the engine sweep it when no leg
@@ -3233,6 +3267,13 @@ def _chart_legs():
         assert got["timeHostId"] == "dw7", got
         assert got["priceHostId"] == "dw8", got
         assert got["group"] == "gp3", got
+        # Per-leg visibility, same blind spot and a worse symptom: a boolean
+        # introduces no vocabulary string at all, so every enum-drift assertion
+        # stays green while the validator drops it. The leg then works for the
+        # whole session and comes back VISIBLE after a restart, with nothing
+        # anywhere reporting a loss. True, not False, on purpose — the field is
+        # stored truthy-only, so False normalizes away and would prove nothing.
+        assert got["hidden"] is True, got
         for f in ("strikeHostA", "strikeHostB", "timeHostA", "timeHostB"):
             assert got[f] == {"strikeHostA": "dwA", "strikeHostB": "dwB",
                               "timeHostA": "dwC", "timeHostB": "dwD"}[f], (f, got)
@@ -3257,6 +3298,10 @@ def _chart_legs():
             "numeric group": {**LEG, "group": 42},
             "numeric strikeHostA": {**LEG, "strikeHostA": 1},
             "numeric timeHostB": {**LEG, "timeHostB": 1},
+            # 1 is truthy, so a validator that only tested truthiness would
+            # store it and hand the renderer a non-boolean for a boolean field.
+            "numeric hidden": {**LEG, "hidden": 1},
+            "stringy hidden": {**LEG, "hidden": "yes"},
         }
         for name, leg in bad.items():
             rr = client.put("/api/chart-objects", headers=A,
@@ -3738,6 +3783,117 @@ const legC = e.addLeg({ side: 'long', right: 'P', expiration: '2026-09-18', stri
 ok('the freed slot 0 is reused rather than drifting the palette',
    b.legs.find((l) => l.id === legC).slot === 0, JSON.stringify(b.legs.map((l) => l.slot)))
 
+// ---- THE COUPLING: a leg and its four lines are ONE object ----------------
+// Kade: "deleting a leg leaves the lines we use to filter, and we can delete a
+// single line from the filter control without deleting the whole leg."
+// Both directions are asserted, and they are NOT symmetric: leg->lines is
+// reference-counted (a strategy shares ONE expiration pair, so the first three
+// deletions must not strand the fourth leg), while line->legs is total (a leg
+// missing one of its four bounds silently reverts to its birth window, so
+// there is no partial state worth keeping).
+const c = mkEngine('CASCADE|1Day')
+const cb = c.bucket()
+const owned = () => cb.drawings.filter((d) => d.legOwned).map((d) => d.id)
+const grp = c.addLegGroup([
+  { side: 'short', right: 'P', expiration: '2026-09-18', strike: 560, dteTol: 3, strikeTol: 5 },
+  { side: 'long', right: 'P', expiration: '2026-09-18', strike: 550, dteTol: 3, strikeTol: 5 },
+])
+ok('a two-leg group mints SIX lines, not eight (the expiration pair is shared)',
+   owned().length === 6, JSON.stringify(owned()))
+const [L1, L2] = cb.legs.map((l) => l.id)
+const sharedV = cb.legs[0].timeHostA
+ok('both legs name the same expiration line',
+   cb.legs[0].timeHostA === cb.legs[1].timeHostA &&
+   cb.legs[0].timeHostB === cb.legs[1].timeHostB, sharedV)
+
+c.deleteLeg(L1)
+ok('deleting a leg takes its own strike lines with it',
+   owned().length === 4, JSON.stringify(owned()))
+ok('...but NOT the expiration pair its sibling is still bounded by',
+   owned().includes(sharedV) && cb.legs.length === 1 && cb.legs[0].id === L2,
+   JSON.stringify({ owned: owned(), legs: cb.legs.map((l) => l.id) }))
+c.deleteLeg(L2)
+ok('deleting the last rider finally releases the shared pair',
+   owned().length === 0 && cb.legs.length === 0, JSON.stringify(owned()))
+
+// THE OTHER DIRECTION, on a fresh group: killing one bound kills its legs.
+c.addLegGroup([
+  { side: 'short', right: 'C', expiration: '2026-09-18', strike: 610, dteTol: 3, strikeTol: 5 },
+  { side: 'long', right: 'C', expiration: '2026-09-18', strike: 620, dteTol: 3, strikeTol: 5 },
+])
+const sharedV2 = cb.legs[0].timeHostA
+c.selected = [sharedV2]
+c.deleteSelected()
+ok('deleting a SHARED expiration line takes every leg riding it',
+   cb.legs.length === 0 && owned().length === 0,
+   JSON.stringify({ legs: cb.legs.length, owned: owned() }))
+
+// One strike line, one leg — the plain case, and the selection must not be
+// left pointing at ids that no longer exist.
+const solo = c.addLeg({ side: 'short', right: 'P', expiration: '2026-09-18',
+                        strike: 500, dteTol: 3, strikeTol: 5 }).id
+const soloA = cb.legs[0].strikeHostA
+c.selected = [soloA]
+c.deleteSelected()
+ok('deleting one strike bound removes its leg and all four lines',
+   cb.legs.length === 0 && owned().length === 0, JSON.stringify(owned()))
+ok('and the selection keeps no ids for objects that are gone',
+   c.selected.length === 0, JSON.stringify(c.selected))
+
+// A USER-DRAWN host is not part of the leg and never swept with it — the
+// dangle-and-degrade policy the measures use, and the reason deleting a trend
+// you drew yourself cannot silently take a strategy with it.
+cb.drawings.push({ id: 'mine', kind: 'trend',
+  points: [{ time: day(10), price: 600 }, { time: day(18), price: 604 }] })
+const bound = c.addLeg({ side: 'short', right: 'P', expiration: '2026-09-18',
+                         strike: 570, dteTol: 3, strikeTol: 5, priceHostId: 'mine' }).id
+c.deleteLeg(bound)
+ok('deleting a leg leaves the line the USER drew for it',
+   cb.drawings.some((d) => d.id === 'mine'), JSON.stringify(cb.drawings.map((d) => d.id)))
+
+// 'Clear every drawing' must not manufacture the broken state either.
+const keep = c.addLeg({ side: 'short', right: 'P', expiration: '2026-09-18',
+                        strike: 540, dteTol: 3, strikeTol: 5 }).id
+c.clearDrawings()
+ok('clearing drawings spares the lines that ARE a leg',
+   cb.legs.length === 1 && owned().length === 4,
+   JSON.stringify({ legs: cb.legs.length, owned: owned() }))
+ok('and removes the ones the user drew', !cb.drawings.some((d) => d.id === 'mine'), '')
+const resolvedKeep = c.legResolved(cb.legs[0])
+ok('the spared leg still resolves through its bounds, not a stale snapshot',
+   resolvedKeep.bounds !== null, JSON.stringify(resolvedKeep.bounds))
+c.clearLegs()
+ok('and Clear legs takes the lines with it', owned().length === 0, JSON.stringify(owned()))
+
+// ---- PER-LEG VISIBILITY ---------------------------------------------------
+// The same rider count, over the VISIBLE legs instead of the surviving ones.
+const v = mkEngine('VIS|1Day')
+const vb = v.bucket()
+v.addLegGroup([
+  { side: 'short', right: 'P', expiration: '2026-09-18', strike: 560, dteTol: 3, strikeTol: 5 },
+  { side: 'long', right: 'P', expiration: '2026-09-18', strike: 550, dteTol: 3, strikeTol: 5 },
+])
+const [V1, V2] = vb.legs.map((l) => l.id)
+const vShared = vb.legs[0].timeHostA
+const v1Strike = vb.legs.find((l) => l.id === V1).strikeHostA
+ok('nothing is unlit while every leg is visible',
+   v.hiddenLineIds(vb).size === 0, JSON.stringify([...v.hiddenLineIds(vb)]))
+v.setLegHidden(V1, true)
+const unlit = v.hiddenLineIds(vb)
+ok('hiding a leg unlights its own strike lines',
+   unlit.has(v1Strike), JSON.stringify([...unlit]))
+ok('but NOT the expiration pair its visible sibling still rides',
+   !unlit.has(vShared), JSON.stringify([...unlit]))
+ok('the hidden leg is still a live object that resolves',
+   vb.legs.find((l) => l.id === V1).hidden === true &&
+   v.legResolved(vb.legs.find((l) => l.id === V1)).bounds !== null, '')
+v.setLegHidden(V2, true)
+ok('hiding the last visible rider finally unlights the shared pair',
+   v.hiddenLineIds(vb).has(vShared), JSON.stringify([...v.hiddenLineIds(vb)]))
+v.setLegHidden(V1, false)
+ok('showing one leg relights the shared pair for it',
+   !v.hiddenLineIds(vb).has(vShared), JSON.stringify([...v.hiddenLineIds(vb)]))
+
 console.log(JSON.stringify(out))
 """
     probe_path = app_dir / ".selftest-legs.mjs"
@@ -3752,7 +3908,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 74, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 94, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")
@@ -3903,7 +4059,11 @@ def _chart_constraints():
     # exactly that ("the lines dont snap together so its hard to tell when they
     # actually get connected"). Three things carry the feedback and each can be
     # deleted independently, so each is named here.
-    assert "this.renderJoints(b)" in draw_src, \
+    # Matched on the call, not on its exact argument list: renderJoints took a
+    # second parameter when per-leg visibility landed (a joint whose lines are
+    # hidden must go with them), and pinning the arity would have failed a
+    # change that kept the guarantee intact.
+    assert "this.renderJoints(b" in draw_src, \
         "placed 'on' relations draw no joint marker — a connection would be invisible"
     assert "this.snapToLine(cur.x, cur.y)" in draw_src, \
         "the trend preview no longer previews the snap, so it is only visible after the click"

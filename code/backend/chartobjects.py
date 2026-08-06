@@ -358,6 +358,26 @@ def validate(doc: Any) -> dict[str, Any]:
             if not isinstance(grp, str) or not (1 <= len(grp) <= MAX_ID):
                 _fail(f"leg {lid}: group must be a short tag, got {grp!r}")
             out_leg["group"] = grp
+        # Per-leg visibility, stored TRUTHY-ONLY like a drawing's legOwned: the
+        # key exists only on a hidden leg, so every document written before this
+        # loads byte-identically and an absent key reads as visible — which is
+        # both the safe default and the one an older client degrades to.
+        #
+        # This is PERSISTED although the global drawings-hidden switch is not,
+        # and the difference is deliberate: that switch is a LENS over the whole
+        # chart and belongs to the view, while this is an attribute OF the leg.
+        # charts.gs already draws the same line, persisting its per-symbol eye
+        # while treating `isolated` as a lens over it.
+        #
+        # No DOC_VERSION bump: a bump makes get() return empty_doc(), and the
+        # next 400ms autosave then DELETES the row that still held the user's
+        # work. An optional field costs nothing here — _list gives [] for an
+        # absent list and a leg dict simply lacks the key.
+        hid = lg.get("hidden")
+        if hid is not None and not isinstance(hid, bool):
+            _fail(f"leg {lid}: hidden must be true/false, got {hid!r}")
+        if hid:
+            out_leg["hidden"] = True
         legs.append(out_leg)
 
     clean = {"version": DOC_VERSION, "drawings": drawings,

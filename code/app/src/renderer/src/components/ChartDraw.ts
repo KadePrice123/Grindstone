@@ -266,7 +266,35 @@ export interface OptionLeg {
   group?: string
   /** Color slot in the leg palette (assignment by slot, like compare lines). */
   slot: number
+  /** Hidden from the chart: this leg's zone, chips and bounding lines stop
+   *  painting and stop being pickable. PERSISTED, unlike the global
+   *  drawings-hidden switch, because that one is a lens over the whole chart
+   *  while this is an attribute of the leg — the same line charts.gs draws
+   *  between its per-symbol eye and `isolated`.
+   *
+   *  A hidden leg is still a LIVE object: it resolves, it re-seats its guides,
+   *  its constraints are still pruned. Only the render loops, hit-testing and
+   *  the page's whitespace reserve consult this. Gating the geometry on it
+   *  would let a hidden leg go stale and jump the moment it came back. */
+  hidden?: boolean
 }
+
+/** The four fields naming a leg's OWN bounding lines, enumerated once.
+ *
+ *  This list was a literal in three places — render()'s ink pass, renderLeg,
+ *  and the backend validator's field tuple — and that is precisely how `group`
+ *  went missing from every save for a release: a fourth copy was needed and
+ *  only three were found. One name now, and the gate pins the Python tuple
+ *  against it.
+ *
+ *  Deliberately NOT the user-drawn bindings (`hostId`, `timeHostId`,
+ *  `priceHostId`). Those name lines the USER drew and then bound; they follow
+ *  the measures' dangle-and-degrade policy and are never swept, which is what
+ *  keeps "delete the trend I drew" from silently taking a strategy with it.
+ *  These four are the leg's own interface, minted with it and owned by it. */
+export const LEG_HOST_FIELDS: ReadonlyArray<
+  'strikeHostA' | 'strikeHostB' | 'timeHostA' | 'timeHostB'
+> = ['strikeHostA', 'strikeHostB', 'timeHostA', 'timeHostB']
 
 /** Strike read off a trend at a given bar index, the segment EXTRAPOLATED.
  *
@@ -353,7 +381,7 @@ export interface Constraint {
  *  a person. Carried on DrawState so a page can show it: a constraint that
  *  silently fails to apply is the one outcome this feature cannot have. */
 export interface ConstraintIssue {
-  code: 'duplicate' | 'unknown' | 'unsupported' | 'blocked' | 'quantized'
+  code: 'duplicate' | 'unknown' | 'unsupported' | 'blocked' | 'quantized' | 'cascade'
   message: string
 }
 
@@ -1372,7 +1400,17 @@ export class ChartDraw {
     // the DrawEditor's inputs keep their own Escape/Delete semantics.
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      // SELECT belongs here with the text inputs: the strategy-preset picker in
+      // the chart toolbar is a native <select>, and Chromium changes its value
+      // on ArrowUp/ArrowDown. Without this, an arrow press straight after
+      // applying a preset would silently apply a DIFFERENT one — minting a
+      // whole strategy — instead of nudging the selected line.
+      if (
+        t &&
+        (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      )
+        return
       if (e.key === 'Escape') {
         if (this.pendingPt !== null || this.pendingAnchor !== null) {
           this.pendingPt = null
@@ -1399,6 +1437,11 @@ export class ChartDraw {
         // app-wide would mean routing through main's before-input-event (the
         // pattern main/tabs.ts uses for F12), a shell change and out of scope.
         this.toggleLockSelected()
+      } else if (e.key.startsWith('Arrow') && this.selected.length > 0) {
+        // preventDefault ONLY when the press was actually consumed. An
+        // unconditional one would kill arrow-scrolling on every chart page for
+        // everyone who has anything selected.
+        if (this.stepSelected(e.key, e.shiftKey, e.altKey)) e.preventDefault()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -1489,20 +1532,243 @@ export class ChartDraw {
     this.commit()
   }
 
-  /** Removes EVERY selected object, whatever kind. One doomed set sweeps all
-   *  three arrays because mkId's ids are globally unique — the selection needs
-   *  no per-kind bookkeeping. Previously this filtered b.drawings alone, so a
-   *  measure could never be deleted by the Del key or the Delete tool. */
+  /** Leg-owned lines that no VISIBLE leg rides — the set that stops painting
+   *  and stops being a target while its leg is hidden.
+   *
+   *  Visibility is the UNION over riders, the exact mirror of the deletion
+   *  refcount and for the same reason: a condor's four legs share one
+   *  expiration pair, so hiding leg 1 must not take the two vlines that legs
+   *  2-4 are still bounded by. Their vertex handles and their whole region are
+   *  drawn from those lines.
+   *
+   *  Consulted by render() AND by hitTest, which is not optional. hitTest walks
+   *  the bucket rather than what was painted, so skipping a line in the render
+   *  loop alone would leave it invisible yet fully selectable, trimmable and
+   *  snappable — a stray click would open an editor on something that is not
+   *  on screen, and Delete would remove it. That exact bug has been shipped
+   *  here once already. */
+  private hiddenLineIds(b: Bucket): Set<string> {
+    const out = new Set<string>()
+    if (!b.legs.some((l) => l.hidden)) return out // the common case, allocation-free
+    const visible = b.legs.filter((l) => !l.hidden)
+    for (const leg of b.legs) {
+      if (!leg.hidden) continue
+      for (const id of this.legOwnedIds(leg)) {
+        if (this.riderCount(id, visible) === 0) out.add(id)
+      }
+    }
+    return out
+  }
+
+  /** Show or hide one leg. Ends in commit() because the flag is persisted; a
+   *  render()+emit() here would drop the setting on the next restart. */
+  setLegHidden(id: string, hidden: boolean): void {
+    const b = this.bucket()
+    const leg = b.legs.find((l) => l.id === id)
+    if (!leg || !!leg.hidden === hidden) return
+    if (hidden) leg.hidden = true
+    else delete leg.hidden
+    // A hidden leg cannot be selected — it has no region and no handles — so
+    // leaving its id in the selection would keep the page reporting a live
+    // selection for something unreachable, and Delete would act on it.
+    this.selected = this.selected.filter((s) => s !== id)
+    this.commit()
+  }
+
+  /** Every leg-owned line this leg names, in LEG_HOST_FIELDS order. */
+  private legOwnedIds(leg: OptionLeg): string[] {
+    const out: string[] = []
+    for (const f of LEG_HOST_FIELDS) {
+      const id = leg[f]
+      if (id) out.push(id)
+    }
+    return out
+  }
+
+  /** How many of `legs` still ride drawing `id` as one of their four bounds.
+   *
+   *  The predicate the whole coupling turns on, and the reason a condor does
+   *  not fall apart when one of its legs is deleted: addLegGroup gives a whole
+   *  strategy ONE shared vline pair, so those two lines have four riders and
+   *  must outlive the first three deletions. Called with the SURVIVORS when
+   *  sweeping, and with the VISIBLE legs when painting — same question, two
+   *  populations. */
+  private riderCount(id: string, legs: OptionLeg[]): number {
+    let n = 0
+    for (const leg of legs) {
+      for (const f of LEG_HOST_FIELDS) {
+        if (leg[f] === id) {
+          n += 1
+          break
+        }
+      }
+    }
+    return n
+  }
+
+  /** Close a doomed-id set under the leg/line coupling, so a delete can never
+   *  leave half a filter behind.
+   *
+   *  TWO DIFFERENT PREDICATES, and they are not symmetric:
+   *
+   *    line -> legs is TOTAL. The four lines ARE the filter's interface, and
+   *      legResolved needs all four to resolve (it tests every kind together);
+   *      losing one silently reverts the leg to the window it was born with,
+   *      with nothing on screen saying so. So every leg riding a doomed
+   *      leg-owned line goes with it. For a shared expiration line that means
+   *      one delete takes the whole strategy — intended, and reported through
+   *      `issue` afterwards rather than guessed at.
+   *
+   *    leg -> lines is REFCOUNTED. A line dies only once no SURVIVING leg
+   *      rides it, which is what protects a condor's shared vline pair.
+   *
+   *  Only `legOwned` lines are in the closure at all. A trend the user drew and
+   *  later bound keeps the measures' dangle-and-degrade policy, so deleting it
+   *  degrades the leg instead of destroying it.
+   *
+   *  ONE pass suffices, and the reason is worth stating: a line added by the
+   *  second phase has, by construction, no surviving rider — so it can never
+   *  doom a further leg, and there is no fixed point to iterate toward. */
+  private cascadeDoomed(b: Bucket, doomed: Set<string>): Set<string> {
+    const owned = new Set(b.drawings.filter((d) => d.legOwned === true).map((d) => d.id))
+    for (const leg of b.legs) {
+      if (doomed.has(leg.id)) continue
+      for (const f of LEG_HOST_FIELDS) {
+        const id = leg[f]
+        if (id && owned.has(id) && doomed.has(id)) {
+          doomed.add(leg.id)
+          break
+        }
+      }
+    }
+    const survivors = b.legs.filter((l) => !doomed.has(l.id))
+    for (const leg of b.legs) {
+      if (!doomed.has(leg.id)) continue
+      for (const id of this.legOwnedIds(leg)) {
+        if (owned.has(id) && this.riderCount(id, survivors) === 0) doomed.add(id)
+      }
+    }
+    return doomed
+  }
+
+  /** Removes EVERY selected object, whatever kind, plus whatever the leg/line
+   *  coupling drags in with it. One doomed set sweeps all four arrays because
+   *  mkId's ids are globally unique — the selection needs no per-kind
+   *  bookkeeping. Previously this filtered b.drawings alone, so a measure could
+   *  never be deleted by the Del key or the Delete tool; and until the cascade
+   *  it filtered b.legs without b.drawings, so deleting a leg left its four
+   *  bounding lines orphaned on the chart and in the saved document. */
   deleteSelected(): void {
     if (this.selected.length === 0) return
     const b = this.bucket()
-    const doomed = new Set(this.selected)
+    const doomed = this.cascadeDoomed(b, new Set(this.selected))
+    this.sweep(b, doomed)
+    this.selected = []
+    this.commit()
+  }
+
+  /** Apply a CLOSED doomed set to every collection, and to the live gesture
+   *  state that holds ids across clicks.
+   *
+   *  `pendingHost` is the subtle one: it carries a drawing id between the two
+   *  clicks that place a trend, and nothing but Escape and setTool ever cleared
+   *  it. Now that one delete can remove four lines and a leg at once, a
+   *  half-placed trend could commit an `on` relation against a drawing that no
+   *  longer exists. pruneConstraints reaps it on the trailing commit, so the
+   *  result was silent rather than corrupt — but the relation the user asked
+   *  for vanished with no message, which is its own bug. */
+  private sweep(b: Bucket, doomed: Set<string>): void {
     b.drawings = b.drawings.filter((d) => !doomed.has(d.id))
     b.measures = b.measures.filter((m) => !doomed.has(m.id))
     b.pins = b.pins.filter((p) => !doomed.has(p.id))
     b.legs = b.legs.filter((l) => !doomed.has(l.id))
-    this.selected = []
+    this.selected = this.selected.filter((id) => !doomed.has(id))
+    if (this.pendingHost && doomed.has(this.pendingHost)) this.pendingHost = null
+  }
+
+  /** Nudge every selected axis-locked line by one unit. Returns whether the
+   *  press was consumed, so the caller only swallows arrows it actually used.
+   *
+   *  UNITS. An hline steps $1, Shift $10, Alt $0.01 — literal dollars rather
+   *  than the chain's own strike grid, because the grid has to be derived from
+   *  chain data a fresh chart with no key does not have, and a step whose size
+   *  silently depends on the network is worse than one that is merely coarse.
+   *  A vline steps ONE COLUMN of the lattice: a candle inside the data, and one
+   *  trading day out in the whitespace where expirations live. That is the only
+   *  addressable step out there — the extended lattice has one slot per trading
+   *  day whatever the timeframe — so on an intraday chart an arrow past the
+   *  last bar moves a whole day, which is visible and therefore honest.
+   *
+   *  Only hlines and vlines step. A trend has two endpoints and no single "the"
+   *  coordinate; nudging both would be a move tool wearing a keyboard.
+   *
+   *  Routed through movableIds() because that is where locks get their say:
+   *  updateDrawing has no lock check of its own, so writing points directly
+   *  would step a line the user had explicitly locked. */
+  private stepSelected(key: string, shift: boolean, alt: boolean): boolean {
+    const horizontal = key === 'ArrowLeft' || key === 'ArrowRight'
+    const sign = key === 'ArrowRight' || key === 'ArrowUp' ? 1 : -1
+    const b = this.bucket()
+    const byId = new Map(b.drawings.map((d) => [d.id, d]))
+    const kind = horizontal ? 'vline' : 'hline'
+    const wanted = this.selected.filter((id) => byId.get(id)?.kind === kind)
+    if (wanted.length === 0) return false
+
+    // An axis driven by a HOST answers to that host, and syncLegs re-seats
+    // these very lines on the commit this would trigger — so the press would
+    // visibly do nothing at all. Refuse and name the thing to move instead,
+    // rather than let a working key look broken.
+    for (const id of wanted) {
+      for (const leg of b.legs) {
+        const onTime = leg.timeHostA === id || leg.timeHostB === id
+        const onPrice = leg.strikeHostA === id || leg.strikeHostB === id
+        if (!onTime && !onPrice) continue
+        const r = this.legResolved(leg)
+        const host = onTime ? r.timeHosted : r.priceHosted
+        if (host === null) continue
+        this.issue = {
+          code: 'blocked',
+          message:
+            `That edge follows the ${host} it is bound to. ` +
+            `Move the ${host}, or type a value on the leg to detach it.`,
+        }
+        this.render()
+        this.emit()
+        return true
+      }
+    }
+
+    const { ids, issue } = this.movableIds(wanted)
+    if (ids.length === 0) {
+      this.issue = issue
+      this.render()
+      this.emit()
+      return true // consumed: the press was answered, with a refusal
+    }
+    const step = shift ? 10 : alt ? 0.01 : 1
+    let moved = false
+    for (const id of ids) {
+      const d = byId.get(id)
+      if (!d) continue
+      if (d.kind === 'hline') {
+        d.points[0].price += sign * step
+        moved = true
+      } else {
+        // Through the lattice, never by adding seconds: weekends and holidays
+        // are closed up on this axis, so "one column" is an index operation.
+        const i = this.idxForTime(d.points[0].time)
+        if (i === null) continue
+        const t = this.timeAtIdx(Math.round(i) + sign)
+        if (t === null) continue
+        d.points[0].time = t as UTCTimestamp
+        moved = true
+      }
+    }
+    if (!moved) return false
+    propagate(b.drawings, b.constraints, new Set(ids))
+    this.issue = this.restoreSlopes(new Set(ids))
     this.commit()
+    return true
   }
 
   /** Deselect everything without deleting (DrawEditor's × / page escape hatch). */
@@ -1513,13 +1779,23 @@ export class ChartDraw {
     this.emit()
   }
 
-  /** Drawings only. Measures anchored to a deleted line degrade to their
-   *  snap-moment free position rather than vanishing. */
+  /** Every drawing the USER made. Measures anchored to a deleted line degrade
+   *  to their snap-moment free position rather than vanishing.
+   *
+   *  Leg-owned bounding lines are NOT the user's to clear from here. "Clear
+   *  every drawing" deliberately leaves legs alone — and a leg whose four lines
+   *  were wiped has not been left alone: it is left naming four ids that no
+   *  longer exist, which legResolved answers by silently reverting the filter
+   *  to the window the leg was born with. That is the exact broken state this
+   *  method used to manufacture on every press. Legs leave through
+   *  selection-delete or 'Clear legs', both of which take their lines with
+   *  them. */
   clearDrawings(): void {
     const b = this.bucket()
-    b.drawings = []
+    b.drawings = b.drawings.filter((d) => d.legOwned === true)
     this.selected = []
     this.pendingPt = null
+    this.pendingHost = null
     this.commit()
   }
 
@@ -2183,9 +2459,25 @@ export class ChartDraw {
       const bb = b.drawings.find((d) => d.id === leg.timeHostB)
       const t = this.timeForDate(r.expiration)
       if (a?.kind === 'vline' && bb?.kind === 'vline' && t !== null) {
-        const span = (bb.points[0].time as number) - (a.points[0].time as number)
+        // The span is carried in INDEX units, not raw seconds. Seconds are not
+        // a translation on this axis: the lattice closes weekends and holidays
+        // up, so `t + span` lands between columns as soon as the pair straddles
+        // one — and a vline between columns is exactly what snapping exists to
+        // prevent. Re-derived through the lattice, B stays a whole number of
+        // trading days from A however far the pair is moved.
+        const ia = this.idxForTime(a.points[0].time)
+        const ib = this.idxForTime(bb.points[0].time)
+        const it = this.idxForTime(t)
+        // Both spans read BEFORE A moves — it is A's old time that defines them.
+        const secondsSpan = (bb.points[0].time as number) - (a.points[0].time as number)
+        const reseated =
+          ia === null || ib === null || it === null
+            ? null
+            : this.timeAtIdx(Math.round(it + (ib - ia)))
         a.points[0].time = t as UTCTimestamp
-        bb.points[0].time = (t + span) as UTCTimestamp
+        // Falling back to the raw-seconds translation keeps a pair with an
+        // unresolvable endpoint moving together rather than collapsing onto A.
+        bb.points[0].time = (reseated ?? t + secondsSpan) as UTCTimestamp
       }
     }
   }
@@ -2202,7 +2494,16 @@ export class ChartDraw {
    *  by the host on the next resolve, so the patch clears the binding first -
    *  typing an exact strike into a leg that rides a line means "stop riding
    *  the line", and silently ignoring the typed number would be worse. */
-  updateLeg(id: string, patch: Partial<Omit<OptionLeg, 'id' | 'slot'>>): void {
+  updateLeg(
+    id: string,
+    // The four bounding fields are NOT patchable from here, enforced by the
+    // type rather than by a runtime guard. They are minted with the leg and
+    // swept with it by reference count; letting an editor re-point or clear one
+    // would orphan a drawing outside every delete path, and nothing would
+    // notice until a saved document already held the leak. Geometry changes
+    // reach them through the lines themselves — which is the whole design.
+    patch: Partial<Omit<OptionLeg, 'id' | 'slot' | (typeof LEG_HOST_FIELDS)[number]>>
+  ): void {
     const b = this.bucket()
     const leg = b.legs.find((l) => l.id === id)
     if (!leg) return
@@ -2258,15 +2559,19 @@ export class ChartDraw {
 
   deleteLeg(id: string): void {
     const b = this.bucket()
-    const before = b.legs.length
-    b.legs = b.legs.filter((l) => l.id !== id)
-    if (b.legs.length !== before) this.commit()
+    if (!b.legs.some((l) => l.id === id)) return
+    this.sweep(b, this.cascadeDoomed(b, new Set([id])))
+    this.commit()
   }
 
   clearLegs(): void {
     const b = this.bucket()
     if (b.legs.length === 0) return
-    b.legs = []
+    // Through the cascade rather than `b.legs = []`, so the four lines each leg
+    // minted go with it. With every leg doomed no line has a surviving rider,
+    // so this reaches every leg-owned drawing — including the shared expiration
+    // pair, which no longer has anyone to strand.
+    this.sweep(b, this.cascadeDoomed(b, new Set(b.legs.map((l) => l.id))))
     this.commit()
   }
 
@@ -2787,8 +3092,15 @@ export class ChartDraw {
     if (this.hidden) return null
     const pane = this.paneSizeSafe()
     if (!pane) return null
+    // AND the per-leg rule, here rather than only in render(): this walks the
+    // bucket, not the frame that was painted. Skipping a line in render alone
+    // would leave it invisible and still selectable, trimmable, measure-snappable
+    // and reachable by Delete. One placement covers picking, trim, measure-snap
+    // and trend-snap together, because lineUnder() resolves through this too.
+    const unlit = this.hiddenLineIds(this.bucket())
     let best: { drawing: Drawing; dist: number; nx: number; ny: number; u: number } | null = null
     for (const d of this.bucket().drawings) {
+      if (unlit.has(d.id)) continue
       if (d.kind === 'circle') {
         if (linesOnly) continue
         const g = this.ellipsePx(d)
@@ -3265,9 +3577,20 @@ export class ChartDraw {
 
   private clickVline(y: number, time: UTCTimestamp | null): void {
     if (time === null) return
+    // SNAPPED AT PLACEMENT, not only while dragging. A vertical line names a
+    // MOMENT, and one dropped between two candles names a time the chart has no
+    // column for — it draws a pixel off its own bar and reads as imprecision in
+    // the tool. Past the last candle the extended lattice keeps answering, one
+    // slot per trading day, which is what lands an expiration on a weekday
+    // instead of the Saturday the raw cursor would have given.
+    const t = this.snapDrawTime(time) ?? time
     // Price is irrelevant to the line; it remembers where the handle sits.
     const price = this.priceAtY(y) ?? 0
-    this.bucket().drawings.push({ id: mkId('dw'), kind: 'vline', points: [{ time, price }] })
+    this.bucket().drawings.push({
+      id: mkId('dw'),
+      kind: 'vline',
+      points: [{ time: t as UTCTimestamp, price }],
+    })
     this.commit()
   }
 
@@ -3438,18 +3761,43 @@ export class ChartDraw {
     const b = this.bucket()
     // Clicking any SELECTED object deletes the whole selection; clicking an
     // unselected one deletes just it (selection survives).
-    const doomed = this.selected.includes(hit.id) ? new Set(this.selected) : new Set([hit.id])
-    b.drawings = b.drawings.filter((d) => !doomed.has(d.id))
-    b.measures = b.measures.filter((m) => !doomed.has(m.id))
-    b.pins = b.pins.filter((p) => !doomed.has(p.id))
-    b.legs = b.legs.filter((l) => !doomed.has(l.id))
-    this.selected = this.selected.filter((id) => !doomed.has(id))
+    const aimed = this.selected.includes(hit.id) ? new Set(this.selected) : new Set([hit.id])
+    const doomed = this.cascadeDoomed(b, aimed)
+    // Say what the click actually took when it took more than was aimed at.
+    // Deleting one shared expiration line removes every leg of the strategy
+    // riding it, which is the coupling working as intended and still a
+    // surprise if it happens in silence.
+    const extraLegs = b.legs.filter((l) => doomed.has(l.id) && !aimed.has(l.id)).length
+    this.sweep(b, doomed)
+    this.issue = extraLegs > 0
+      ? {
+          code: 'cascade',
+          message:
+            `That line was part of ${extraLegs} other ` +
+            `${extraLegs > 1 ? 'filters' : 'filter'}, so ${extraLegs > 1 ? 'they went' : 'it went'} with it.`,
+        }
+      : null
     this.commit()
   }
 
   private clickTrim(x: number, y: number): void {
     const hit = this.hitTest(x, y, true)
     if (!hit) return
+    // A leg's bounding line declines to be trimmed, and a refusal is the only
+    // honest answer available. Trim replaces what it cuts with NEW ids of kind
+    // 'trend'; legResolved requires a leg's strike hosts to be hlines and its
+    // time hosts vlines, so a trimmed bound can never be re-pointed at its own
+    // remains. The real choice was "destroy the leg" or "decline", and a
+    // precision tool should decline on a control it does not own.
+    if (hit.drawing.legOwned) {
+      this.issue = {
+        code: 'unsupported',
+        message: 'That line is part of an option filter. Drag it, or delete the leg.',
+      }
+      this.render()
+      this.emit()
+      return
+    }
     const res = this.computeTrim(hit.drawing, x, y)
     if (!res) return
     const b = this.bucket()
@@ -3458,6 +3806,11 @@ export class ChartDraw {
     if (!res.whole) {
       added.push(...res.spans)
       for (const bd of res.boundaries) {
+        // Same rule from the other direction: a leg's line may act as a cutting
+        // BOUNDARY without being consumed by the cut. Splitting it here would
+        // destroy a filter the user never aimed at — the surprising half of
+        // this, since nothing was clicked on the leg at all.
+        if (bd.donor.legOwned) continue
         const pieces = this.splitDonor(bd.donor, bd.at)
         if (pieces) {
           dead.add(bd.donor.id)
@@ -3468,6 +3821,7 @@ export class ChartDraw {
     b.drawings = b.drawings.filter((d) => !dead.has(d.id))
     b.drawings.push(...added)
     this.selected = this.selected.filter((id) => !dead.has(id))
+    this.issue = null
     this.commit()
   }
 
@@ -3568,6 +3922,42 @@ export class ChartDraw {
   /** A positioned text chip in the HTML layer. ax/ay anchor the box on the
    *  point (0 = left/top edge at it, 1 = right/bottom). Always clamped into
    *  the pane so a label near an edge stays readable. */
+  /** An edge tag: an hline's price pinned to the right rail, a vline's date to
+   *  the bottom. Pass `y` for the first, `x` for the second.
+   *
+   *  Deliberately NOT a chip, in two ways that both matter.
+   *
+   *  It is never registered as a hit-zone, and it cannot take a pointer event
+   *  at all (`pointer-events: none` in the stylesheet). A zone answers at
+   *  distance 0 over whatever lies beneath it, and these sit precisely where
+   *  lines cross the edges — every vline crosses the right rail where the hline
+   *  tags live, and every hline crosses the bottom where the vline tags do. A
+   *  clickable tag would make the line it names unpickable exactly where the
+   *  user reaches for it, which is a bug this codebase has already shipped once.
+   *
+   *  And it anchors with CSS rather than by measuring itself. chip() reads
+   *  offsetWidth immediately after appendChild, forcing a synchronous layout
+   *  per instance; that is fine for a handful of hover chips and not fine for
+   *  one-per-line on a path that re-runs every time the hover target changes.
+   *  Right/bottom anchoring plus a transform gives the same placement for no
+   *  layout reads at all. */
+  private tag(text: string, opts: { x?: number; y?: number; ink?: string }): void {
+    const el = document.createElement('div')
+    el.className = 'cd-tag'
+    el.textContent = text
+    if (opts.ink) el.style.color = opts.ink
+    if (opts.y !== undefined) {
+      el.style.top = `${opts.y}px`
+      el.style.right = '2px'
+      el.style.transform = 'translateY(-50%)'
+    } else if (opts.x !== undefined) {
+      el.style.left = `${opts.x}px`
+      el.style.bottom = '2px'
+      el.style.transform = 'translateX(-50%)'
+    }
+    this.labels.appendChild(el)
+  }
+
   private chip(
     x: number,
     y: number,
@@ -3614,11 +4004,19 @@ export class ChartDraw {
     this.zoneDraft = []
     this.cornerDraft = []
     // Rebuilt before anything paints, because renderDrawing consults it.
+    // Hidden legs are skipped: this loop runs OUTSIDE the visibility gate, and
+    // a later leg overwrites an earlier one for a shared id, so a hidden leg
+    // could otherwise be the one colouring the shared vline its visible
+    // siblings are still using — a line advertising a leg that is not on screen.
     this.inkById = new Map()
+    const unlit = this.hiddenLineIds(this.bucket())
     for (const l of this.bucket().legs) {
+      if (l.hidden) continue
       const ink = SIDE_INK[this.legResolved(l).side]
-      for (const id of [l.strikeHostA, l.strikeHostB, l.timeHostA, l.timeHostB])
+      for (const f of LEG_HOST_FIELDS) {
+        const id = l[f]
         if (id) this.inkById.set(id, ink)
+      }
     }
 
     const b = this.bucket()
@@ -3647,6 +4045,10 @@ export class ChartDraw {
         b.constraints.filter((c) => c.kind === 'lock').map((c) => c.a.id)
       )
       for (const d of b.drawings) {
+        // The lock rides the same `continue`, not a guard inside renderDrawing:
+        // a padlock left floating over a line nobody can see is worse than no
+        // padlock at all.
+        if (unlit.has(d.id)) continue
         this.renderDrawing(pane, d, {
           selected: this.selected.includes(d.id),
           hover: this.hoverId === d.id,
@@ -3656,8 +4058,14 @@ export class ChartDraw {
       }
       // After every drawing, so a joint is never buried under the lines that
       // meet at it — which is exactly where it is least visible and most needed.
-      this.renderJoints(b)
-      for (const leg of b.legs) this.renderLeg(pane, leg)
+      this.renderJoints(b, unlit)
+      for (const leg of b.legs) {
+        // Skipping renderLeg de-registers the leg's region and its four vertex
+        // handles for free — both are published from inside it — so a hidden
+        // leg becomes unpickable without a second guard anywhere.
+        if (leg.hidden) continue
+        this.renderLeg(pane, leg)
+      }
       for (const m of b.measures) this.renderMeasure(pane, m)
       for (const pin of b.pins) this.renderPin(pane, pin)
     }
@@ -3856,9 +4264,25 @@ export class ChartDraw {
 
   /** logicalToCoordinate - the projection that works PAST the last bar, where
    *  timeToCoordinate returns null and every expiration lives. */
+  /** A (possibly future, possibly fractional) bar index to a pixel x.
+   *
+   *  ROUNDED, and that is load-bearing rather than cosmetic. The library's
+   *  indexToCoordinate opens with `if (isEmpty() || !isInteger(index)) return 0`
+   *  — a FRACTIONAL index does not return null to be guarded, it returns the
+   *  pane's left edge, which draws a perfectly convincing line in the wrong
+   *  place. idxForTime's whitespace branch yields `last + off * (390 / per)`,
+   *  and 390/60 = 6.5 on 1Hour, so every future point at an odd trading-day
+   *  offset landed at x=0 there. Only 1Hour was affected: 1Day/1Min/5Min/15Min
+   *  all divide 390 evenly, which is why this survived — nothing exercised the
+   *  one timeframe that produces a half-integer.
+   *
+   *  Rounding here rather than at the four call sites because the fraction has
+   *  no meaning to preserve: the whitespace lattice has one slot per trading
+   *  day, so a half-slot is not a position anyone can address anyway. */
   private xAtIdx(i: number): number | null {
+    if (!Number.isFinite(i)) return null
     try {
-      const x = this.chart.timeScale().logicalToCoordinate(i as never)
+      const x = this.chart.timeScale().logicalToCoordinate(Math.round(i) as never)
       return typeof x === 'number' ? x : null
     } catch {
       return null
@@ -3867,10 +4291,13 @@ export class ChartDraw {
 
   /** Every endpoint currently held onto a line. Drawn after the geometry so a
    *  joint is never hidden under the lines that meet at it. */
-  private renderJoints(b: Bucket): void {
+  private renderJoints(b: Bucket, unlit: Set<string>): void {
     const byId = new Map(b.drawings.map((d) => [d.id, d]))
     for (const c of b.constraints) {
       if (c.kind !== 'on') continue
+      // A joint marks where two lines meet. If either end is not on screen the
+      // glyph is a marker floating in space, so it goes with them.
+      if (unlit.has(c.a.id) || (c.b && unlit.has(c.b.id))) continue
       const d = byId.get(c.a.id)
       if (!d) continue
       const pt = d.points[c.a.part === 'b' ? 1 : 0]
@@ -3938,6 +4365,17 @@ export class ChartDraw {
     if (!seg) return // unprojectable now; back when the range returns
     if (wantHalo) this.line(seg.a, seg.b, halo, 8)
     this.line(seg.a, seg.b, stroke, width)
+    // WHAT THE LINE SAYS, parked at the edge it runs to. Emitted after the
+    // early return above, so a tag never outlives the line it names — a label
+    // floating where an unprojectable line would have been is worse than
+    // neither.
+    //
+    // A bare number, no currency mark: on a percent axis an hline's stored
+    // price IS a percentage, and a '$' would be a lie in the one place the user
+    // is reading an exact value. The placement preview already prints it this
+    // way, so placed and previewed lines read alike.
+    if (d.kind === 'hline') this.tag(fmtNum(d.points[0].price), { y: seg.a.y, ink })
+    else if (d.kind === 'vline') this.tag(fmtDate(d.points[0].time), { x: seg.a.x, ink })
     if (st.selected) {
       // Handles sit on the DATA anchors (an hline handle can scroll away
       // with its bar; the line itself stays full-width).
@@ -4186,9 +4624,22 @@ export class ChartDraw {
       case 'vline': {
         if (!cur) return
         const dead = cur.time === null // whitespace right of the data: unplaceable
-        this.line({ x: cur.x, y: 0 }, { x: cur.x, y: pane.height }, STROKE, 1.5, true, dead ? 0.35 : 1)
+        // Drawn where the line will LAND, not where the cursor is. The snap was
+        // invisible until the click: the preview tracked the raw pixel while the
+        // chip beside it already printed the quantized date, so the two
+        // disagreed and the line appeared to jump on release. It now steps
+        // candle to candle under the cursor, which is what "the snap is visible"
+        // has to mean for a tool with no proximity threshold to telegraph.
+        const snapT = dead ? null : this.snapDrawTime(cur.time!)
+        const sx = snapT === null ? cur.x : this.xForTime(snapT as UTCTimestamp)
+        const px = sx === null ? cur.x : sx
+        this.line({ x: px, y: 0 }, { x: px, y: pane.height }, STROKE, 1.5, true, dead ? 0.35 : 1)
         if (!dead)
-          this.chip(cur.x + 6, pane.height - 6, [{ text: fmtDate(cur.time!), cls: 'em' }], '', 0, 1, pane)
+          this.chip(
+            px + 6, pane.height - 6,
+            [{ text: fmtDate((snapT ?? cur.time) as UTCTimestamp), cls: 'em' }],
+            '', 0, 1, pane
+          )
         return
       }
       case 'trend':

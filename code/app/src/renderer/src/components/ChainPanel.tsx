@@ -51,11 +51,33 @@ function dteOf(expiration: string): number {
   return Math.round(ms / 86400_000)
 }
 
-function LegRows({ leg, res }: { leg: ResolvedLeg; res: ChainResponse | null }) {
+function LegRows({
+  leg,
+  res,
+  onToggleHidden,
+}: {
+  leg: ResolvedLeg
+  res: ChainResponse | null
+  onToggleHidden?: (id: string, hidden: boolean) => void
+}) {
   const color = LEG_PALETTE[leg.slot % LEG_PALETTE.length]
+  const hidden = !!leg.hidden
   const head = (
     <div className="cp-leg-head">
-      <span className="cp-swatch" style={{ background: color }} />
+      {/* The eye stays in the STRIP even while the leg is off the chart. A
+          hidden leg has no region and no handles, so this row is the only
+          place it can be reached — and 'Clear legs' would still sweep it. */}
+      <button
+        type="button"
+        className={`cp-eye${hidden ? ' off' : ''}`}
+        title={hidden ? 'Show leg' : 'Hide leg'}
+        aria-pressed={hidden}
+        data-leg-hidden={hidden ? '1' : '0'}
+        onClick={() => onToggleHidden?.(leg.id, !hidden)}
+      >
+        {hidden ? '◌' : '●'}
+      </button>
+      <span className="cp-swatch" style={{ background: hidden ? 'transparent' : color, borderColor: color }} />
       <span className="em">
         {leg.side === 'short' ? 'SELL' : 'BUY'} {leg.right === 'P' ? 'PUT' : 'CALL'}{' '}
         {fmt(leg.resolved.strike, 1)}
@@ -72,7 +94,7 @@ function LegRows({ leg, res }: { leg: ResolvedLeg; res: ChainResponse | null }) 
   )
   if (!res || !res.available || res.contracts.length === 0) {
     return (
-      <div className="cp-leg">
+      <div className={`cp-leg${hidden ? ' hidden' : ''}`}>
         {head}
         {res && res.available && res.contracts.length === 0 ? (
           <div className="dim subtle">{res.reason ?? 'no contracts in this window'}</div>
@@ -81,7 +103,7 @@ function LegRows({ leg, res }: { leg: ResolvedLeg; res: ChainResponse | null }) 
     )
   }
   return (
-    <div className="cp-leg">
+    <div className={`cp-leg${hidden ? ' hidden' : ''}`}>
       {head}
       {res.truncated ? (
         <div className="dim subtle">showing {res.contracts.length} of {res.total} — narrow the window</div>
@@ -117,7 +139,15 @@ function LegRows({ leg, res }: { leg: ResolvedLeg; res: ChainResponse | null }) 
   )
 }
 
-export function ChainPanel({ symbol, legs }: { symbol: string; legs: ResolvedLeg[] }) {
+export function ChainPanel({
+  symbol,
+  legs,
+  onToggleHidden,
+}: {
+  symbol: string
+  legs: ResolvedLeg[]
+  onToggleHidden?: (id: string, hidden: boolean) => void
+}) {
   const [byLeg, setByLeg] = useState<Record<string, ChainResponse | null>>({})
   const [meta, setMeta] = useState<{ source: string; reason?: string } | null>(null)
   const seq = useRef(0)
@@ -194,7 +224,7 @@ export function ChainPanel({ symbol, legs }: { symbol: string; legs: ResolvedLeg
         </div>
       ) : null}
       {legs.map((l) => (
-        <LegRows key={l.id} leg={l} res={byLeg[l.id] ?? null} />
+        <LegRows key={l.id} leg={l} res={byLeg[l.id] ?? null} onToggleHidden={onToggleHidden} />
       ))}
     </div>
   )

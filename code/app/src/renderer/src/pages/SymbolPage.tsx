@@ -373,6 +373,9 @@ export function SymbolPage({
   const lastBarDate = bars.length > 0 ? bars[bars.length - 1].ts.slice(0, 10) : null
   if (legsEnabled && lastBarDate) {
     for (const l of legs) {
+      // A hidden leg reserves nothing: holding open two months of empty chart
+      // for a filter that is not drawn reads as the chart refusing to zoom.
+      if (l.hidden) continue
       const off = tradingDayOffset(lastBarDate, l.window?.expTo ?? l.resolved.expiration)
       if (off !== null && off > reserve) reserve = off
     }
@@ -625,7 +628,11 @@ export function SymbolPage({
         {panel !== null ? (
           <aside className="side-panel">
             {panel === 'chain' ? (
-              <ChainPanel symbol={symbol} legs={legsEnabled ? legs : []} />
+              <ChainPanel
+                symbol={symbol}
+                legs={legsEnabled ? legs : []}
+                onToggleHidden={(id, hidden) => draw.current?.setLegHidden(id, hidden)}
+              />
             ) : (
               <div className="sp-news">
                 {data == null ? (

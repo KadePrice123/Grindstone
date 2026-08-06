@@ -111,6 +111,30 @@
   white-space: nowrap;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
+/* The edge tag: an h-line's price on the right rail, a v-line's date along the
+   bottom. Quieter than a chip on purpose — there is one per line, so they are
+   scenery until you look for them, and they must not compete with the leg
+   chips that carry the actual readings.
+
+   pointer-events:none is load-bearing, not tidiness. These sit exactly where
+   lines cross the edges, and a label that takes a click makes the line it names
+   unpickable at the moment the user is reaching for it. Belt and braces with
+   the engine never registering them as hit-zones. */
+.cd-tag {
+  position: absolute;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  white-space: nowrap;
+  max-width: 42%; /* a long date can never curtain the chart */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .cd-chip .em {
   font-weight: 700;
 }
@@ -374,8 +398,33 @@
   width: 9px;
   height: 9px;
   border-radius: 2px;
+  border: 1px solid transparent;
   flex-shrink: 0;
   vertical-align: baseline;
+}
+/* A hidden leg stays legible rather than disappearing from the strip too: the
+   panel is the only place it can still be reached once it has left the chart. */
+.cp-leg.hidden .cp-leg-head .em,
+.cp-leg.hidden .cp-leg-head .dim {
+  opacity: 0.45;
+}
+.cp-eye {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.cp-eye:hover {
+  color: var(--text);
+}
+.cp-eye.off {
+  color: var(--text-dim);
+  opacity: 0.6;
 }
 .cp-table {
   width: 100%;
