@@ -3523,6 +3523,39 @@ dA.points[0].price = 615
 ok('and dragging it back above flips back to SELL',
    e4.legResolved(L()).side === 'short', e4.legResolved(L()).side)
 
+// A PRESET must mint lines too. addLegGroup was the path the UI actually uses
+// for a strategy, and it shipped without minting: the acceptance region drew
+// from the fallback window, which for a freshly placed leg carries the SAME
+// numbers as its lines would, so the chip looked perfect while no line existed.
+// Asserting the DRAWING COUNT is what tells those two apart.
+const e5 = mkEngine('GRP|1Day')
+e5.barsOpt = () => bars
+const b5 = e5.bucket()
+const expG = new Date(day(25) * 1000).toISOString().slice(0, 10)
+e5.addLegGroup([
+  { side: 'short', right: 'P', expiration: expG, strike: 600, dteTol: 3, strikeTol: 5 },
+  { side: 'long', right: 'P', expiration: expG, strike: 590, dteTol: 3, strikeTol: 5 },
+])
+ok('a preset mints lines for every leg it places', b5.drawings.length > 0,
+   b5.drawings.length)
+ok('every leg in the group is bounded by real lines',
+   b5.legs.every((l) => e5.legResolved(l).bounds !== null),
+   JSON.stringify(b5.legs.map((l) => !!e5.legResolved(l).bounds)))
+// ONE expiration pair for the whole strategy: the legs share a date, so they
+// share the lines that carry it and grabbing one rolls the structure.
+ok('the group shares ONE expiration pair rather than stacking duplicates',
+   b5.drawings.filter((d) => d.kind === 'vline').length === 2,
+   b5.drawings.filter((d) => d.kind === 'vline').length)
+ok('while each leg keeps its own strike pair',
+   b5.drawings.filter((d) => d.kind === 'hline').length === 4,
+   b5.drawings.filter((d) => d.kind === 'hline').length)
+ok('and the shared vlines are the SAME ids on both legs',
+   b5.legs[0].timeHostA === b5.legs[1].timeHostA &&
+   b5.legs[0].timeHostB === b5.legs[1].timeHostB, '')
+ok('every minted line is flagged as leg-owned',
+   b5.drawings.every((d) => d.legOwned === true),
+   JSON.stringify(b5.drawings.map((d) => d.legOwned)))
+
 // ---- THE LEGACY FOLD: documents saved before the two-host split ----------
 // A stored leg carries ONE hostId whose role followed the drawing's kind. It
 // must keep working with no rewrite of the document and no DOC_VERSION bump —
@@ -3588,7 +3621,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 65, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 71, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")

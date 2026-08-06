@@ -2120,7 +2120,8 @@ export class ChartDraw {
    *  trick — there is nowhere else for the answer to disagree with the lines. */
   private mintLegGuides(
     b: Bucket,
-    spec: { expiration: string; strike: number; dteTol: number; strikeTol: number; side: LegSide }
+    spec: { expiration: string; strike: number; dteTol: number; strikeTol: number; side: LegSide },
+    shared?: { timeHostA?: string; timeHostB?: string }
   ): Pick<OptionLeg, 'strikeHostA' | 'strikeHostB' | 'timeHostA' | 'timeHostB'> {
     const tF = this.timeForDate(spec.expiration)
     const tT = this.timeForDate(
@@ -2145,8 +2146,8 @@ export class ChartDraw {
     return {
       strikeHostA: mk('hline', tF, aPrice),
       strikeHostB: mk('hline', tF, bPrice),
-      timeHostA: mk('vline', tF, spec.strike),
-      timeHostB: mk('vline', tT, spec.strike),
+      timeHostA: shared?.timeHostA ?? mk('vline', tF, spec.strike),
+      timeHostB: shared?.timeHostB ?? mk('vline', tT, spec.strike),
     }
   }
 
@@ -2225,11 +2226,20 @@ export class ChartDraw {
     const b = this.bucket()
     const g = mkId('gp')
     const used = new Set(b.legs.map((l) => l.slot))
+    // ONE expiration pair for the whole strategy: a condor's four legs share an
+    // expiration, so they share the two vlines that carry it — grab one and the
+    // whole structure rolls in time. Per-leg vlines would put four identical
+    // lines on top of each other and make that gesture impossible to aim.
+    let shared: { timeHostA?: string; timeHostB?: string } | undefined
     for (const spec of specs) {
       let slot = 0
       while (used.has(slot)) slot++
       used.add(slot)
-      b.legs.push({ ...spec, id: mkId('lg'), group: g, slot })
+      const guides = this.mintLegGuides(b, spec, shared)
+      if (shared === undefined) {
+        shared = { timeHostA: guides.timeHostA, timeHostB: guides.timeHostB }
+      }
+      b.legs.push({ ...spec, ...guides, id: mkId('lg'), group: g, slot })
     }
     this.commit()
     return g
