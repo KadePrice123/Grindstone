@@ -2843,6 +2843,26 @@ export class ChartDraw {
     // its life in - must cost three length checks and no allocation.
     if (b.drawings.length === 0 && b.measures.length === 0 && b.pins.length === 0 &&
         b.legs.length === 0) return null
+    // A LINE UNDER THE CURSOR OUTRANKS A REGION AROUND IT. Hot zones answer at
+    // distance 0, and a leg's acceptance region is a large one — so every line
+    // crossing it was unpickable inside it, which is most of where those lines
+    // are and all of where you want to grab them. The region is a fill, not a
+    // control; the lines and vertices are the controls. Chips keep their
+    // priority (they are small and deliberate), and clicking the region away
+    // from any line still picks the leg.
+    // hitTest already returns null past HIT_PX, so a second distance guard
+    // here would be unfalsifiable decoration — it read as a real check and a
+    // mutation removing it changed nothing.
+    const nearLine = this.hitTest(x, y)
+    if (nearLine) {
+      const overRegion = this.hotZones.some(
+        (z) => z.kind === 'leg' &&
+          x >= z.left && x <= z.left + z.w && y >= z.top && y <= z.top + z.h
+      )
+      if (overRegion) {
+        return { kind: 'drawing', id: nearLine.drawing.id, ...nearLine }
+      }
+    }
     for (const z of this.hotZones) {
       if (x < z.left || x > z.left + z.w || y < z.top || y > z.top + z.h) continue
       if (z.kind === 'measure') {
@@ -3740,11 +3760,20 @@ export class ChartDraw {
     // back on the chart, where it answers "which one is this?" instead of
     // narrating something you can already see.
     if (picked || hot) {
-      const box = this.chip(
-        left + wpx / 2, top - 4, rows,
-        `cd-leg${picked ? ' cd-sel' : ' cd-hot'}`, 0.5, 1, pane
+      // BESIDE the region, never over it. Centred above the top edge, the chip
+      // is wider than a narrow region and so covers both top corners and the
+      // top line — the exact handles you reach for while it is showing, since
+      // it only shows on hover. Anchored left, just outside the right edge, it
+      // clears every vertex.
+      this.chip(
+        left + wpx + 10, top - 2, rows,
+        `cd-leg${picked ? ' cd-sel' : ' cd-hot'}`, 0, 1, pane
       )
-      this.zoneDraft.push({ ...box, kind: 'leg', id: leg.id })
+      // NOT a hot zone. Registering the chip made it swallow clicks aimed at
+      // whatever sat beneath it, and hitAny answers hot zones FIRST at
+      // distance 0 — so a label that appears on hover made the line it was
+      // covering unpickable at precisely the moment you were reaching for it.
+      // The region below is the leg's hit target; the label is just a label.
     }
     // The REGION stays grabbable whether or not its label is up, so hiding the
     // label never costs the leg its hit target.

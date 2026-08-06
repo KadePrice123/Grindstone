@@ -3277,6 +3277,22 @@ def _chart_legs():
         "the crosshair no longer resolves a time in the whitespace, so the " \
         "placement preview dims out exactly where a leg's expiration lives"
 
+    # -- 1c. WIRING: the label must not become a hit target -------------------
+    # renderLeg builds its chip through chip(), which writes HTML — so the
+    # node probe cannot reach it and this is a source assertion, honestly
+    # labelled as one. What it guards is real and was reported: a chip
+    # registered as a hot zone answers at distance 0 over whatever is beneath
+    # it, so a label that appears on HOVER made the line it covered unpickable
+    # at exactly the moment the user was reaching for it.
+    leg_src = draw_src_ws.split("private renderLeg(")[1].split("\n  private ")[0]
+    assert "this.chip(" in leg_src, "the leg label is gone entirely"
+    chip_zone = [ln for ln in leg_src.splitlines()
+                 if "zoneDraft.push" in ln and "box" in ln]
+    assert not chip_zone, (
+        "the leg's chip is a hot zone again — it will swallow clicks aimed at "
+        f"the lines under it: {chip_zone[:1]}")
+    assert "kind: 'leg', id: leg.id" in leg_src,         "the leg region stopped being pickable at all"
+
     # -- 2. vocabulary lockstep ----------------------------------------------
     draw_src = (CODE / "app/src/renderer/src/components/ChartDraw.ts").read_text(
         encoding="utf-8")
@@ -3646,6 +3662,31 @@ ok('the reported side is the LINES answer, not the stored one',
    `reported=${flipped.side} stored=${L().side}`)
 dA.points[0].price = 615            // put it back for anything downstream
 
+// A LINE INSIDE A LEG'S REGION IS STILL GRABBABLE. Hot zones answer at
+// distance 0 and a region is a big one, so every line crossing it became
+// unpickable exactly where you reach for it — Kade: "makes it impossible to
+// move the top vertical line". hitAny is DOM-free, so the real picking runs
+// here against a stubbed pane.
+const e6 = mkEngine('PICK|1Day')
+e6.barsOpt = () => bars
+e6.paneSizeSafe = () => ({ width: 800, height: 400 })
+e6.yForPrice = (p) => 400 - (p - 500) * 2      // 600 -> y 200, 610 -> y 180
+e6.xForTime = () => 300
+e6.xAtIdx = () => 300
+const b6 = e6.bucket()
+b6.drawings.push({ id: 'hl6', kind: 'hline', points: [{ time: day(5), price: 610 }] })
+// A region covering the line's y, as a leg's acceptance band would.
+e6.hotZones = [{ left: 100, top: 100, w: 400, h: 200, kind: 'leg', id: 'lgX' }]
+b6.legs.push({ id: 'lgX', side: 'long', right: 'P', expiration: '2026-09-18',
+               strike: 600, dteTol: 3, strikeTol: 5, slot: 0 })
+const onLine = e6.hitAny(250, 180)     // exactly on the hline, inside the region
+ok('a line inside a leg region picks the LINE, not the region',
+   onLine && onLine.kind === 'drawing' && onLine.id === 'hl6',
+   JSON.stringify(onLine && { kind: onLine.kind, id: onLine.id }))
+const inRegion = e6.hitAny(250, 260)   // inside the region, far from any line
+ok('and the region still picks the leg away from any line',
+   inRegion && inRegion.kind === 'leg', inRegion && inRegion.kind)
+
 // ---- THE LEGACY FOLD: documents saved before the two-host split ----------
 // A stored leg carries ONE hostId whose role followed the drawing's kind. It
 // must keep working with no rewrite of the document and no DOC_VERSION bump —
@@ -3711,7 +3752,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 72, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 74, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")

@@ -391,6 +391,13 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 2px 6px 2px 0;
+  /* Hundreds of rows scroll under this now, and a strike column with no
+     heading above it is a column of unlabelled numbers. Opaque background
+     because rows pass BEHIND it, not under a gap. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
 }
 .cp-table td {
   padding: 2px 6px 2px 0;

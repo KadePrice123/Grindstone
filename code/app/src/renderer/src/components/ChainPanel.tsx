@@ -91,7 +91,15 @@ function LegRows({ leg, res }: { leg: ResolvedLeg; res: ChainResponse | null }) 
           <tr><th>strike</th><th>exp</th><th>bid</th><th>ask</th><th>Δ</th><th>iv</th></tr>
         </thead>
         <tbody>
-          {res.contracts.slice(0, 14).map((c) => (
+          {/* EVERY row the endpoint returned. This was capped at 14, which
+              silently threw away the other 462 of a 476-match window while the
+              header truthfully said "476 matches" — the count and the list
+              disagreeing about the same answer. The panel already scrolls
+              (.side-panel is overflow-y:auto against a bounded height), so the
+              cap was buying nothing that scrolling did not already give. The
+              honest limit is the endpoint's own MAX_ROWS, which the
+              "showing N of M" line above already declares. */}
+          {res.contracts.map((c) => (
             <tr key={c.occ_symbol}>
               <td className="em">{fmt(c.strike, 1)}</td>
               <td className="dim">{c.expiration.slice(5)}</td>
