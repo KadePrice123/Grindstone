@@ -55,6 +55,14 @@ SPEC: dict[str, dict[str, Any]] = {
                 "source has for the ticker; a number caps it (faster on "
                 "intraday timeframes).",
     },
+    "options_cache_minutes": {
+        "kind": "float", "default": 15.0, "min": 0.0, "max": 1440.0, "step": 5.0,
+        "label": "Keep option chains for (minutes)",
+        "help": "How long a fetched chain window stays usable before it is "
+                "pulled again. Dragging a leg inside a window already fetched "
+                "costs nothing while it is still fresh, which is what stops "
+                "every nudge becoming a request. 0 = always fetch live.",
+    },
     "backtest_options_db": {
         "kind": "path", "default": "",
         "label": "Backtest options database",

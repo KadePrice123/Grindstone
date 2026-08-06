@@ -74,6 +74,38 @@ CREATE TABLE IF NOT EXISTS rec_chain (
     volume     REAL, open_interest REAL,
     PRIMARY KEY (underlying, ts, occ_symbol)
 ) WITHOUT ROWID;
+-- Chain CACHE. Distinct from rec_chain, which is the recorder's HISTORY: that
+-- one keeps a snapshot per timestamp on purpose, and serving live filtering out
+-- of it would either replay stale prices or grow without bound. This holds one
+-- current row per contract, replaced on every refresh.
+CREATE TABLE IF NOT EXISTS chain_cache (
+    underlying TEXT NOT NULL,
+    occ_symbol TEXT NOT NULL,
+    expiration TEXT NOT NULL,
+    strike     REAL NOT NULL,
+    right      TEXT NOT NULL CHECK (right IN ('C','P')),
+    bid        REAL, ask REAL, last REAL,
+    iv         REAL, delta REAL, gamma REAL, theta REAL, vega REAL, rho REAL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (underlying, occ_symbol)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS chain_cache_win
+    ON chain_cache (underlying, expiration, strike);
+-- WHICH WINDOWS WE HAVE ACTUALLY ASKED FOR, and when. Rows alone cannot answer
+-- that: a window with genuinely no contracts is indistinguishable from one
+-- never fetched, and a partially covered window would read as complete. A hit
+-- is a cover row that CONTAINS the request and is still inside the user's
+-- retention, which is what makes dragging a leg a few dollars free.
+CREATE TABLE IF NOT EXISTS chain_cover (
+    underlying TEXT NOT NULL,
+    exp_from   TEXT NOT NULL,
+    exp_to     TEXT NOT NULL,
+    strike_lo  REAL NOT NULL,
+    strike_hi  REAL NOT NULL,
+    right      TEXT NOT NULL,          -- '' = both rights
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (underlying, exp_from, exp_to, strike_lo, strike_hi, right)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS backtest_runs (
     id           INTEGER PRIMARY KEY,
     user_id      INTEGER NOT NULL,

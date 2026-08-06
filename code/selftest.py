@@ -3070,6 +3070,75 @@ def _options_chain():
         options_mod.AlpacaData = real_client  # type: ignore[misc]
         options_mod._cache.clear()
 
+    # ---- the DATABASE cache: a drag inside a fetched window is free --------
+    # The old cache was keyed by the exact filter tuple, and a drag mints a new
+    # tuple on every commit — so it missed on precisely the motion it existed to
+    # absorb. Coverage keying is the fix: a fetch records the REGION it covered,
+    # and any later request inside that region is served without a call.
+    import sqlite3 as _sq
+    from backend import marketdb as _mdb
+
+    seen2: dict[str, Any] = {}
+
+    class _CountingClient:
+        def __init__(self, key_id, secret_key):  # noqa: ANN001
+            pass
+
+        def chain_snapshot(self, underlying, **kw):  # noqa: ANN001
+            seen2.setdefault("calls", []).append(kw)
+            return rows
+
+    with tempfile.TemporaryDirectory() as tmp2:
+        con = _mdb.connect_market(Path(tmp2) / "market.db")
+        real2 = options_mod.AlpacaData
+        options_mod._cache.clear()
+        try:
+            options_mod.AlpacaData = _CountingClient  # type: ignore[misc]
+            creds2 = {"key_id": "K", "secret_key": "S"}
+            a = options_mod.fetch(creds2, "SPY", d(10), d(17), 550.0, 560.0, "P",
+                                  con=con, ttl_minutes=15.0)
+            assert a["available"] is True and len(a["calls" if False else "contracts"]) == 3, a
+            assert len(seen2["calls"]) == 1, seen2
+
+            # THE PAD: the live call deliberately asked for MORE than the leg
+            # wanted, so the neighbourhood is covered by one request.
+            call = seen2["calls"][0]
+            assert call["strike_gte"] < 550.0 and call["strike_lte"] > 560.0, call
+            # BOTH date edges. Asserting only the far one let a mutation that
+            # dropped the near-side pad survive: half a pad still covers a
+            # drag outward and misses every drag inward.
+            assert call["exp_lte"] > d(17), call
+            assert call["exp_gte"] < d(10), call
+
+            # A DRAG: a different, narrower window inside the covered region.
+            # The in-memory cache cannot serve this — different tuple — so a
+            # second upstream call here would mean the DB cache did nothing.
+            options_mod._cache.clear()
+            b2 = options_mod.fetch(creds2, "SPY", d(11), d(16), 552.0, 558.0, "P",
+                                   con=con, ttl_minutes=15.0)
+            assert len(seen2["calls"]) == 1,                 f"a drag inside a cached window re-fetched: {seen2['calls']}"
+            assert b2["source"].endswith("cached)"), b2["source"]
+            assert b2["available"] is True, b2
+
+            # OUTSIDE the covered region is a real miss, not a silent empty.
+            options_mod._cache.clear()
+            options_mod.fetch(creds2, "SPY", d(10), d(17), 900.0, 950.0, "P",
+                              con=con, ttl_minutes=15.0)
+            assert len(seen2["calls"]) == 2,                 f"an uncovered window did not reach the provider: {seen2['calls']}"
+
+            # RETENTION IS THE USER'S: ttl 0 means always live.
+            options_mod._cache.clear()
+            options_mod.fetch(creds2, "SPY", d(11), d(16), 552.0, 558.0, "P",
+                              con=con, ttl_minutes=0.0)
+            assert len(seen2["calls"]) == 3,                 "ttl=0 must always fetch live, never serve the cache"
+
+            st = options_mod.cache_stats(con)
+            assert st["contracts"] > 0 and st["windows"] > 0, st
+        finally:
+            options_mod.AlpacaData = real2  # type: ignore[misc]
+            options_mod._cache.clear()
+            con.close()
+
     # ---- the route ---------------------------------------------------------
     with tempfile.TemporaryDirectory() as tmp:
         state = State("boot-token-for-tests", db_path=Path(tmp) / "app.db")
@@ -3556,6 +3625,27 @@ ok('every minted line is flagged as leg-owned',
    b5.drawings.every((d) => d.legOwned === true),
    JSON.stringify(b5.drawings.map((d) => d.legOwned)))
 
+// THE FETCH WINDOW IS THE LINES. It was still built from strike +- tolerance,
+// so a leg stretched wide by its lines went on asking for the narrow window it
+// was born with — wide zone on the chart, a handful of contracts in the panel.
+// getState is where the panel reads it, so that is where this is asserted.
+const wideLeg = e4.getState().legs.find((l) => l.id === legS)
+ok('the fetch window comes off the lines, not the birth tolerance',
+   Math.abs(wideLeg.window.strikeLo - 590) < 1e-9 &&
+   Math.abs(wideLeg.window.strikeHi - 615) < 1e-9,
+   JSON.stringify(wideLeg.window))
+// And the SIDE the panel prints is the derived one: a panel reading the stored
+// field printed BUY over a leg the chart was drawing as SELL. Asserted while
+// the two DISAGREE — the stored field still says 'short' from birth — because
+// comparing them where they coincide proves nothing, and a mutation putting
+// the stored field back survived exactly that mistake.
+dA.points[0].price = 585            // flipped: derived long, stored still short
+const flipped = e4.getState().legs.find((l) => l.id === legS)
+ok('the reported side is the LINES answer, not the stored one',
+   flipped.side === 'long' && L().side === 'short',
+   `reported=${flipped.side} stored=${L().side}`)
+dA.points[0].price = 615            // put it back for anything downstream
+
 // ---- THE LEGACY FOLD: documents saved before the two-host split ----------
 // A stored leg carries ONE hostId whose role followed the drawing's kind. It
 // must keep working with no rewrite of the document and no DOC_VERSION bump —
@@ -3621,7 +3711,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 71, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 72, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")

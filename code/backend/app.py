@@ -640,11 +640,15 @@ def create_app(state: State) -> FastAPI:
         ~10k rows: a caller that wants to browse widens the window, it does
         not omit it. No creds / provider failure is available=False with the
         reason, never a 500 — the panel renders that state."""
+        with state.db() as db:
+            ttl = float(settings_mod.get_all(db, s.user_id)
+                        .get("options_cache_minutes", 15.0))
         try:
             return options_mod.fetch(
                 state.creds_for(s.user_id), symbol,
                 exp_from, exp_to, strike_from, strike_to,
-                right.upper() if right else None)
+                right.upper() if right else None,
+                con=state.market(), ttl_minutes=ttl)
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
 

@@ -1584,8 +1584,19 @@ export class ChartDraw {
         const resolved = this.legResolved(l)
         return {
           ...l,
+          // THE DERIVED SIDE, not the stored one. The lines' order is the
+          // answer, so a panel reading `l.side` printed BUY over a leg the
+          // chart was drawing as SELL — two surfaces disagreeing about the
+          // same object, with the geometry right and the words wrong.
+          side: resolved.side,
           resolved,
-          window: legWindow(resolved.expiration, resolved.strike, l.dteTol, l.strikeTol),
+          // THE WINDOW IS THE BOUNDS when the leg has lines. It was still
+          // built from strike/dteTol/strikeTol, so a leg stretched wide by its
+          // lines went on fetching the narrow tolerance window it was born
+          // with: "a large strike and DTE selection but dont see very much in
+          // the chain". The lines are the filter, so they are the query.
+          window: resolved.bounds ??
+            legWindow(resolved.expiration, resolved.strike, l.dteTol, l.strikeTol),
         }
       }),
       lockedSlots: (() => {
@@ -3722,11 +3733,22 @@ export class ChartDraw {
       { text: `${fmtNum(w.strikeLo)} - ${fmtNum(w.strikeHi)}`, cls: 'dim' },
       { text: `${w.expFrom} - ${w.expTo}`, cls: 'dim' },
     ]
-    const box = this.chip(
-      left + wpx / 2, top - 4, rows,
-      `cd-leg${picked ? ' cd-sel' : hot ? ' cd-hot' : ''}`, 0.5, 1, pane
-    )
-    this.zoneDraft.push({ ...box, kind: 'leg', id: leg.id })
+    // ON DEMAND ONLY. A label pinned over every leg is four labels over a
+    // condor, sitting on the candles you placed the leg to look at — and every
+    // word of it is already in the chain panel's header for that leg, which is
+    // where you read it while comparing contracts. Hover or select to get it
+    // back on the chart, where it answers "which one is this?" instead of
+    // narrating something you can already see.
+    if (picked || hot) {
+      const box = this.chip(
+        left + wpx / 2, top - 4, rows,
+        `cd-leg${picked ? ' cd-sel' : ' cd-hot'}`, 0.5, 1, pane
+      )
+      this.zoneDraft.push({ ...box, kind: 'leg', id: leg.id })
+    }
+    // The REGION stays grabbable whether or not its label is up, so hiding the
+    // label never costs the leg its hit target.
+    this.zoneDraft.push({ left, top, w: wpx, h: hpx, kind: 'leg', id: leg.id })
 
     // VERTEX HANDLES. Each corner is where one strike line crosses one
     // expiration line, so grabbing it drags that PAIR — two dimensions at
