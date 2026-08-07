@@ -950,6 +950,16 @@ Each milestone ends with `checkpoint.py` — no milestone is "done" red. Major
 completed milestones also push to GitHub (§6.8): source to the repo, installers
 to Releases.
 
+**Companion specifications.** Detail that would swamp this document lives
+beside it, written before the code so each is built against a decided shape:
+
+| Doc | Covers |
+|---|---|
+| [DATA_IMPORT.md](DATA_IMPORT.md) | CSV/JSON file formats and the rules the importer enforces. **Built.** |
+| [DATA_SOURCING.md](DATA_SOURCING.md) | Per-kind provider priority, storage relocation, the recording server and the system key, coverage/backfill, auto-record favourites. |
+| [AGENT_CONTROL.md](AGENT_CONTROL.md) | An AI driving the app like a person; `robots.md`; the system-key swap that makes it safe. |
+| [OPTIONS.md](OPTIONS.md) · [CONSTRAINTS.md](CONSTRAINTS.md) | Options surfaces and chart constraint behaviour. |
+
 ## 11. Explicitly out of scope (v1)
 
 - Mobile/web deployment; multi-machine sync; social/copy-trading.
@@ -985,6 +995,18 @@ to Releases.
 
 ## 12. Open decisions for Kade
 
+0. **The recording server's unattended mode** (see
+   [DATA_SOURCING.md](DATA_SOURCING.md) §6). Attended — the app auto-launches
+   at login and recording begins when you unlock, with backfill closing the gap
+   — costs nothing new and keeps every documented security property, but
+   permanently loses overnight intraday CHAIN snapshots, which no provider
+   sells back at any price. Unattended stores a **read-only** system key under
+   OS-bound encryption in `%LOCALAPPDATA%` (already sanctioned at §6.6, default
+   off), and gives up only the property §7.9 never claimed: that someone with
+   your unlocked Windows session still cannot reach broker data without your
+   app password. Because the key cannot trade, the blast radius is market data,
+   not money. **Recommendation: unattended, on a paper or OAuth `data`-scope
+   key** — the loss is real and irreversible, the exposure is not.
 1. **Names.** Product name, AI assistant name (currently "the AI" everywhere),
    and the publisher identity for code signing — §7.7 makes this
    hard-to-change later, so it should be settled before the first signed
