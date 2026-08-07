@@ -19,6 +19,28 @@ interface SettingSpec {
   choices?: string[]
   /** State blobs owned by other UIs (multi-chart layout) — not rendered here. */
   hidden?: boolean
+  /** Which card this belongs under. The page used to render EVERY setting
+   *  inside one card headed "Search", so the theme, the chart depth and the
+   *  backtest database paths all sat under a heading that described none of
+   *  them — and any new setting inherited the mislabel. */
+  group?: string
+}
+
+/** Settings by card, in a declared order, with anything unclassified kept
+ *  in "Other" rather than dropped. A control the page silently refuses to
+ *  render is indistinguishable from a setting that does not exist. */
+const GROUP_ORDER = ['Search', 'Charts', 'Data', 'Backtesting', 'Appearance', 'Other']
+
+function groupsOf(schema: SettingSpec[]): [string, SettingSpec[]][] {
+  const by = new Map<string, SettingSpec[]>()
+  for (const s of schema.filter((x) => !x.hidden)) {
+    const g = s.group || 'Other'
+    if (!by.has(g)) by.set(g, [])
+    by.get(g)!.push(s)
+  }
+  return [...by.entries()].sort(
+    (a, b) => (GROUP_ORDER.indexOf(a[0]) + 1 || 99) - (GROUP_ORDER.indexOf(b[0]) + 1 || 99)
+  )
 }
 
 interface SettingsPayload {
@@ -74,9 +96,11 @@ export function SettingsPage() {
       {data == null ? (
         <div className="card dim">Loading…</div>
       ) : (
-        <div className="card">
-          <h2>Search</h2>
-          {data.schema.filter((s) => !s.hidden).map((s) => {
+        <>
+        {groupsOf(data.schema).map(([group, rows]) => (
+        <div className="card" key={group}>
+          <h2>{group}</h2>
+          {rows.map((s) => {
             const value = data.values[s.key]
             return (
               <div className="setting-row" key={s.key}>
@@ -142,7 +166,7 @@ export function SettingsPage() {
               </div>
             )
           })}
-          {data.web ? (
+          {group === 'Search' && data.web ? (
             <div className="subtle" style={{ marginTop: 12 }}>
               Web search backend:{' '}
               {!data.web.installed
@@ -153,6 +177,8 @@ export function SettingsPage() {
             </div>
           ) : null}
         </div>
+        ))}
+        </>
       )}
 
       <GesturesPanel />

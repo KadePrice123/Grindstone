@@ -7,6 +7,7 @@ so WAL is the right tradeoff here, and a torn cloud copy costs nothing.
 """
 from __future__ import annotations
 
+import datetime as dt
 import sqlite3
 from pathlib import Path
 
@@ -37,6 +38,22 @@ CREATE TABLE IF NOT EXISTS news (
     content    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_news_created ON news(created_at DESC);
+-- Chart bars kept after a live fetch, so a chart still draws offline and a
+-- second look does not re-hit the provider. DELIBERATELY NOT rec_bars: that
+-- table is the user's own recording, it is shown as such on the Data page,
+-- Recorder.prune keeps it forever when no job owns it, and btdata promotes it
+-- into the BACKTEST store. Chart bars quietly becoming backtest inputs is the
+-- worst outcome available here.
+CREATE TABLE IF NOT EXISTS bar_cache (
+    symbol    TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    ts        TEXT NOT NULL,
+    o REAL, h REAL, l REAL, c REAL, v REAL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, timeframe, ts)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS bar_cache_age ON bar_cache (fetched_at);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS news_fts USING fts5(
     headline, summary, tokenize='trigram'
 );
@@ -127,17 +144,83 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
 """
 
 
+def cache_keep_days(pref: str | None) -> int | None:
+    """The retention setting as a number of days. 0 = do not cache at all,
+    None = keep forever. Anything unrecognised falls back to the default
+    rather than to 'forever' or to 'off' — both of those are decisions the
+    user did not make."""
+    p = (pref or "30").strip().lower()
+    if p == "off":
+        return 0
+    if p == "forever":
+        return None
+    try:
+        return max(1, int(p))
+    except ValueError:
+        return 30
+
+
+def bar_cache_store(con: sqlite3.Connection, symbol: str, timeframe: str,
+                    bars: list[dict], keep_days: int | None) -> int:
+    """Keep bars a live fetch just produced, and sweep old ones in the SAME
+    transaction — one deleter, so this can never race the recorder's prune
+    over rows neither of them fully owns."""
+    if keep_days == 0 or not bars:
+        return 0
+    now = dt.datetime.now(dt.timezone.utc)
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = [(symbol, timeframe, b.get("ts"), b.get("open"), b.get("high"),
+             b.get("low"), b.get("close"), b.get("volume"), stamp)
+            for b in bars if b.get("ts")]
+    if not rows:
+        return 0
+    with con:
+        con.executemany(
+            "INSERT OR REPLACE INTO bar_cache"
+            " (symbol, timeframe, ts, o, h, l, c, v, fetched_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)", rows)
+        if keep_days is not None:
+            cutoff = (now - dt.timedelta(days=keep_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            con.execute("DELETE FROM bar_cache WHERE fetched_at < ?", (cutoff,))
+    return len(rows)
+
+
+def bar_cache_read(con: sqlite3.Connection, symbol: str, timeframe: str,
+                   limit: int) -> tuple[list[dict], str | None]:
+    """Cached bars, newest `limit`, plus when they were last refreshed. The
+    caller must show that age: a chart drawn from a week-old cache and one
+    drawn live are the same picture and very different claims."""
+    rows = con.execute(
+        "SELECT ts, o, h, l, c, v, fetched_at FROM bar_cache"
+        " WHERE symbol=? AND timeframe=? ORDER BY ts DESC LIMIT ?",
+        (symbol, timeframe, limit)).fetchall()
+    if not rows:
+        return [], None
+    bars = [{"ts": r["ts"], "open": r["o"], "high": r["h"], "low": r["l"],
+             "close": r["c"], "volume": r["v"]} for r in reversed(rows)]
+    return bars, max(r["fetched_at"] for r in rows)
+
+
+
+
 def market_path() -> Path:
     return data_dir() / "market.db"
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Additive migrations, applied in order for databases created before the
 # current SCHEMA_VERSION. Keep them idempotent-safe: the guard is
 # user_version, not try/except.
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: ("ALTER TABLE news ADD COLUMN content TEXT NOT NULL DEFAULT ''",),
+    # 4: bar_cache — a new table. Bumping the version is the whole point:
+    # chain_cache and chain_cover were added to _SCHEMA at version 3 WITHOUT a
+    # bump, so every database already stamped 3 skipped the executescript that
+    # would have created them. This machine's market.db has never had them and
+    # its log carries hundreds of 'no such table: chain_cover' fallbacks, which
+    # means option-chain caching has silently never run. This bump delivers all
+    # three tables to every existing install.
     # 3: backtest_runs — a new table, created by the _SCHEMA executescript
     # that runs on any version mismatch; no ALTERs needed.
 }

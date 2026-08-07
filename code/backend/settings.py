@@ -12,16 +12,19 @@ from typing import Any
 
 SPEC: dict[str, dict[str, Any]] = {
     "web_search_enabled": {
+        "group": "Search",
         "kind": "bool", "default": True,
         "label": "Search the web",
         "help": "Blend DuckDuckGo results into search. Off = platform data only.",
     },
     "web_news_enabled": {
+        "group": "Search",
         "kind": "bool", "default": True,
         "label": "Web news in results",
         "help": "Include web news articles alongside your broker's news feed.",
     },
     "web_search_engine": {
+        "group": "Search",
         "kind": "choice", "default": "brave",
         "choices": ["brave", "auto", "bing", "startpage", "duckduckgo"],
         "label": "Web search engine",
@@ -32,22 +35,26 @@ SPEC: dict[str, dict[str, Any]] = {
                 "automated queries.",
     },
     "inhouse_boost": {
+        "group": "Search",
         "kind": "float", "default": 1.0, "min": 0.0, "max": 4.0, "step": 0.25,
         "label": "In-house result boost",
         "help": "How strongly tickers, your news store and app pages outrank web "
                 "results. 0 = no preference, 4 = platform results dominate.",
     },
     "open_web_in_app": {
+        "group": "Appearance",
         "kind": "bool", "default": True,
         "label": "Open links in the app",
         "help": "Web pages open as in-app browser tabs instead of your OS browser.",
     },
     "theme": {
+        "group": "Appearance",
         "kind": "choice", "default": "dark", "choices": ["dark", "light"],
         "label": "Theme",
         "help": "Applies to the whole app.",
     },
     "chart_candles": {
+        "group": "Charts",
         "kind": "choice", "default": "all",
         "choices": ["all", "5000", "2000", "1000", "500", "200"],
         "label": "Candles per chart",
@@ -56,6 +63,7 @@ SPEC: dict[str, dict[str, Any]] = {
                 "intraday timeframes).",
     },
     "options_cache_minutes": {
+        "group": "Data",
         "kind": "float", "default": 15.0, "min": 0.0, "max": 1440.0, "step": 5.0,
         "label": "Keep option chains for (minutes)",
         "help": "How long a fetched chain window stays usable before it is "
@@ -63,7 +71,21 @@ SPEC: dict[str, dict[str, Any]] = {
                 "costs nothing while it is still fresh, which is what stops "
                 "every nudge becoming a request. 0 = always fetch live.",
     },
+    "equity_cache_days": {
+        "group": "Data",
+        "kind": "choice", "default": "30",
+        "choices": ["off", "7", "30", "90", "365", "forever"],
+        "label": "Keep chart data for",
+        "help": "Bars fetched when you open a chart are kept this long, so the "
+                "chart still draws when the provider is unreachable. A CHOICE "
+                "rather than a number on purpose: a free-typed retention with a "
+                "minimum of 0 reads as 'keep nothing', which is a data-deleting "
+                "setting one keystroke away from a sensible one. This never "
+                "touches your recorded data, which the recorder's own retention "
+                "governs.",
+    },
     "backtest_options_db": {
+        "group": "Backtesting",
         "kind": "path", "default": "",
         "label": "Backtest options database",
         "help": "Full path to spy_options.db (multi-GB, never ships with the "
@@ -71,6 +93,7 @@ SPEC: dict[str, dict[str, Any]] = {
                 "layout this machine already uses.",
     },
     "backtest_bars_db": {
+        "group": "Backtesting",
         "kind": "path", "default": "",
         "label": "Backtest bars database",
         "help": "Full path to spy_bars.db. Empty = look beside the project "
@@ -138,6 +161,12 @@ def put(db: sqlite3.Connection, user_id: int, updates: dict[str, Any]) -> dict[s
     return get_all(db, user_id)
 
 
+#: Card order on the Settings page. A setting whose group is missing here
+#: lands in "Other" rather than vanishing — the page must never silently drop
+#: a control just because nobody classified it.
+GROUP_ORDER = ["Search", "Charts", "Data", "Backtesting", "Appearance", "Other"]
+
+
 def schema() -> list[dict[str, Any]]:
     """What the settings page renders itself from."""
-    return [{"key": k, **v} for k, v in SPEC.items()]
+    return [{"key": k, "group": v.get("group", "Other"), **v} for k, v in SPEC.items()]

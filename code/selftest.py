@@ -2572,6 +2572,115 @@ def _chain_import():
         f"the sidecar process:\n{r.stderr[-400:]}")
 
 
+@check("bar cache: migration reaches an EXISTING market.db, write-through, retention")
+def _bar_cache():
+    """This check exists because the bug it guards has already shipped.
+
+    chain_cache and chain_cover were added to marketdb._SCHEMA at version 3
+    without bumping SCHEMA_VERSION. connect_market only runs the schema script
+    when `have != SCHEMA_VERSION`, so every database already stamped 3 — which
+    is every real install — skipped it and never got the tables. Option-chain
+    caching has therefore silently never run, while the gate stayed green the
+    whole time, because tests build databases in tempdirs where user_version
+    is 0 and the script runs unconditionally.
+
+    So the fixture here is a database stamped 3 BY HAND. That is the only way
+    to test the path a real install takes, and no existing check did it."""
+    import os
+    import sqlite3
+    import tempfile
+    sys.path.insert(0, str(CODE))
+    from backend import marketdb
+
+    with tempfile.TemporaryDirectory() as td:
+        opened = []
+        try:
+            # A v3 database: built by the CURRENT schema, then stamped 3 with
+            # the newer tables dropped — i.e. exactly what shipped at v3.
+            aged = Path(td) / "market.db"
+            raw = sqlite3.connect(aged)
+            raw.executescript(marketdb._SCHEMA)
+            for t in ("bar_cache", "chain_cache", "chain_cover"):
+                raw.execute(f"DROP TABLE IF EXISTS {t}")
+            raw.execute("PRAGMA user_version=3")
+            raw.commit()
+            raw.close()
+
+            con = marketdb.connect_market(aged)
+            opened.append(con)
+            have = {r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            for t in ("bar_cache", "chain_cache", "chain_cover"):
+                assert t in have, (
+                    f"{t} never reached a database stamped at the previous "
+                    f"version. Adding a table to _SCHEMA is not enough — "
+                    f"SCHEMA_VERSION must be bumped or the executescript that "
+                    f"creates it never runs on an existing install.")
+            assert con.execute("PRAGMA user_version").fetchone()[0] == \
+                marketdb.SCHEMA_VERSION
+
+            # --- the retention setting maps to days, and 'off' means off
+            assert marketdb.cache_keep_days("off") == 0
+            assert marketdb.cache_keep_days("forever") is None
+            assert marketdb.cache_keep_days("30") == 30
+            assert marketdb.cache_keep_days(None) == 30, "no setting must not mean 'off'"
+            assert marketdb.cache_keep_days("nonsense") == 30, \
+                "an unreadable setting must fall back to the default, never to " \
+                "'off' (silently caching nothing) or 'forever' (never sweeping)"
+
+            bars = [{"ts": "2026-08-05T13:30:00Z", "open": 1.0, "high": 2.0,
+                     "low": 0.5, "close": 1.5, "volume": 10.0}]
+            n = marketdb.bar_cache_store(con, "SPY", "1Day", bars, 30)
+            assert n == 1, f"write-through stored {n} rows, wanted 1"
+            got, when = marketdb.bar_cache_read(con, "SPY", "1Day", 10)
+            assert len(got) == 1 and got[0]["close"] == 1.5, got
+            assert when, "the cache must report its age; a stale chart that does " \
+                         "not say so is the same picture as a live one"
+
+            # 'off' must not write, or the setting is decorative
+            assert marketdb.bar_cache_store(con, "QQQ", "1Day", bars, 0) == 0, \
+                "retention 'off' still wrote rows — the setting is decorative"
+            assert marketdb.bar_cache_read(con, "QQQ", "1Day", 10)[0] == [], \
+                "retention 'off' stored bars anyway"
+
+            # --- the sweep drops what aged out and keeps what did not
+            con.execute(
+                "INSERT OR REPLACE INTO bar_cache (symbol,timeframe,ts,o,h,l,c,v,"
+                "fetched_at) VALUES ('OLD','1Day','2020-01-02',1,1,1,1,1,"
+                "'2020-01-02T00:00:00Z')")
+            con.commit()
+            assert marketdb.bar_cache_read(con, "OLD", "1Day", 10)[0], "fixture missing"
+            marketdb.bar_cache_store(con, "SPY", "1Day", bars, 30)
+            assert marketdb.bar_cache_read(con, "OLD", "1Day", 10)[0] == [], \
+                "the retention sweep never ran"
+            assert marketdb.bar_cache_read(con, "SPY", "1Day", 10)[0], \
+                "the sweep took fresh rows with it"
+
+            # 'forever' must sweep NOTHING
+            con.execute(
+                "INSERT OR REPLACE INTO bar_cache (symbol,timeframe,ts,o,h,l,c,v,"
+                "fetched_at) VALUES ('OLD','1Day','2020-01-02',1,1,1,1,1,"
+                "'2020-01-02T00:00:00Z')")
+            con.commit()
+            marketdb.bar_cache_store(con, "SPY", "1Day", bars, None)
+            assert marketdb.bar_cache_read(con, "OLD", "1Day", 10)[0], \
+                "'forever' deleted data"
+
+            # --- and it must NOT be rec_bars. Chart bars promoted into the
+            # backtest store by btdata.sync_from_recorded would turn a chart
+            # someone opened into a backtest input, with no way to tell.
+            assert con.execute("SELECT COUNT(*) FROM rec_bars").fetchone()[0] == 0, \
+                "the bar cache wrote into rec_bars — those rows are the user's " \
+                "own recording, are shown as such, are never pruned without a " \
+                "job, and are promoted into the BACKTEST store"
+        finally:
+            for c in opened:
+                try:
+                    c.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+
 def dt_date(s: str):
     import datetime as _dt
     return _dt.date.fromisoformat(s)

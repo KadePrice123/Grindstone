@@ -45,6 +45,7 @@ from .brokers import base as brokers_base
 from .brokers.alpaca import PAPER_URL, AlpacaAdapter
 from .brokers.alpaca_data import AlpacaData
 from .db import connect
+from . import marketdb
 from .marketdb import connect_market
 from .sessions import SessionStore
 from .universe import Universe
@@ -710,10 +711,19 @@ def create_app(state: State) -> FastAPI:
     @app.get("/api/symbols/{symbol}/bars")
     def symbol_bars(symbol: str, timeframe: str = "1Day", limit: int = 0,
                     s=Depends(current_session)) -> dict[str, Any]:
-        """Chart data. Recorded bars first (the user's own store), topped up
-        from the live provider; Yahoo daily as the keyless fallback. The
-        response always names its source — a chart that lies about where its
-        candles came from is worse than no chart.
+        """Chart data, in the order the code actually tries them: the live
+        provider, then this app's own bar cache, then the user's recorded
+        bars, then Yahoo daily as the keyless fallback. The response always
+        names its source — a chart that lies about where its candles came from
+        is worse than no chart, and a cached one also says how old it is.
+
+        (This docstring used to claim "recorded bars first, topped up from the
+        live provider". The code has never done that. It is written from the
+        code now.)
+
+        A live fetch is written through to bar_cache, which is what makes the
+        chart still draw when the provider is unreachable — and what gives the
+        'Keep chart data for' setting something to govern.
 
         DEPTH: limit=0 (the default) means "as configured" — the user's
         chart_candles setting, whose own default is ALL available history.
@@ -753,10 +763,39 @@ def create_app(state: State) -> FastAPI:
                 bars = AlpacaData(creds["key_id"], creds["secret_key"]).stock_bars(
                     symbol, timeframe, start=start, limit=min(limit, 10000))
                 if bars:
+                    # Write through HERE, not later: this branch returns, so a
+                    # cache filled anywhere below would never be written on the
+                    # happy path and would only ever be empty when needed.
+                    try:
+                        with state.db() as db:
+                            keep = settings_mod.get_all(db, s.user_id).get(
+                                "equity_cache_days", "30")
+                        con = state.market()
+                        try:
+                            marketdb.bar_cache_store(
+                                con, symbol, timeframe, bars,
+                                marketdb.cache_keep_days(keep))
+                        finally:
+                            con.close()
+                    except Exception:  # noqa: BLE001
+                        # A cache write must never cost the user their chart.
+                        LOG.info("bar cache write failed for %s", symbol,
+                                 exc_info=True)
                     return {"symbol": symbol, "timeframe": timeframe,
                             "bars": bars[-limit:], "source": "alpaca (IEX)"}
             except brokers_base.BrokerError as e:
                 LOG.info("bars via alpaca failed for %s: %s", symbol, e)
+
+        # This app's own cache of a previous live fetch. Ahead of rec_bars
+        # because it is the same provider's data, just older.
+        con = state.market()
+        try:
+            cached, fetched_at = marketdb.bar_cache_read(con, symbol, timeframe, limit)
+        finally:
+            con.close()
+        if cached:
+            return {"symbol": symbol, "timeframe": timeframe, "bars": cached,
+                    "source": f"cached (fetched {fetched_at})"}
 
         # Recorded store — whatever the user's own jobs captured.
         con = state.market()
