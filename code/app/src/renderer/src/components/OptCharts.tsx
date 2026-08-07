@@ -14,16 +14,13 @@
  *  the RIGHT edge and the x axis counts down toward 0d, the way an option's
  *  life actually runs.
  *
- *  BANDS. The library has no band series; the fill between two percentiles is
- *  painted with the AREA-MASK trick — an area down from the upper envelope,
- *  then an area in the BACKGROUND colour down from the lower envelope to mask
- *  everything beneath it. Two passes give the 10-90 and 25-75 fills. The cost
- *  is that grid lines vanish inside a band, which is visually fine: the band
- *  IS the reference there.
+ *  TWO PANELS, not three: the bid-ask spread chart was removed after review.
+ *  It answered a different question in different units beside a premium chart,
+ *  and the two were read as one — the numbers "did not match" because they
+ *  were never the same quantity.
  */
 import { useEffect, useRef } from 'react'
 import {
-  AreaSeries,
   ColorType,
   LineSeries,
   LineStyle,
@@ -41,6 +38,7 @@ const C = {
   up: '#2EBD85',
   down: '#E5484D',
   dim: '#9AA0A6',
+  under: '#6BA4E8',
   band: 'rgba(232, 234, 237, 0.10)',
   bandInner: 'rgba(232, 234, 237, 0.16)',
 }
@@ -100,149 +98,140 @@ function usePanel(
 
 export interface HistPoint {
   date: string
-  mid: number | null
-  bid: number | null
-  ask: number | null
+  /** ALREADY IN THE DISPLAY UNIT — dollars, or percent of strike. The panel
+   *  never divides anything: only the page knows the strike each point was
+   *  actually matched at, and that is the only correct denominator for it. */
+  value: number | null
 }
 
-/** The contract's archived daily prices; the underlying rides the LEFT scale
- *  so both series keep honest units on one calendar. */
+/** The delta-matched history: what this trade's SHAPE has cost, day by day,
+ *  against the underlying — and where today sits in that record.
+ *
+ *  THE UNDERLYING IS THE BASE TIMELINE. It trades every session; the archive
+ *  has gaps (a day nobody quoted, a day the loader skipped). Setting the
+ *  option series first made ITS dates the axis, so the underlying could only
+ *  draw where an option happened to exist — and with a sparse series it
+ *  effectively did not draw at all. Now the underlying defines the span and
+ *  the option nodes overlay onto it, which is also the honest reading: the
+ *  market ran continuously whether or not this shape was quoted.
+ *
+ *  MID ONLY, and no last-value chip on it. Bid and ask sat within pennies and
+ *  read as one thick line; a third chip stacked under `today` and `normal`
+ *  just competed with the two references that matter.
+ *
+ *  A NODE PER POINT, because every point is a DIFFERENT CONTRACT — the same
+ *  delta and DTE at a different strike as the market moved. A continuous line
+ *  alone implies one instrument being re-quoted, which this series is not.
+ */
 export function HistoryPanel({
-  rows, under, underLabel, refPrice = null, height = 240,
+  rows, under, underLabel, avg, avgLabel, refPrice = null, pct = false, height = 380,
 }: {
   rows: HistPoint[]
   under: { date: string; close: number }[]
   underLabel: string
-  /** Today's LIVE mid for the selected contract — the horizontal reference
-   *  every historical point is read against. Null (no live chain) draws
-   *  nothing rather than a line at a made-up level. */
+  /** Rolling average of the option mid — "normal" as a line you can follow,
+   *  over a window the user chooses. Empty draws nothing. */
+  avg?: { date: string; value: number | null }[]
+  avgLabel?: string
+  /** Today's LIVE quote, in the SAME unit as `rows` — the level every
+   *  historical point is read against. */
   refPrice?: number | null
+  /** Percent-of-strike rather than dollars. Formats the axis, the average and
+   *  the today line from one place, so the scale can never disagree with the
+   *  numbers printed on it. */
+  pct?: boolean
   height?: number
 }) {
   const box = usePanel((chart) => {
     const t = (d: string) => (Date.parse(d + 'T00:00:00Z') / 1000) as UTCTimestamp
+
+    // ---- the base timeline, and the scale it owns -------------------------
     if (under.length > 0) {
-      const s = chart.addSeries(LineSeries, {
-        color: C.dim,
-        lineWidth: 1,
+      const u = chart.addSeries(LineSeries, {
+        color: C.under,
+        lineWidth: 2,
         priceScaleId: 'left',
         title: underLabel,
         priceLineVisible: false,
-        crosshairMarkerVisible: true,
+        priceFormat: { type: 'price', precision: 0, minMove: 1 },
       })
-      s.setData(under.map((b) => ({ time: t(b.date), value: b.close })))
-      chart.priceScale('left').applyOptions({ visible: true, borderColor: C.grid })
+      u.setData(under.map((b) => ({ time: t(b.date), value: b.close })))
+      chart.priceScale('left').applyOptions({
+        visible: true,
+        borderColor: C.grid,
+        scaleMargins: { top: 0.08, bottom: 0.08 },
+      })
     }
-    const mk = (
-      color: string, width: 1 | 2, dashed: boolean, title: string,
-      val: (r: HistPoint) => number | null
-    ) => {
-      const s = chart.addSeries(LineSeries, {
-        color,
-        lineWidth: width,
-        lineStyle: dashed ? LineStyle.Dashed : LineStyle.Solid,
-        title,
+
+    // The option, projected ONTO that timeline: every underlying day gets a
+    // point, and days the archive never priced are whitespace — so the line
+    // breaks over a gap instead of bridging one that was never observed.
+    // ONE format for the option scale, its average and its today line.
+    // Precision follows the data: a 328-DTE put costs ~5% of strike, a 5-DTE
+    // wing ~0.04%, and a fixed 2dp would round the second to "0.04%" — three
+    // distinguishable prices collapsing onto one label.
+    const peak = Math.max(
+      0,
+      ...rows.map((r) => (typeof r.value === 'number' ? Math.abs(r.value) : 0)),
+      refPrice !== null && Number.isFinite(refPrice) ? Math.abs(refPrice) : 0
+    )
+    const dp = !pct ? 2 : peak >= 10 ? 2 : peak >= 1 ? 3 : 4
+    const optFmt = pct
+      ? {
+          type: 'custom' as const,
+          formatter: (v: number) => `${v.toFixed(dp)}%`,
+          minMove: Math.pow(10, -dp),
+        }
+      : { type: 'price' as const, precision: 2, minMove: 0.01 }
+    const byDate = new Map(rows.map((r) => [r.date, r.value]))
+    const spine = under.length > 0
+      ? under.map((b) => b.date)
+      : rows.map((r) => r.date)
+    const mid = chart.addSeries(LineSeries, {
+      color: C.accent,
+      lineWidth: 2,
+      // No title and no last-value chip: the orange line is the subject of the
+      // whole panel, and its badge only crowded `today` and the average.
+      priceLineVisible: false,
+      lastValueVisible: false,
+      pointMarkersVisible: true,
+      pointMarkersRadius: 2,
+      priceFormat: optFmt,
+    })
+    mid.setData(spine.map((d) => {
+      const v = byDate.get(d)
+      return v === undefined || v === null ? { time: t(d) } : { time: t(d), value: v }
+    }))
+
+    if (avg && avg.length > 0) {
+      const a = chart.addSeries(LineSeries, {
+        color: C.text,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        title: avgLabel ?? 'normal',
         priceLineVisible: false,
+        priceFormat: optFmt,
       })
-      // A day with no two-sided market is a WHITESPACE point — the line
-      // breaks there instead of inventing a straight bridge over a gap.
-      s.setData(rows.map((r) => {
-        const v = val(r)
-        return v === null ? { time: t(r.date) } : { time: t(r.date), value: v }
+      const avgBy = new Map(avg.map((r) => [r.date, r.value]))
+      a.setData(spine.map((d) => {
+        const v = avgBy.get(d)
+        return v === undefined || v === null ? { time: t(d) } : { time: t(d), value: v }
       }))
-      return s
     }
-    mk(C.up, 1, true, 'bid', (r) => (r.bid && r.bid > 0 ? r.bid : null))
-    mk(C.down, 1, true, 'ask', (r) => r.ask ?? null)
-    const mid = mk(C.accent, 2, false, 'mid', (r) => r.mid)
-    // WHERE TODAY SITS. A dashed rule at the live mid, so every historical
-    // point is read as above-or-below what the same shape costs right now.
+
+    // TODAY, as the one horizontal reference: the live mid you are being
+    // offered right now, against everything the shape has ever cost.
     if (refPrice !== null && Number.isFinite(refPrice)) {
       mid.createPriceLine({
         price: refPrice,
         color: C.accent,
-        lineWidth: 1,
+        lineWidth: 2,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
         title: 'today',
       })
     }
-  }, [rows, under, underLabel, refPrice, height], height)
-  return <div ref={box} style={{ height }} />
-}
-
-// ---------------------------------------------------------------------------
-
-export interface FanData {
-  band: { dte: number; p10: number; p25: number; p50: number; p75: number; p90: number }[]
-  path: { dte: number; spread: number | null }[]
-  cap: number
-}
-
-/** The fan chart: spread percentile bands of similar contracts, this
- *  contract's own life on top, x counting DOWN to expiry at the right. */
-export function FanPanel({ data, height = 240 }: { data: FanData; height?: number }) {
-  const box = usePanel((chart) => {
-    const { band, path, cap } = data
-    // dte -> slot: cap-dte, so dte=cap is the left edge and 0d the right.
-    const t = (dte: number) => ((BASE + (cap - dte) * DAY)) as UTCTimestamp
-    chart.applyOptions({
-      localization: {
-        timeFormatter: (time: number) =>
-          `${Math.round(cap - (time - BASE) / DAY)} days to expiry`,
-      },
-    })
-
-    const rows = band.filter((b) => b.dte <= cap).sort((a, b) => b.dte - a.dte)
-    const area = (fill: string, val: (b: FanData['band'][number]) => number) => {
-      const s = chart.addSeries(AreaSeries, {
-        topColor: fill,
-        bottomColor: fill,
-        lineColor: 'rgba(0,0,0,0)',
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        crosshairMarkerVisible: false,
-      })
-      s.setData(rows.map((b) => ({ time: t(b.dte), value: val(b) })))
-    }
-    if (rows.length > 0) {
-      // Paint order IS the stacking: wide fill, mask, inner fill, mask.
-      area(C.band, (b) => b.p90)
-      area(C.bg, (b) => b.p10)
-      area(C.bandInner, (b) => b.p75)
-      area(C.bg, (b) => b.p25)
-      const med = chart.addSeries(LineSeries, {
-        color: C.dim,
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        title: 'median',
-        priceLineVisible: false,
-        lastValueVisible: false,
-      })
-      med.setData(rows.map((b) => ({ time: t(b.dte), value: b.p50 })))
-    }
-    if (path.length > 0) {
-      const line = chart.addSeries(LineSeries, {
-        color: C.accent,
-        lineWidth: 2,
-        title: 'this contract',
-        priceLineVisible: false,
-        pointMarkersVisible: path.length <= 120,
-      })
-      line.setData(
-        [...path]
-          .sort((a, b) => b.dte - a.dte)
-          .map((p) =>
-            p.spread === null
-              ? { time: t(p.dte) }
-              : { time: t(p.dte), value: p.spread })
-      )
-    }
-  }, [data, height], height, {
-    tickMarkFormatter: (time: number) =>
-      `${Math.round(data.cap - (time - BASE) / DAY)}d`,
-  })
+  }, [rows, under, underLabel, avg, avgLabel, refPrice, pct, height], height)
   return <div ref={box} style={{ height }} />
 }
 

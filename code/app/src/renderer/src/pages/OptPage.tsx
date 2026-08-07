@@ -25,15 +25,12 @@
  *  FILTERING AND ANALYTICS ONLY. Nothing here places an order.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { api } from '../api'
+import { api, ApiError } from '../api'
 import {
   legWindow, resolveLegDoc, type Drawing, type OptionLeg,
 } from '../components/ChartDraw'
 import { OptHeatmap } from '../components/OptHeatmap'
-import {
-  FanPanel, HistoryPanel, TermPanel,
-  type FanData, type TermPoint,
-} from '../components/OptCharts'
+import { HistoryPanel, TermPanel, type TermPoint } from '../components/OptCharts'
 import { annualise, capitalFor, midOf, tradingDaysTo, dteBetween, type GridContract } from '../optgrid'
 import { analyse, fmtExtreme, fmtNet, returnOnRisk, type PayoffLeg } from '../payoff'
 
@@ -81,18 +78,11 @@ interface SeriesResponse {
   target?: { delta?: number | null; strike?: number | null; dte: number }
 }
 
-interface FanResponse {
-  available: boolean
-  source: string
-  reason?: string
-  band_reason?: string
-  path: { dte: number; spread: number | null; date: string }[]
-  band: { dte: number; p10: number; p25: number; p50: number; p75: number; p90: number; n: number }[]
-  bucket?: { median_delta: number; lo: number; hi: number }
-}
-
 type Sel = { occ: string; strike: number; expiration: string; right: 'P' | 'C'; delta?: number | null }
 
+/** A FRACTION as a percent — for IV and other 0-1 ratios. Not to be confused
+ *  with the history tab's `asPct` unit flag, which was briefly named `pct`
+ *  and shadowed this out of existence inside the component. */
 const pct = (v: number | null | undefined): string =>
   typeof v === 'number' && Number.isFinite(v) ? `${(v * 100).toFixed(0)}%` : '—'
 
@@ -128,17 +118,32 @@ export function OptPage({
   const [byLeg, setByLeg] = useState<Record<string, ChainResponse | null>>({})
   const [meta, setMeta] = useState<{ source: string; reason?: string; age?: number } | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  // SEPARATE from `err`: the 3s document poll clears that one on every
+  // success, so a bars failure written there vanished before it could be
+  // read — which is exactly how the underlying went missing in silence.
+  const [barsErr, setBarsErr] = useState<string | null>(null)
 
   // WHAT IS CHARTED, and WHICH question is being asked of it.
   const [sel, setSel] = useState<Sel | null>(null)
   const [tab, setTab] = useState<'future' | 'history'>('future')
   const [view, setView] = useState<'heat' | 'list'>('heat')
   const [showUnder, setShowUnder] = useState(true)
+  // The averaging window, in ARCHIVED POINTS not calendar days — the series
+  // is one point per day the archive priced, so a 20-point average is 20
+  // observations however the gaps fall.
+  const [avgWin, setAvgWin] = useState(20)
+  // PERCENT OF STRIKE, by default. In delta-matched mode the strike WALKS with
+  // the market — 617 to 759 over one year on this series — so a flat $35
+  // premium at both ends is really two different trades, and a dollar chart
+  // shows a drift that is only moneyness. Dividing by the strike each point was
+  // matched at removes it, and puts this chart in the same unit as the
+  // heatmap's credit/strike. Dollars stay one click away: they are what you
+  // actually pay, and over a few weeks the strike barely moves.
+  const [asPct, setAsPct] = useState(true)
 
   const [tick, setTick] = useState(0)
   const [term, setTerm] = useState<Contract[] | null>(null)
   const [series, setSeries] = useState<SeriesResponse | null>(null)
-  const [fan, setFan] = useState<FanResponse | null>(null)
   const [bars, setBars] = useState<{ ts: string; close: number }[]>([])
 
   const today = new Date().toISOString().slice(0, 10)
@@ -268,7 +273,6 @@ export function OptPage({
   useEffect(() => {
     if (!sel) {
       setSeries(null)
-      setFan(null)
       return
     }
     let alive = true
@@ -291,12 +295,8 @@ export function OptPage({
         `?right=${sel.right}&dte=${dte}&dte_tol=3&${shape}`
     )
       .then((r) => alive && setSeries(r))
-      .catch((e) => alive && setSeries({ available: false, rows: [], source: 'none', reason: String(e) }))
-    const qs = `?expiration=${sel.expiration}&strike=${sel.strike.toFixed(4)}&right=${sel.right}`
-    api<FanResponse>('GET', `/api/symbols/${encodeURIComponent(symbol)}/options/fanchart${qs}`)
-      .then((r) => alive && setFan(r))
-      .catch((e) => alive && setFan({
-        available: false, path: [], band: [], source: 'none', reason: String(e),
+      .catch((e) => alive && setSeries({
+        available: false, rows: [], source: 'none', reason: staleOr(e),
       }))
     return () => {
       alive = false
@@ -311,9 +311,15 @@ export function OptPage({
     if (tab !== 'history' || bars.length > 0) return
     let alive = true
     api<{ bars: { ts: string; close: number }[] }>(
-      'GET', `/api/symbols/${encodeURIComponent(symbol)}/bars?timeframe=1Day&limit=400`)
-      .then((r) => alive && setBars(r.bars ?? []))
-      .catch(() => undefined)
+      'GET', `/api/symbols/${encodeURIComponent(symbol)}/bars?timeframe=1Day&limit=1000`)
+      .then((r) => {
+        if (!alive) return
+        setBars(r.bars ?? [])
+        setBarsErr((r.bars ?? []).length === 0 ? 'the bars endpoint returned nothing' : null)
+      })
+      .catch((e) => {
+        if (alive) setBarsErr(staleOr(e))
+      })
     return () => {
       alive = false
     }
@@ -350,6 +356,69 @@ export function OptPage({
       .find((c) => c.occ_symbol === sel.occ)
     return row ? midOf(row.bid, row.ask) : null
   })()
+
+  // EVERY PLOTTED POINT in the display unit, computed once. Each row carries
+  // `used_strike` — the strike that day's match actually landed on — which is
+  // the only honest denominator for that day's premium.
+  const plotted = useMemo(
+    () => (series?.rows ?? []).map((r) => ({
+      date: r.date,
+      value: r.mid === null || !r.used_strike ? null : asPct ? (r.mid / r.used_strike) * 100 : r.mid,
+    })),
+    [series, asPct]
+  )
+
+  // Today's quote in that SAME unit. Comparing a live percent against a
+  // historical dollar would be a category error wearing a percentile's clothes.
+  const liveShown = liveMid === null || !sel || !sel.strike
+    ? liveMid
+    : asPct ? (liveMid / sel.strike) * 100 : liveMid
+
+  // WHAT NORMAL LOOKS LIKE. The percentiles of this shape's own year, and
+  // where today's quote falls inside them — the whole "is this a good price"
+  // question, answered from the series already on screen rather than a second
+  // request. Nulls all the way down when there is nothing to compare.
+  const hist = (() => {
+    const mids = plotted
+      .map((r) => r.value)
+      .filter((v): v is number => typeof v === 'number')
+      .sort((a, b) => a - b)
+    if (mids.length < 10) return { median: null, p25: null, p75: null, pct: null, n: mids.length }
+    const q = (f: number): number => mids[Math.min(mids.length - 1, Math.floor(f * mids.length))]
+    const rank = liveShown === null ? null
+      : Math.round((mids.filter((v) => v <= liveShown).length / mids.length) * 100)
+    return { median: q(0.5), p25: q(0.25), p75: q(0.75), pct: rank, n: mids.length }
+  })()
+
+  // The rolling average of the option's own mid — "normal" as a line rather
+  // than a single flat level, so it tracks how normal itself moved.
+  const avgSeries = useMemo(() => {
+    const rows = plotted
+    if (avgWin <= 1 || rows.length === 0) return []
+    const out: { date: string; value: number | null }[] = []
+    const win: number[] = []
+    for (const r of rows) {
+      if (typeof r.value === 'number') {
+        win.push(r.value)
+        if (win.length > avgWin) win.shift()
+      }
+      // Nothing until the window is genuinely full: a 3-point "20-day
+      // average" is a different statistic wearing the same label.
+      out.push({
+        date: r.date,
+        value: win.length === avgWin ? win.reduce((a, b) => a + b, 0) / avgWin : null,
+      })
+    }
+    return out
+  }, [plotted, avgWin])
+
+  // Memoised: this array is a dependency of the chart's rebuild effect, and a
+  // fresh identity every render tore down and re-created the chart on every
+  // 3s poll tick.
+  const underSeries = useMemo(
+    () => (showUnder && series?.rows ? underPoints(bars, series.rows) : []),
+    [showUnder, bars, series]
+  )
 
   const selLabel = sel
     ? `${sel.strike.toFixed(sel.strike % 1 === 0 ? 0 : 1)} ${sel.right === 'P' ? 'put' : 'call'} · ${sel.expiration}`
@@ -398,7 +467,10 @@ export function OptPage({
       ) : (
         <div className="opt-shell">
           <div className="opt-main">
-            <div className="opt-card">
+            <div className="opt-card" data-under-points={underSeries.length}
+              data-series-points={series?.rows?.length ?? 0}
+              data-unit={asPct ? 'pct' : 'usd'}
+              data-peak={Math.max(0, ...plotted.map((r) => r.value ?? 0)).toFixed(3)}>
               <div className="opt-card-head">
                 <span className="cp-views">
                   <button type="button" className={`seg-btn${tab === 'future' ? ' on' : ''}`}
@@ -412,11 +484,38 @@ export function OptPage({
                 </span>
                 <h2>{selLabel ?? 'pick a contract on the right'}</h2>
                 {tab === 'history' ? (
-                  <label className="opt-toggle">
-                    <input type="checkbox" checked={showUnder}
-                      onChange={(e) => setShowUnder(e.target.checked)} />
-                    underlying
-                  </label>
+                  <>
+                    <label className="opt-toggle">
+                      unit
+                      <select
+                        className="seg-select opt-unit"
+                        value={asPct ? 'pct' : 'usd'}
+                        onChange={(e) => setAsPct(e.target.value === 'pct')}
+                      >
+                        <option value="pct">% of strike</option>
+                        <option value="usd">$</option>
+                      </select>
+                    </label>
+                    <label className="opt-toggle">
+                      avg
+                      <select
+                        className="seg-select opt-avg"
+                        value={avgWin}
+                        onChange={(e) => setAvgWin(Number(e.target.value))}
+                      >
+                        <option value={0}>off</option>
+                        <option value={10}>10</option>
+                        <option value={20}>20</option>
+                        <option value={50}>50</option>
+                        <option value={100}>100</option>
+                      </select>
+                    </label>
+                    <label className="opt-toggle">
+                      <input type="checkbox" checked={showUnder}
+                        onChange={(e) => setShowUnder(e.target.checked)} />
+                      underlying
+                    </label>
+                  </>
                 ) : null}
               </div>
 
@@ -452,11 +551,14 @@ export function OptPage({
                 <>
                   {series?.available && series.rows.length > 0 ? (
                     <HistoryPanel
-                      rows={series.rows}
-                      under={showUnder ? underPoints(bars, series.rows) : []}
+                      rows={plotted}
+                      pct={asPct}
+                      under={underSeries}
                       underLabel={symbol}
-                      refPrice={liveMid}
-                      height={240}
+                      avg={avgSeries}
+                      avgLabel={`avg ${avgWin}`}
+                      refPrice={liveShown}
+                      height={420}
                     />
                   ) : (
                     <div className="dim subtle lc-empty">
@@ -464,27 +566,10 @@ export function OptPage({
                     </div>
                   )}
                   <div className="dim subtle opt-note">
-                    {series?.available && sel ? seriesCaption(series, sel, symbol, today) : null}
-                  </div>
-
-                  {fan?.available && (fan.band.length > 0 || fan.path.length > 0) ? (
-                    <FanPanel data={fanData(fan)} height={230} />
-                  ) : (
-                    <div className="dim subtle lc-empty">
-                      {fan === null ? 'loading…' : fan.reason ?? 'no archived spread path'}
-                    </div>
-                  )}
-                  <div className="dim subtle opt-note">
-                    {fan?.available && sel ? (
-                      <>
-                        bid-ask spread across this contract's life, expiry at the right
-                        edge · gray bands = the 10–90 and 25–75 percentiles of every
-                        archived {symbol} {sel.right === 'P' ? 'put' : 'call'} near
-                        Δ{fan.bucket ? fan.bucket.median_delta.toFixed(2) : '—'} ·
-                        {fan.band.length === 0 ? ` ${fan.band_reason ?? 'no band'} · ` : ' '}
-                        inside the band is typical, outside is unusually tight or wide
-                      </>
+                    {showUnder && barsErr ? (
+                      <span className="loss">{symbol} price history unavailable: {barsErr} · </span>
                     ) : null}
+                    {series?.available && sel ? seriesCaption(series, sel, symbol, today, hist, liveShown, asPct) : null}
                   </div>
                 </>
               )}
@@ -510,7 +595,9 @@ export function OptPage({
 
             {visible.map(({ leg, r }) => {
               const res = byLeg[leg.id]
-              const w = legWindow(r.expiration, r.strike, leg.dteTol, leg.strikeTol)
+              // The SAME rectangle the fetch uses — the tolerance box here once
+              // printed 736-744 over a grid whose rows ran to 765.
+              const w = r.window ?? legWindow(r.expiration, r.strike, leg.dteTol, leg.strikeTol)
               const rep = res?.contracts?.find((c) => c.occ_symbol === leg.pick)
               // READ-ONLY, deliberately. This page once wrote the pick into
               // the chart's document, and the chart page — which owns that
@@ -619,57 +706,82 @@ function termPoints(rows: Contract[], today: string): TermPoint[] {
     .filter((p): p is TermPoint => p !== null)
 }
 
+/** A 404 from our own sidecar means one thing: the running backend predates
+ *  the endpoint. Naming that beats a bare "Not Found", because the sidecar
+ *  never hot-reloads and this WILL happen again after backend work. */
+function staleOr(e: unknown): string {
+  if (e instanceof ApiError && e.status === 404) {
+    return 'the running backend predates this feature — close and relaunch the app'
+  }
+  return String(e)
+}
+
 /** In words, what the series chart is: the TRADE's shape priced back through
  *  time, with the matching honesty spelled out when the exact DTE was not
  *  listed on some days. */
 function seriesCaption(
-  series: SeriesResponse, sel: Sel, symbol: string, today: string
+  series: SeriesResponse, sel: Sel, symbol: string, today: string,
+  hist: { median: number | null; p25: number | null; p75: number | null; pct: number | null; n: number },
+  liveMid: number | null,
+  asPct: boolean
 ): string {
+  // The caption quotes the same numbers the axis does, in the same unit.
+  const u = (v: number): string =>
+    asPct
+      ? `${v.toFixed(Math.abs(v) >= 10 ? 2 : Math.abs(v) >= 1 ? 3 : 4)}% of strike`
+      : v.toFixed(2)
   const dte = dteBetween(today, sel.expiration) ?? 0
   const used = series.rows.map((r) => r.used_dte)
   const lo = Math.min(...used)
   const hi = Math.max(...used)
   const range = lo === hi ? `${lo} DTE exactly` : `${lo}–${hi} DTE (nearest listed each day)`
   const kind = sel.right === 'P' ? 'put' : 'call'
+  // The verdict first, in words: a percentile is the answer to "is this a
+  // good price", and it is worth more than any amount of axis-reading.
+  const verdict = (hist.pct === null || liveMid === null || hist.median === null)
+    ? ''
+    : `TODAY ${u(liveMid)} sits at the ${hist.pct}th percentile of the last ` +
+      `year (normal ${u(hist.median)}, typical range ` +
+      `${u(hist.p25 ?? 0)}–${u(hist.p75 ?? 0)}) · `
   if (series.mode === 'delta' && series.target?.delta != null) {
     // The strike WALKS with the market in this mode — that is the whole point,
     // and the caption owns it so nobody reads the line as one contract.
     const strikes = series.rows.map((r) => r.used_strike)
     return (
+      verdict +
       `what THE Δ${series.target.delta.toFixed(2)} ${kind} at ~${dte} DTE has cost, ` +
       `day by day over the last year — same risk shape, whatever the strike ` +
       `(it walked ${Math.min(...strikes).toFixed(0)}–${Math.max(...strikes).toFixed(0)} ` +
-      `as ${symbol} moved) · matched at ${range} · mid solid, bid/ask dashed · ` +
-      `${symbol} gray on the left axis`
+      `as ${symbol} moved) · matched at ${range} · each node is one archived ` +
+      `contract · ${symbol} BLUE on the left axis`
     )
   }
   return (
+    verdict +
     `what a ~${dte}-DTE ${symbol} ${sel.strike.toFixed(0)} ${kind} has cost, ` +
     `day by day over the last year · matched at ${range}, strike ±$1 (no delta ` +
-    `known for this contract, so the strike stands in) · mid solid, bid/ask ` +
-    `dashed · ${symbol} gray on the left axis`
+    `known for this contract, so the strike stands in) · each node is one ` +
+    `archived contract · ${symbol} BLUE on the left axis`
   )
 }
 
-/** The underlying's closes clipped to the series' span. */
+/** The underlying's closes over the series' span.
+ *
+ *  Clipped to the option's window when the two overlap, and UNCLIPPED when
+ *  they do not. An empty overlay is the one outcome worth engineering
+ *  against: it removes the left axis entirely, so the failure looks like a
+ *  feature that was never built rather than data that did not line up. */
 function underPoints(
   bars: { ts: string; close: number }[],
   rows: { date: string }[]
 ): { date: string; close: number }[] {
-  if (rows.length === 0) return []
+  const all = bars
+    .map((b) => ({ date: b.ts.slice(0, 10), close: b.close }))
+    .filter((b) => Number.isFinite(b.close))
+    .sort((a, b) => a.date.localeCompare(b.date))
+  if (all.length === 0 || rows.length === 0) return all
   const from = rows[0].date
   const to = rows[rows.length - 1].date
-  return bars
-    .map((b) => ({ date: b.ts.slice(0, 10), close: b.close }))
-    .filter((b) => b.date >= from && b.date <= to)
-}
-
-function fanData(fan: FanResponse): FanData {
-  const maxPath = fan.path.length ? Math.max(...fan.path.map((p) => p.dte)) : 0
-  const cap = Math.max(90, Math.min(180, maxPath + 15))
-  return {
-    cap,
-    band: fan.band.filter((b) => b.dte <= cap),
-    path: fan.path,
-  }
+  const clipped = all.filter((b) => b.date >= from && b.date <= to)
+  return clipped.length > 0 ? clipped : all
 }

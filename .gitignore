@@ -8,6 +8,13 @@
 *.env
 *.db
 *.db-journal
+# WAL sidecars: '*.db' does NOT match 'market.db-wal'. The e2e scratch profile
+# leaves a pair behind on every run, and 'git add -A' swept them into a commit.
+*.db-wal
+*.db-shm
+# Screenshot output + the throwaway Electron profile the harness boots. They
+# are how a change gets VERIFIED, not what gets shipped.
+code/app/e2e/shots/
 *.npz
 *.csv.gz
 *.parquet

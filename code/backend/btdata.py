@@ -37,12 +37,15 @@ CREATE TABLE IF NOT EXISTS opt (
     vol    REAL, oi REAL,
     delta  REAL,               -- NULL = let the engine solve a model delta
     iv     REAL,
+    src    TEXT,               -- provenance: 'recorded', 'onclickmedia',
+    imported_at TEXT,          --   'upload:<file>', 'vault'. NULL = pre-v1.
     PRIMARY KEY (d, exp, cp, strike)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS bars (
     d INTEGER NOT NULL,        -- trading date, yyyymmdd (ET)
     t TEXT NOT NULL,           -- 'H:MM AM/PM' ET, the engine's parse format
     o REAL, h REAL, l REAL, c REAL,
+    src TEXT,
     PRIMARY KEY (d, t)
 );
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -50,6 +53,18 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value TEXT NOT NULL
 );
 """
+
+SCHEMA_VERSION = 1
+
+#: Additive migrations for databases built before SCHEMA_VERSION existed.
+#: Guarded by user_version, exactly as marketdb does it — see connect_data.
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: (
+        "ALTER TABLE opt ADD COLUMN src TEXT",
+        "ALTER TABLE opt ADD COLUMN imported_at TEXT",
+        "ALTER TABLE bars ADD COLUMN src TEXT",
+    ),
+}
 
 #: Finest first — when several timeframes were recorded, sync the finest.
 _TIMEFRAME_ORDER = ("1Min", "5Min", "15Min", "1Hour", "1Day")
@@ -87,6 +102,10 @@ def _ymd(d: dt.date) -> int:
     return d.year * 10000 + d.month * 100 + d.day
 
 
+def _now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 # ---------------------------------------------------------------------------
 def data_db_path(underlying: str) -> Path:
     d = data_dir() / "backtest_data"
@@ -96,14 +115,34 @@ def data_db_path(underlying: str) -> Path:
 
 def connect_data(path: Path | str) -> sqlite3.Connection:
     """WAL like market.db (derived, re-buildable, a torn cloud copy costs
-    nothing) and the same busy_timeout politeness."""
+    nothing) and the same busy_timeout politeness.
+
+    VERSIONED, because `executescript(_SCHEMA)` alone is a trap that has
+    already cost this codebase real behaviour. `CREATE TABLE IF NOT EXISTS`
+    delivers new TABLES to an existing database but can never deliver a new
+    COLUMN — and there is no error, just a column that silently isn't there.
+    market.db proves it: chain_cache and chain_cover were added to its schema
+    without bumping its version, and this machine's market.db has never had
+    them; the log carries 574 'no such table: chain_cover' fallbacks. So an
+    ALTER needs a delivery path, and user_version is it.
+    """
     con = sqlite3.connect(str(path), check_same_thread=False)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=5000")
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
-    con.executescript(_SCHEMA)
-    con.commit()
+    have = con.execute("PRAGMA user_version").fetchone()[0]
+    if have != SCHEMA_VERSION:
+        con.executescript(_SCHEMA)  # creates anything missing
+        for version in sorted(_MIGRATIONS):
+            if have < version:
+                for stmt in _MIGRATIONS[version]:
+                    try:
+                        con.execute(stmt)
+                    except sqlite3.OperationalError:
+                        pass  # column already present on a fresh _SCHEMA build
+        con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        con.commit()
     return con
 
 
@@ -128,6 +167,7 @@ def sync_from_recorded(market_con: sqlite3.Connection,
     into ``opt`` (latest snapshot per day wins), and newer bars into ``bars``.
     Short transactions per day so the recorder is never starved."""
     u = underlying.upper()
+    stamp = _now_iso()
     state = dict(data_con.execute("SELECT key, value FROM sync_state"))
     last_chain = state.get("chain_last_ts", "")
 
@@ -159,24 +199,36 @@ def sync_from_recorded(market_con: sqlite3.Connection,
             exp = _parse_iso(r["expiration"] + "T00:00:00+00:00")
             if exp is None:
                 continue
-            bid = r["bid"] or 0.0
-            ask = r["ask"] or 0.0
-            if bid > 0 and ask >= bid:
-                mark = 0.5 * (bid + ask)
+            # MISSING IS NOT ZERO. The arithmetic below needs numbers, so it
+            # uses local zeros — but what gets STORED is what was quoted, and
+            # an absent bid is stored as NULL.
+            #
+            # Be precise about why: for bid/ask/mark the engine coerces the
+            # same way we would (bt/data.py:225-227), so this costs it nothing
+            # today. It matters because this table is the app's record of what
+            # a market showed, and a stored 0.0 is a claim that someone bid
+            # zero — indistinguishable, forever, from nobody quoting at all.
+            # DATA_IMPORT.md makes that a rule; the import path will honour it,
+            # and the two writers must not disagree about the same column.
+            b = r["bid"] or 0.0
+            a = r["ask"] or 0.0
+            if b > 0 and a >= b:
+                mark = 0.5 * (b + a)
             elif r["last"] and r["last"] > 0:
                 mark = float(r["last"])
             else:
-                mark = 0.0
+                mark = None  # no quote and no trade: nothing to mark against
             out.append((
                 d_i, _ymd(exp.date()), 0 if r["right"] == "C" else 1,
                 int(round(float(r["strike"]) * 1000)),
-                bid, ask, mark, r["volume"], r["open_interest"],
-                r["delta"], r["iv"],
+                r["bid"], r["ask"], mark, r["volume"], r["open_interest"],
+                r["delta"], r["iv"], "recorded", stamp,
             ))
         with data_con:  # one short transaction per day
             data_con.executemany(
                 "INSERT OR REPLACE INTO opt (d, exp, cp, strike, bid, ask,"
-                " mark, vol, oi, delta, iv) VALUES (?,?,?,?,?,?,?,?,?,?,?)", out)
+                " mark, vol, oi, delta, iv, src, imported_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", out)
             data_con.execute(
                 "INSERT OR REPLACE INTO sync_state VALUES ('chain_last_ts', ?)", (ts,))
         newest_ts = max(newest_ts, ts)
@@ -206,13 +258,13 @@ def sync_from_recorded(market_con: sqlite3.Connection,
             label = ("4:00 PM" if tf == "1Day"
                      else et.strftime("%I:%M %p").lstrip("0"))
             out.append((_ymd(et.date()), label, r["open"], r["high"],
-                        r["low"], r["close"]))
+                        r["low"], r["close"], "recorded"))
             newest_bar = max(newest_bar, r["ts"])
         if out:
             with data_con:
                 data_con.executemany(
-                    "INSERT OR REPLACE INTO bars (d, t, o, h, l, c)"
-                    " VALUES (?,?,?,?,?,?)", out)
+                    "INSERT OR REPLACE INTO bars (d, t, o, h, l, c, src)"
+                    " VALUES (?,?,?,?,?,?,?)", out)
                 data_con.execute(
                     "INSERT OR REPLACE INTO sync_state VALUES ('bars_last_ts', ?)",
                     (newest_bar,))

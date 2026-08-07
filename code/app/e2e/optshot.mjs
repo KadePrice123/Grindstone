@@ -161,8 +161,43 @@ try {
     .find((b) => b.textContent === 'History')?.click()`)
   await waitFor(() => opt.eval(
     `document.querySelectorAll('.opt-card canvas').length >= 1`), 'a history chart', 20000)
-  await sleep(2500)
+  await sleep(3000)
+  // HARD PROOF, not pixel-reading: the counts the page itself stamps, plus
+  // whether lightweight-charts actually created a LEFT price scale (it only
+  // does so when a series is assigned to it and has data).
+  const proof = await opt.eval(`(() => {
+    const card = document.querySelector('.opt-card')
+    return JSON.stringify({
+      under: card?.getAttribute('data-under-points'),
+      series: card?.getAttribute('data-series-points'),
+      canvases: document.querySelectorAll('.opt-card canvas').length,
+      // the left axis renders its own label column when visible
+      axisText: [...document.querySelectorAll('.opt-card td, .opt-card canvas')].length,
+      err: document.querySelector('.opt-note .loss')?.textContent ?? null,
+      // The unit is a claim the caption makes in words; read it back rather
+      // than trusting that a '%' appeared somewhere on the canvas.
+      unit: card?.getAttribute('data-unit'),
+      peak: card?.getAttribute('data-peak'),
+      caption: (document.querySelector('.opt-note')?.textContent ?? '').slice(0, 150),
+    })
+  })()`)
+  console.log('UNDERLYING PROOF:', proof)
   await shot(opt, 'opt-history.png')
+
+  // AND THE SAME SERIES IN DOLLARS, so the two units can be compared side by
+  // side: the percent view should flatten drift the dollar view shows.
+  await opt.eval(`(() => {
+    const s = document.querySelector('.opt-unit')
+    if (!s) return
+    s.value = 'usd'
+    s.dispatchEvent(new Event('change', { bubbles: true }))
+  })()`)
+  await sleep(2500)
+  console.log('USD PROOF:', await opt.eval(`(() => {
+    const c = document.querySelector('.opt-card')
+    return JSON.stringify({ unit: c?.getAttribute('data-unit'), peak: c?.getAttribute('data-peak') })
+  })()`))
+  await shot(opt, 'opt-history-usd.png')
 } catch (e) {
   console.log('FAILED:', e.message)
 } finally {

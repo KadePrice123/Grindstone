@@ -2219,6 +2219,146 @@ def _btdata_pipeline():
                 os.environ["GRINDSTONE_DATA_DIR"] = old
 
 
+@check("engine store: migration reaches an EXISTING db, and missing stays NULL")
+def _btdata_schema():
+    """The trap this exists for has already fired once in this codebase.
+
+    `CREATE TABLE IF NOT EXISTS` delivers a new TABLE to an old database but
+    can NEVER deliver a new COLUMN, and it fails silently. market.db is the
+    proof: chain_cache/chain_cover were added to its _SCHEMA without bumping
+    SCHEMA_VERSION, and this developer's market.db has never had them — the
+    backend log carries hundreds of 'no such table: chain_cover' fallbacks
+    while every gate run stayed green.
+
+    Green is exactly what a normal test gives you here, because tests build
+    databases in tempdirs where user_version is 0 and the schema script runs
+    unconditionally. So this check builds the OLD shape BY HAND and migrates
+    it — the only way to exercise the path a real install takes.
+
+    The last assertion is the general one: a migrated database and a fresh one
+    must end up with identical columns. That fails the moment someone adds a
+    column to _SCHEMA and forgets the ALTER, whatever the column is called."""
+    import os
+    import sqlite3
+    import tempfile
+    sys.path.insert(0, str(CODE))
+
+    # The v0 shape: btdata's schema as it stood before provenance existed.
+    V0 = """
+    CREATE TABLE opt (d INTEGER NOT NULL, exp INTEGER NOT NULL, cp INTEGER NOT NULL,
+      strike INTEGER NOT NULL, bid REAL, ask REAL, mark REAL, vol REAL, oi REAL,
+      delta REAL, iv REAL, PRIMARY KEY (d, exp, cp, strike)) WITHOUT ROWID;
+    CREATE TABLE bars (d INTEGER NOT NULL, t TEXT NOT NULL, o REAL, h REAL,
+      l REAL, c REAL, PRIMARY KEY (d, t));
+    CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    """
+
+    with tempfile.TemporaryDirectory() as td:
+        old = os.environ.get("GRINDSTONE_DATA_DIR")
+        os.environ["GRINDSTONE_DATA_DIR"] = td
+        # Every connection opened below, closed in the finally. On Windows an
+        # open handle makes TemporaryDirectory's cleanup raise WinError 32 as
+        # the check unwinds — which REPLACES the assertion message with a file
+        # -locking one, so a genuine failure reports the wrong cause. Observed
+        # while mutation-testing this very check.
+        opened = []
+        try:
+            from backend import btdata
+            from backend.marketdb import connect_market
+
+            assert btdata.SCHEMA_VERSION >= 1, "btdata must declare a SCHEMA_VERSION"
+
+            aged = Path(td) / "aged.db"
+            raw = sqlite3.connect(aged)
+            raw.executescript(V0)
+            raw.execute("INSERT INTO opt (d,exp,cp,strike,bid,ask,mark)"
+                        " VALUES (20260105,20260220,1,600000,1.5,1.6,1.55)")
+            raw.commit()
+            assert raw.execute("PRAGMA user_version").fetchone()[0] == 0
+            raw.close()
+
+            con = btdata.connect_data(aged); opened.append(con)
+            ver = con.execute("PRAGMA user_version").fetchone()[0]
+            assert ver == btdata.SCHEMA_VERSION, \
+                f"migration left user_version at {ver}, wanted {btdata.SCHEMA_VERSION}"
+            aged_opt = {r[1] for r in con.execute("PRAGMA table_info(opt)")}
+            aged_bars = {r[1] for r in con.execute("PRAGMA table_info(bars)")}
+            assert {"src", "imported_at"} <= aged_opt, \
+                f"ALTER never reached an existing opt table: {sorted(aged_opt)}"
+            assert "src" in aged_bars, f"bars.src missing: {sorted(aged_bars)}"
+            assert con.execute("SELECT COUNT(*) FROM opt").fetchone()[0] == 1, \
+                "the migration destroyed rows it should have preserved"
+            con.close()
+
+            # A fresh database takes the _SCHEMA path instead; the ALTERs must
+            # not raise on columns the CREATE already made.
+            fresh = Path(td) / "fresh.db"
+            con = btdata.connect_data(fresh); opened.append(con)
+            fresh_opt = {r[1] for r in con.execute("PRAGMA table_info(opt)")}
+            fresh_bars = {r[1] for r in con.execute("PRAGMA table_info(bars)")}
+            con.close()
+            assert aged_opt == fresh_opt, (
+                "migrated and fresh databases disagree on opt's columns — a "
+                f"column was added to _SCHEMA with no ALTER to deliver it: "
+                f"fresh-only={sorted(fresh_opt - aged_opt)} "
+                f"aged-only={sorted(aged_opt - fresh_opt)}")
+            assert aged_bars == fresh_bars, (
+                "migrated and fresh databases disagree on bars' columns: "
+                f"fresh-only={sorted(fresh_bars - aged_bars)}")
+
+            # MISSING IS NOT ZERO, through the real recorder->store writer.
+            # A contract nobody quoted must land as NULL: a stored 0.0 is a
+            # claim that someone bid zero, and nothing downstream can ever
+            # tell the two apart again.
+            mcon = connect_market(Path(td) / "market.db"); opened.append(mcon)
+            with mcon:
+                mcon.execute(
+                    "INSERT INTO rec_chain (underlying, ts, occ_symbol, expiration,"
+                    " strike, right, bid, ask, delta) VALUES"
+                    " ('SPY','2026-01-05T19:45:00Z','A','2026-02-20',600,'P',1.5,1.6,-0.3)")
+                mcon.execute(
+                    "INSERT INTO rec_chain (underlying, ts, occ_symbol, expiration,"
+                    " strike, right, bid, ask, delta) VALUES"
+                    " ('SPY','2026-01-05T19:45:00Z','B','2026-02-20',400,'P',NULL,NULL,NULL)")
+            store = btdata.data_db_path("SPY")
+            dcon = btdata.connect_data(store); opened.append(dcon)
+            btdata.sync_from_recorded(mcon, dcon, "SPY")
+            quiet = dcon.execute(
+                "SELECT bid, ask, mark, delta, src FROM opt WHERE strike=400000").fetchone()
+            assert quiet is not None, "the unquoted contract was dropped entirely"
+            assert quiet["bid"] is None, f"unquoted bid stored as {quiet['bid']!r}, wanted NULL"
+            assert quiet["ask"] is None, f"unquoted ask stored as {quiet['ask']!r}, wanted NULL"
+            assert quiet["mark"] is None, f"unquoted mark stored as {quiet['mark']!r}, wanted NULL"
+            assert quiet["delta"] is None, (
+                "a 0.0 delta is not a missing delta: bt/data.py trusts any "
+                "|delta| < 9.0 verbatim and skips the model solve")
+            assert quiet["src"] == "recorded", f"provenance not stamped: {quiet['src']!r}"
+            live = dcon.execute(
+                "SELECT bid, mark FROM opt WHERE strike=600000").fetchone()
+            assert live["bid"] == 1.5 and abs(live["mark"] - 1.55) < 1e-9, \
+                "a real quote was damaged by the null-preserving path"
+
+            # And the engine still prices it, NULLs and all.
+            from backend.bt.data import MarketData
+            dcon.close()
+            md = MarketData(str(store))
+            # MarketData has no close(); register its read-only handles too.
+            opened.append(md._opt)
+            if md._bars is not None:
+                opened.append(md._bars)
+            assert md.all_dates() == [dt_date("2026-01-05")], repr(md.all_dates())
+        finally:
+            for c in opened:
+                try:
+                    c.close()
+                except Exception:  # noqa: BLE001 - cleanup must not mask a failure
+                    pass
+            if old is None:
+                os.environ.pop("GRINDSTONE_DATA_DIR", None)
+            else:
+                os.environ["GRINDSTONE_DATA_DIR"] = old
+
+
 def dt_date(s: str):
     import datetime as _dt
     return _dt.date.fromisoformat(s)
