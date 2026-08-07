@@ -376,6 +376,22 @@ const SECTIONS: Sec[] = [
             <em> your recorded data</em>.</li>
           <li>The page shows per-job status and total store size.</li>
         </ul>
+        <p><strong>Import a file</strong> takes a CSV or JSON export from any broker — an
+          archived chain file imports unchanged. Pick the kind yourself: it is never
+          guessed, because a chain file and a bar file are both “a CSV with numbers in
+          it”, and a wrong guess surfaces months later inside a backtest. The whole file
+          is validated before a single row is written, and a refusal names the line and
+          the reason. An empty bid is stored as <em>not quoted</em>, never as zero.</p>
+        <p><strong>Chain puller</strong> downloads end-of-day option chains one
+          ticker-day every 6 seconds. It is off until you start it. The free source only
+          serves a rolling ~6 months and has no greeks until a session closes, so the
+          date range is clamped to what can actually be fetched and says so.</p>
+        <p>Imported and pulled rows land in the <strong>backtest store</strong>, so data
+          you bring is immediately usable by <code>backtest.gs</code> — the Backtest page
+          names which source filled it rather than calling everything “recorded”.</p>
+        <p><strong>Keep chart data for</strong> (Settings → Data) controls how long bars
+          fetched for a chart are kept, so a chart still draws when the provider is
+          unreachable. It never touches your recorded data.</p>
       </>
     ),
   },

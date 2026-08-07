@@ -1,7 +1,8 @@
 # Importing your own data — file formats
 
-Status: **specification, not yet built.** Stage 7 (see NOTES.md). Written now so
-the importer is built against a decided shape rather than inventing one.
+Status: **built.** `backend/chainimport.py` parses these formats and enforces
+every rule below; `backend/btdata.import_chain` writes the rows. Written before
+the importer existed so it was built against a decided shape.
 
 The data page accepts `.csv` and `.json` uploads and stores them in the app's
 own database, alongside data the recorder collected. Two kinds are accepted:
@@ -35,6 +36,7 @@ date,symbol,expiration,strike,type,bid,ask,last,volume,open_interest,implied_vol
 | `type` | **yes** | `call` or `put` (also accepts `C`/`P`) |
 | `bid`, `ask` | **yes** | may be empty; see *missing values* below |
 | `last`, `volume`, `open_interest` | no | |
+| `mark` | no | Used when present. Not required — computed from bid/ask otherwise. |
 | `implied_volatility` | no | decimal, `0.1412` — **not** `14.12` |
 | `delta`, `gamma`, `theta`, `vega`, `rho` | no | omit the columns entirely if you don't have them |
 

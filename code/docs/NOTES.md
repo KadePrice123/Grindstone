@@ -47,11 +47,16 @@ tab** with Back returning to the chart.
    through 2026-08-05 by `tools/fetchchains.py`. Precompute the percentile
    distribution — a band needs a distribution, not 45M rows — and do not
    bulk-load raw rows into `projects/dashboard/data/`, which is Drive-synced.
-7. **THE DATA LAYER — deferred by Kade to its own session.** In-app OnclickMedia
-   puller, OFF by default, user-named tickers, ONE ticker-day per 5-10s; CSV/JSON
-   upload (format specified in [DATA_IMPORT.md](DATA_IMPORT.md)); an equity-cache
-   retention setting. The puller must reuse `fetchchains.py`'s header guard —
-   today's session returns NO GREEKS and must never enter the history.
+7. **THE DATA LAYER — DONE 2026-08-06.** In-app OnclickMedia puller (OFF by
+   default, user-named tickers, one ticker-day per 6s, header guard ported
+   byte-identical from `fetchchains.py`); CSV/JSON import per
+   [DATA_IMPORT.md](DATA_IMPORT.md); a chart-bar cache and its retention
+   setting. **The backtest reads what you import** — everything writes
+   `data/backtest_data/<SYM>.db`, the only store `bt/data.py` opens.
+   `loadhist.py --engine-db` loaded the vault into it: 513 sessions,
+   5.48M contracts, and the Backtest page can run for the first time on this
+   machine (it was empty, so `can_run` was False). Free plan serves a ROLLING
+   ~182 days — re-probe it, never trust a recorded boundary.
 
 ## 2026-08-06 — the leg/line coupling, edge tags, arrow keys, per-leg hiding
 

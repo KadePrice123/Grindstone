@@ -130,6 +130,37 @@ try {
   }).then(r => JSON.stringify(r).slice(0, 120))`)
   console.log('seed:', put)
 
+  // SHOT_PAGE=data screenshots the Data and Settings pages instead of the Opt
+  // page. Same boot, same scratch profile — a second harness would duplicate
+  // ninety lines of auth just to open a different tab.
+  if (process.env.SHOT_PAGE === 'data') {
+    // Match the page's OWN heading, not "either of them": a loose regex found
+    // the already-open Data tab again and reported its headings as Settings'.
+    for (const [route, name, h1re] of [
+      ['data', 'data', /Data management/],
+      ['settings', 'settings', /^Settings$/],
+    ]) {
+      await home.eval(`window.grindstone.openTab('${route}')`)
+      const t = await waitFor(async () => {
+        const ts = await targets()
+        for (const x of ts.filter((y) => y.url.includes('mode=content'))) {
+          const c = await connect(x)
+          const h1 = await c.eval(`document.querySelector('h1')?.textContent ?? ''`)
+          if (h1re.test(h1.trim())) return { c, h1 }
+        }
+        return null
+      }, `the ${route} page`, 25000)
+      await t.c.send('Emulation.setDeviceMetricsOverride', {
+        width: 1500, height: 1150, deviceScaleFactor: 1, mobile: false,
+      })
+      await sleep(2500)
+      console.log(`${name.toUpperCase()} HEADINGS:`, await t.c.eval(
+        `JSON.stringify([...document.querySelectorAll('.card h2')].map(e => e.textContent))`))
+      await shot(t.c, `${name}.png`)
+    }
+    process.exit(0)
+  }
+
   await home.eval(`window.grindstone.openTab('opt:SPY')`)
   const optT = await waitFor(async () => {
     const ts = await targets()
