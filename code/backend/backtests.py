@@ -130,11 +130,20 @@ def data_status(user_settings: dict[str, Any] | None = None,
     if p["source"] == "recorded":
         can_run = recorded["days"] > 0
         reason = ("" if can_run else
-                  "no recorded chain data yet — set up recording below, or point"
-                  " Settings at a chain database")
+                  "no chain data yet — import a file, run the chain puller, or"
+                  " set up recording below; you can also point Settings at an"
+                  " existing chain database")
     else:
         can_run = opt.is_file()
         reason = "" if can_run else f"chain database not found at {p['options_db']}"
+    # WHO ACTUALLY FILLED IT. `source` above says which FILE the engine will
+    # read (app-owned / workspace / custom) — it says nothing about where the
+    # rows came from. Reporting the app-owned store as "recorded" regardless
+    # would describe an uploaded CSV as recorded market data, which is the
+    # same class of claim as labelling indicative quotes as live.
+    filled_by = ", ".join(
+        f"{s['src']} ({s['days']}d)" for s in recorded.get("sources", []) if s["src"]
+    ) or ("nothing yet" if not recorded["days"] else "unknown")
     return {
         "options_db": {"path": p["options_db"], "present": opt.is_file(),
                        "size_mb": round(opt.stat().st_size / 2**20, 1) if opt.is_file() else 0},
@@ -143,6 +152,7 @@ def data_status(user_settings: dict[str, Any] | None = None,
         "calibration": {"references": [os.path.basename(f) for f in refs],
                         "mapped": sorted(CALIBRATION_MAP)},
         "source": p["source"],
+        "filled_by": filled_by,
         "underlying": p["underlying"],
         "recorded": recorded,
         "can_run": can_run,

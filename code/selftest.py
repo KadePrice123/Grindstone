@@ -2130,6 +2130,10 @@ def _btdata_pipeline():
     with tempfile.TemporaryDirectory() as td:
         old = os.environ.get("GRINDSTONE_DATA_DIR")
         os.environ["GRINDSTONE_DATA_DIR"] = td
+        # Closed in the finally: on Windows an open handle makes the tempdir
+        # cleanup raise WinError 32 as this check unwinds, REPLACING a genuine
+        # assertion message with a file-locking one. Found while mutating it.
+        opened = []
         try:
             from backend import btdata
             from backend.marketdb import connect_market
@@ -2137,7 +2141,7 @@ def _btdata_pipeline():
             # --- a recorder's worth of synthetic SPY chains: 5 weekdays,
             # two expirations, snapshots at 19:45Z (in-hours ET), plus one
             # stale weekend snapshot that must be filtered out.
-            mcon = connect_market(Path(td) / "market.db")
+            mcon = connect_market(Path(td) / "market.db"); opened.append(mcon)
             days = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08",
                     "2026-01-09"]
             exps = ["2026-01-16", "2026-02-20"]
@@ -2168,7 +2172,7 @@ def _btdata_pipeline():
 
             # --- sync into the app-owned store
             store = btdata.data_db_path("SPY")
-            dcon = btdata.connect_data(store)
+            dcon = btdata.connect_data(store); opened.append(dcon)
             r = btdata.sync_from_recorded(mcon, dcon, "SPY")
             assert r["days"] == 5, f"synced {r['days']} days, wanted 5 (weekend filtered)"
             got = btdata.stats(dcon)
@@ -2180,6 +2184,101 @@ def _btdata_pipeline():
             assert abs(row["mark"] - 0.5 * (row["bid"] + row["ask"])) < 1e-9
             # incremental: nothing new -> nothing copied
             assert btdata.sync_from_recorded(mcon, dcon, "SPY")["days"] == 0
+
+            # --- THE IMPORT PATH into the same store, same five days, a third
+            # expiration. The engine must end up reading a store that two
+            # different writers filled, because that is what a real install
+            # looks like: some recorded, some uploaded, some pulled.
+            from backend.chainimport import parse_text
+            from backend import chainimport as _ci
+            hdr = ("date,symbol,expiration,strike,type,bid,ask,"
+                   "implied_volatility,delta")
+            lines = [hdr]
+            for i, day in enumerate(days):
+                F = 500.0 + i * 0.5
+                T = max((dt_date("2026-03-20") - dt_date(day)).days, 1) / 365.0
+                for k in range(400, 601, 5):
+                    for right in ("C", "P"):
+                        px = b76(F, float(k), T, iv, right == "C")
+                        d1 = (math.log(F / k) + 0.5 * iv * iv * T) / (iv * math.sqrt(T))
+                        dl = norm_cdf(d1) if right == "C" else norm_cdf(d1) - 1.0
+                        lines.append(f"{day},SPY,2026-03-20,{k}.0,{right},"
+                                     f"{max(px - 0.02, 0.01):.4f},{px + 0.02:.4f},"
+                                     f"{iv},{dl:.4f}")
+            parsed = parse_text("\n".join(lines), "option_chain", "csv", "upload:t.csv")
+            res = btdata.import_chain(dcon, "SPY", parsed.chain, "upload:t.csv")
+            assert res["days"] == 5, f"imported {res['days']} days, wanted 5"
+            assert res["contracts"] == len(lines) - 1
+
+            st = btdata.stats(dcon)
+            assert st["days"] == 5, \
+                f"the import invented trading days: {st['days']} (wanted 5)"
+            srcs = {s["src"]: s for s in st["sources"]}
+            assert set(srcs) == {"recorded", "upload:t.csv"}, \
+                f"provenance lost: {sorted(srcs)}"
+            assert srcs["upload:t.csv"]["contracts"] == len(lines) - 1
+
+            # Re-importing a CORRECTED file REPLACES. Both halves matter and
+            # they fail differently: a plain INSERT doubles the rows, while an
+            # INSERT OR IGNORE keeps the count right and silently discards the
+            # correction — so counting alone passes a store that ignored every
+            # fix the user uploaded.
+            before = st["contracts"]
+            fixed = [parsed.chain[0].__class__(
+                **{**parsed.chain[0].__dict__, "bid": 99.25, "ask": 99.75})]
+            btdata.import_chain(dcon, "SPY", fixed, "upload:t.csv")
+            assert btdata.stats(dcon)["contracts"] == before, \
+                "re-importing the same contract doubled its rows instead of replacing"
+            r0 = parsed.chain[0]
+            got = dcon.execute(
+                "SELECT bid, ask FROM opt WHERE d=? AND exp=? AND cp=? AND strike=?",
+                (int(r0.date.replace("-", "")), int(r0.expiration.replace("-", "")),
+                 0 if r0.right == "C" else 1, int(round(r0.strike * 1000)))).fetchone()
+            assert got["bid"] == 99.25 and got["ask"] == 99.75, \
+                (f"a corrected re-upload was ignored: bid is still {got['bid']}. "
+                 f"The row count would look perfectly correct.")
+
+            # STRIKE ROUNDING, the quietest trap in the store. The engine keys
+            # contracts by k/1000.0, so the importer must round exactly as the
+            # recorder does. Truncation is off by one tenth of a cent on the
+            # strikes where float multiplication lands just under the integer
+            # (8.2 * 1000 is 8199.999999999999), and the failure is silent:
+            # nothing raises, the holding just never finds its contract again
+            # and quietly marks to intrinsic.
+            # These specific values are the point: int(round(x*1000)) and
+            # int(x*1000) agree on 512.5 and 640.1 and disagree here, because
+            # 32.3*1000 is 32299.999999999996. A fixture of "awkward-looking"
+            # strikes picked by eye tests nothing at all.
+            awkward = [32.3, 64.1, 128.2, 256.4, 65.1]
+            rows_a = [parsed.chain[0].__class__(
+                **{**parsed.chain[0].__dict__, "strike": s,
+                   "expiration": "2026-04-17"}) for s in awkward]
+            btdata.import_chain(dcon, "SPY", rows_a, "upload:t.csv")
+            got = sorted(r[0] / 1000.0 for r in dcon.execute(
+                "SELECT strike FROM opt WHERE exp=20260417"))
+            assert got == sorted(awkward), \
+                f"strike round-trip broke: {got} != {sorted(awkward)}"
+
+            # The two guards the parser cannot make.
+            other = [r.__class__(**{**r.__dict__, "symbol": "QQQ"})
+                     for r in parsed.chain[:2]]
+            try:
+                btdata.import_chain(dcon, "SPY", other, "x")
+                raise AssertionError("a QQQ file imported into SPY.db — opt has "
+                                     "no symbol column, so this blends two chains")
+            except btdata.ImportRefused:
+                pass
+            sat = [r.__class__(**{**r.__dict__, "date": "2026-01-10"})
+                   for r in parsed.chain[:2]]
+            try:
+                btdata.import_chain(dcon, "SPY", sat, "x")
+                raise AssertionError("a Saturday imported: imported dates BECOME "
+                                     "the engine's calendar, so it would trade it")
+            except btdata.ImportRefused:
+                pass
+            assert btdata.stats(dcon)["days"] == 5, \
+                "a refused import still wrote rows — it must be all-or-nothing"
+            del _ci
             dcon.close()
             mcon.close()
 
@@ -2213,6 +2312,11 @@ def _btdata_pipeline():
                 "no trade and no skip reason — selection never engaged"
             assert (out_dir / "report.html").is_file()
         finally:
+            for c in opened:
+                try:
+                    c.close()
+                except Exception:  # noqa: BLE001 - cleanup must not mask a failure
+                    pass
             if old is None:
                 os.environ.pop("GRINDSTONE_DATA_DIR", None)
             else:
@@ -2357,6 +2461,111 @@ def _btdata_schema():
                 os.environ.pop("GRINDSTONE_DATA_DIR", None)
             else:
                 os.environ["GRINDSTONE_DATA_DIR"] = old
+
+
+@check("chain import: header-driven, six refusals fire, missing stays NULL")
+def _chain_import():
+    """DATA_IMPORT.md's rules, each asserted individually.
+
+    Fixtures are built in code, never checked in: .gitignore blocks *.csv.gz
+    and *.db, and the credential scanner reads every tracked file with no
+    self-exemption for test data.
+
+    The refusals matter more than the happy path. Importing something
+    plausible produces a chart and a backtest that are confidently wrong,
+    which is strictly worse than a refused upload — the user of a refused
+    upload knows they have a problem."""
+    sys.path.insert(0, str(CODE))
+    from backend.chainimport import Refused, parse_text
+
+    HEAD = ("date,symbol,expiration,strike,type,bid,ask,last,volume,"
+            "open_interest,implied_volatility,delta")
+    GOOD = HEAD + "\n2026-08-05,SPY,2026-09-18,640.0,put,3.41,3.45,3.42,1204,8817,0.1412,-0.2731"
+
+    def refused(label, text, kind="option_chain", fmt="csv", contains=""):
+        try:
+            parse_text(text, kind, fmt, "t")
+        except Refused as e:
+            assert contains.lower() in str(e).lower(), \
+                f"{label}: refused for the wrong reason: {e}"
+            return e
+        raise AssertionError(f"{label}: ACCEPTED a file that must be refused")
+
+    # --- the shape holds, and the header drives it
+    p = parse_text(GOOD, "option_chain", "csv", "t")
+    assert len(p.chain) == 1 and p.chain[0].right == "P" and p.chain[0].strike == 640.0
+    assert abs(p.chain[0].iv - 0.1412) < 1e-9, "iv must stay a decimal"
+    # Column ORDER must be irrelevant. The upstream archive reordered its
+    # columns in 2024-11; a positional parse silently swaps fields across that
+    # boundary and yields files that are well-formed and completely wrong.
+    shuffled = ("zzz,delta,ask,type,strike,expiration,symbol,date,bid,implied_volatility\n"
+                "junk,-0.27,3.45,P,640,2026-09-18,SPY,2026-08-05,3.41,0.1412")
+    s = parse_text(shuffled, "option_chain", "csv", "t").chain[0]
+    assert s.strike == 640.0 and s.right == "P" and s.bid == 3.41, \
+        "header-name lookup broke: the parse went positional"
+
+    # --- MISSING IS NOT ZERO, and a real zero is still a zero
+    quiet = parse_text(HEAD + "\n2026-08-05,SPY,2026-09-18,640.0,put,,,,,,,",
+                       "option_chain", "csv", "t").chain[0]
+    assert quiet.bid is None and quiet.ask is None, \
+        f"an unquoted contract became {quiet.bid!r}/{quiet.ask!r}, wanted None"
+    assert quiet.delta is None, (
+        "an absent delta became 0.0 — bt/data.py:69 trusts any |delta| < 9.0 "
+        "verbatim and skips the model solve, so this silently replaces a "
+        "computed delta with a fabricated one")
+    real_zero = parse_text(HEAD + "\n2026-08-05,SPY,2026-09-18,640.0,put,0,0,,,,,",
+                           "option_chain", "csv", "t").chain[0]
+    assert real_zero.bid == 0.0, "a genuine zero bid must survive as 0.0"
+
+    # --- the six refusals
+    refused("unknown kind", GOOD, kind="chains", contains="unknown kind")
+    refused("IV as percent",
+            HEAD + "\n2026-08-05,SPY,2026-09-18,640,put,3.41,3.45,,,,14.12,-0.27"
+                   "\n2026-08-05,SPY,2026-09-18,645,put,4.41,4.45,,,,15.02,-0.31",
+            contains="percent")
+    refused("naive intraday timestamp",
+            "symbol,timestamp,open,high,low,close\nSPY,2026-08-05T13:30:00,1,2,0.5,1.5",
+            kind="bars", contains="no timezone")
+    refused("duplicate contract",
+            GOOD + "\n2026-08-05,SPY,2026-09-18,640.0,put,3.50,3.55,,,,0.14,-0.27",
+            contains="twice")
+    refused("missing required column",
+            "date,symbol,expiration,strike,type\n2026-08-05,SPY,2026-09-18,640,put",
+            contains="missing required column")
+    refused("json kind mismatch",
+            '{"kind":"bars","rows":[{"a":1}]}', fmt="json", contains="declares kind")
+    refused("header but no rows", HEAD, contains="no rows")
+    refused("date-only on an intraday timeframe",
+            "symbol,timestamp,timeframe,open,high,low,close\nSPY,2026-08-05,5Min,1,2,0.5,1.5",
+            kind="bars", contains="only accepted for daily")
+
+    # A refusal has to name the row, or the user is sent back to a
+    # 14,000-line spreadsheet with "invalid file" and no way in.
+    e = refused("bad number", GOOD + "\n2026-08-05,SPY,2026-09-18,650,put,x,3.4,,,,0.1,-0.2",
+                contains="not a number")
+    assert e.line == 3, f"refusal pointed at line {e.line}, wanted 3"
+
+    # A date-only stamp IS the identity for a daily bar.
+    ok = parse_text("symbol,timestamp,timeframe,open,high,low,close\n"
+                    "SPY,2026-08-05,1Day,1,2,0.5,1.5", "bars", "csv", "t")
+    assert ok.bars[0].ts == "2026-08-05"
+
+    # numpy must not arrive with it: this module is imported by the sidecar,
+    # and main.py bans heavy imports there.
+    #
+    # In a FRESH interpreter, because by the time this check runs some earlier
+    # check has already imported numpy into THIS process — asserting on
+    # sys.modules here would test the gate's own history, not chainimport.
+    import subprocess
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; import backend.chainimport;"
+         " sys.exit(1 if 'numpy' in sys.modules else 0)"],
+        cwd=CODE, capture_output=True, text=True, timeout=60,
+        stdin=subprocess.DEVNULL)
+    assert r.returncode == 0, (
+        "importing backend.chainimport pulls in numpy, which must never enter "
+        f"the sidecar process:\n{r.stderr[-400:]}")
 
 
 def dt_date(s: str):
