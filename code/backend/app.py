@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import backtests as backtests_mod
+from . import datajobs as datajobs_mod
 from . import chartobjects as chartobjects_mod
 from . import options as options_mod
 from . import opthist as opthist_mod
@@ -64,6 +65,11 @@ class State:
         self.universe = Universe()
         self.recorder = None  # set by main.py; tests may leave it None
         self.backtests = None  # BacktestManager, created by create_app
+        # One owner for both background data jobs, so "is an import already
+        # running" has a single answer. Two importers writing the same
+        # (d, exp, cp, strike) rows would interleave two files into one chain
+        # with no error anywhere.
+        self.datajobs = datajobs_mod.DataJobs()
         self._refresh_thread: threading.Thread | None = None
         self._refresh_lock = threading.Lock()
         self._live_news_last: dict[str, float] = {}
@@ -200,6 +206,25 @@ class RunIn(BaseModel):
 
 class BtDataIn(BaseModel):
     underlying: str = Field(default="SPY", min_length=1, max_length=12)
+
+
+class ImportIn(BaseModel):
+    """A PATH, not a payload. The IPC bridge hardcodes application/json with a
+    30s deadline, the sidecar is one uvicorn process whose event loop would
+    parse a base64 body inline, and python-multipart is not installed — a
+    FastAPI UploadFile route raises at IMPORT time and takes the whole sidecar
+    down at boot rather than failing one request. Settings already points the
+    app at a multi-GB database by path for the same reason."""
+    path: str = Field(min_length=1, max_length=4096)
+    kind: str = Field(default="option_chain", max_length=32)
+    underlying: str = Field(default="SPY", min_length=1, max_length=12)
+
+
+class PullIn(BaseModel):
+    symbols: list[str] = Field(default_factory=list, max_length=20)
+    start: str = Field(default="", max_length=10)
+    end: str = Field(default="", max_length=10)
+    seconds_between: float = Field(default=6.0, ge=5.0, le=10.0)
 
 
 # ------------------------------------------------------------------ factory
@@ -1004,6 +1029,39 @@ def create_app(state: State) -> FastAPI:
         if cur.rowcount == 0:
             raise HTTPException(404, "no such job")
         return {"ok": True}
+
+    @app.post("/api/datamgmt/import")
+    def data_import(body: ImportIn, s=Depends(current_session)) -> dict[str, Any]:
+        """Start a file import. Returns immediately; poll for the outcome."""
+        if body.kind not in ("option_chain", "bars"):
+            raise HTTPException(422, "kind must be 'option_chain' or 'bars' — "
+                                     "it is declared, never guessed")
+        if not Path(body.path).is_file():
+            raise HTTPException(422, f"no such file: {body.path}")
+        if not state.datajobs.start_import(body.path, body.kind, body.underlying):
+            raise HTTPException(409, "an import is already running")
+        return state.datajobs.import_status
+
+    @app.get("/api/datamgmt/import")
+    def data_import_status(s=Depends(current_session)) -> dict[str, Any]:
+        return state.datajobs.import_status
+
+    @app.get("/api/datamgmt/pull")
+    def chain_pull_status(s=Depends(current_session)) -> dict[str, Any]:
+        return state.datajobs.pull_status
+
+    @app.post("/api/datamgmt/pull")
+    def chain_pull_start(body: PullIn, s=Depends(current_session)) -> dict[str, Any]:
+        ok, note = state.datajobs.start_pull(
+            body.symbols, body.start, body.end, body.seconds_between)
+        if not ok:
+            raise HTTPException(422, note)
+        return state.datajobs.pull_status
+
+    @app.delete("/api/datamgmt/pull")
+    def chain_pull_stop(s=Depends(current_session)) -> dict[str, Any]:
+        state.datajobs.stop_pull()
+        return state.datajobs.pull_status
 
     @app.get("/api/datamgmt/usage")
     def datamgmt_usage(s=Depends(current_session)) -> dict[str, Any]:

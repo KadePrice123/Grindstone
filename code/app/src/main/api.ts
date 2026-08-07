@@ -11,7 +11,7 @@
  *     auth routes are special-cased only to *capture* it. A future
  *     token-returning route therefore cannot leak by omission.
  */
-import { ipcMain, WebFrameMain, webContents } from 'electron'
+import { dialog, ipcMain, WebFrameMain, webContents } from 'electron'
 import http from 'node:http'
 import { log } from './log'
 import type { Sidecar } from './sidecar'
@@ -193,6 +193,23 @@ export function registerApiBridge(
 ): void {
   notifyAuth = onAuthChange ?? null
   sidecarRef = sidecar
+  // A PATH, never the bytes. The request channel below hardcodes JSON with a
+  // 30s deadline, so a 1.8 MB chain file base64'd through it would both bloat
+  // and risk timing out mid-import — and DATA_IMPORT.md makes a timeout
+  // mid-commit the worst outcome, because it reads as success. The backend
+  // opens the file itself, off the event loop.
+  ipcMain.handle('data:pickFile', async () => {
+    const r = await dialog.showOpenDialog({
+      title: 'Import market data',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Market data', extensions: ['csv', 'json', 'gz'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    })
+    return r.canceled || r.filePaths.length === 0 ? null : r.filePaths[0]
+  })
+
   ipcMain.handle('api:request', async (event, req: unknown) => {
     const { method, path, body } = (req ?? {}) as {
       method?: string

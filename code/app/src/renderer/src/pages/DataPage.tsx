@@ -24,12 +24,59 @@ function bytes(n: number): string {
   return `${(n / 1024).toFixed(0)} KB`
 }
 
+interface ImportStatus {
+  state: 'idle' | 'running' | 'done' | 'refused' | 'error'
+  file?: string
+  reason?: string
+  error?: string
+  days?: number
+  contracts?: number
+  bars?: number
+  done?: number
+  total?: number
+}
+
+interface PullStatus {
+  state: 'idle' | 'running' | 'done' | 'stopped' | 'error'
+  window_from: string
+  window_to: string
+  symbols?: string[]
+  from?: string
+  to?: string
+  total?: number
+  done?: number
+  written?: number
+  skipped?: number
+  note?: string
+  last?: string
+  error?: string
+  eta_seconds?: number
+  delay?: number
+}
+
+function hhmm(sec: number): string {
+  if (sec < 90) return `${Math.round(sec)}s`
+  if (sec < 5400) return `${Math.round(sec / 60)} min`
+  return `${(sec / 3600).toFixed(1)} hours`
+}
+
 export function DataPage() {
   const [jobs, setJobs] = useState<RecordJob[] | null>(null)
   const [usage, setUsage] = useState<DataUsage | null>(null)
   const [form, setForm] = useState({ ...EMPTY })
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+
+  // Import + puller. Both are start-then-poll: a synchronous import would hit
+  // the IPC bridge's 30s deadline, and a timeout mid-commit is the one outcome
+  // DATA_IMPORT.md calls worse than a refusal, because it looks like success.
+  const [imp, setImp] = useState<ImportStatus | null>(null)
+  const [impKind, setImpKind] = useState('option_chain')
+  const [impSym, setImpSym] = useState('SPY')
+  const [pull, setPull] = useState<PullStatus | null>(null)
+  const [pullSyms, setPullSyms] = useState('SPY')
+  const [pullFrom, setPullFrom] = useState('')
+  const [pullTo, setPullTo] = useState('')
 
   // Monotonic guard: the 20s tick racing a post-add refresh made a
   // just-added job vanish when the older response landed last.
@@ -54,6 +101,58 @@ export function DataPage() {
     const t = window.setInterval(refresh, 20_000)
     return () => window.clearInterval(t)
   }, [refresh])
+
+  // Job status on its own clock, and a FASTER one while something is running:
+  // a puller stepping one ticker-day every 5-10s looks frozen on a 20s tick.
+  const pollJobs = useCallback(async () => {
+    try {
+      setImp(await api<ImportStatus>('GET', '/api/datamgmt/import'))
+      setPull(await api<PullStatus>('GET', '/api/datamgmt/pull'))
+    } catch {
+      /* the page's own error line owns real failures; a poll miss is noise */
+    }
+  }, [])
+  const running = imp?.state === 'running' || pull?.state === 'running'
+  useEffect(() => {
+    pollJobs()
+    const t = window.setInterval(pollJobs, running ? 2_500 : 15_000)
+    return () => window.clearInterval(t)
+  }, [pollJobs, running])
+
+  const pickAndImport = async () => {
+    setError(null)
+    const path = await window.grindstone.pickFile()
+    if (!path) return
+    try {
+      setImp(await api<ImportStatus>('POST', '/api/datamgmt/import', {
+        path, kind: impKind, underlying: impSym.trim().toUpperCase() || 'SPY'
+      }))
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  const startPull = async () => {
+    setError(null)
+    try {
+      setPull(await api<PullStatus>('POST', '/api/datamgmt/pull', {
+        symbols: pullSyms.split(/[,\s]+/).filter(Boolean),
+        start: pullFrom || pull?.window_from,
+        end: pullTo || pull?.window_to,
+        seconds_between: 6
+      }))
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  const stopPull = async () => {
+    try {
+      setPull(await api<PullStatus>('DELETE', '/api/datamgmt/pull'))
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    }
+  }
 
   const add = async (e: FormEvent) => {
     e.preventDefault()
@@ -213,6 +312,105 @@ export function DataPage() {
           {busy ? 'Adding…' : 'Add job'}
         </button>
       </form>
+
+      <div className="card">
+        <h2>Import a file</h2>
+        <div className="subtle" style={{ marginBottom: 10 }}>
+          CSV or JSON, from any broker export — an archived chain file imports
+          unchanged. The file is validated completely before a single row is
+          written, and a refusal names the line and the reason. Rows land in
+          the backtest store, so imported data is immediately backtestable.
+        </div>
+        <div className="acct-row">
+          <select className="field" value={impKind} onChange={(e) => setImpKind(e.target.value)}>
+            <option value="option_chain">Option chains</option>
+            <option value="bars">Price bars</option>
+          </select>
+          <input
+            className="field"
+            style={{ maxWidth: 110 }}
+            value={impSym}
+            onChange={(e) => setImpSym(e.target.value)}
+            placeholder="SPY"
+            spellCheck={false}
+            title="Which underlying's store to write. One symbol per file."
+          />
+          <button className="btn" onClick={pickAndImport} disabled={imp?.state === 'running'}>
+            {imp?.state === 'running' ? 'importing…' : 'Choose a file…'}
+          </button>
+        </div>
+        {imp && imp.state !== 'idle' ? (
+          <div className={`acct-row${imp.state === 'refused' || imp.state === 'error' ? ' bad' : ''}`}>
+            <strong>{imp.file}</strong>
+            <span className="subtle">
+              {imp.state === 'running'
+                ? `importing… ${imp.done ?? 0}/${imp.total ?? '?'} days`
+                : imp.state === 'done'
+                  ? `imported ${(imp.contracts ?? imp.bars ?? 0).toLocaleString()} rows` +
+                    (imp.days ? ` over ${imp.days} days` : '')
+                  : imp.state === 'refused'
+                    ? `refused — ${imp.reason}`
+                    : `failed — ${imp.error}`}
+            </span>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="card">
+        <h2>Chain puller</h2>
+        <div className="subtle" style={{ marginBottom: 10 }}>
+          Downloads end-of-day option chains, one ticker-day every 6 seconds,
+          from a free service that asks nothing in return — so it goes slowly on
+          purpose. OFF unless you start it.
+          {pull ? (
+            <>
+              {' '}It can only reach back to <strong>{pull.window_from}</strong>{' '}
+              (a rolling ~6 months) and stops at <strong>{pull.window_to}</strong>,
+              because an open session has no greeks yet.
+            </>
+          ) : null}
+        </div>
+        <div className="acct-row">
+          <input
+            className="field"
+            value={pullSyms}
+            onChange={(e) => setPullSyms(e.target.value)}
+            placeholder="SPY QQQ"
+            spellCheck={false}
+            style={{ maxWidth: 180 }}
+          />
+          <input className="field" type="date" value={pullFrom}
+            min={pull?.window_from} max={pull?.window_to}
+            onChange={(e) => setPullFrom(e.target.value)} />
+          <input className="field" type="date" value={pullTo}
+            min={pull?.window_from} max={pull?.window_to}
+            onChange={(e) => setPullTo(e.target.value)} />
+          {pull?.state === 'running' ? (
+            <button className="btn" onClick={stopPull}>Stop</button>
+          ) : (
+            <button className="btn" onClick={startPull}>Start</button>
+          )}
+        </div>
+        {pull && pull.state !== 'idle' ? (
+          <div className={`acct-row${pull.state === 'error' ? ' bad' : ''}`}>
+            <strong>
+              {pull.state === 'running' ? 'pulling' : pull.state}
+              {pull.total ? ` ${pull.done ?? 0}/${pull.total}` : ''}
+            </strong>
+            <span className="subtle">
+              {pull.state === 'error'
+                ? pull.error
+                : `${(pull.written ?? 0).toLocaleString()} contracts stored` +
+                  (pull.skipped ? `, ${pull.skipped} days skipped` : '') +
+                  (pull.state === 'running' && pull.total
+                    ? ` · about ${hhmm(((pull.total ?? 0) - (pull.done ?? 0)) * (pull.delay ?? 6))} left`
+                    : '')}
+              {pull.last ? ` · ${pull.last}` : ''}
+            </span>
+          </div>
+        ) : null}
+        {pull?.note ? <div className="subtle">{pull.note}</div> : null}
+      </div>
 
       {usage ? (
         <div className="card">

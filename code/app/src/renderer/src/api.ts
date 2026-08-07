@@ -9,6 +9,9 @@ declare global {
   interface Window {
     grindstone: {
       request: <T = unknown>(method: string, path: string, body?: unknown) => Promise<ApiResponse<T>>
+      /** Native file picker; an absolute path, or null if cancelled. The
+       *  renderer never handles file bytes — it hands the backend a path. */
+      pickFile: () => Promise<string | null>
       onSidecarStatus: (cb: (s: { status: string; detail?: string }) => void) => () => void
       signalUnlocked: () => void
       setTabMeta: (title: string, icon: string, depth: number, address: string) => void

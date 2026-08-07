@@ -18,6 +18,9 @@ const grindstone = {
     path: string,
     body?: unknown
   ): Promise<ApiResponse<T>> => ipcRenderer.invoke('api:request', { method, path, body }),
+  /** Native file picker; resolves to an absolute path, or null if cancelled.
+   *  The renderer never sees file bytes — it hands the backend a path. */
+  pickFile: (): Promise<string | null> => ipcRenderer.invoke('data:pickFile'),
 
   onSidecarStatus: (cb: (s: { status: string; detail?: string }) => void): (() => void) => {
     const listener = (_e: unknown, payload: { status: string; detail?: string }) => cb(payload)

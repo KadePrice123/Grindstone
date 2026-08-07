@@ -2681,6 +2681,94 @@ def _bar_cache():
                     pass
 
 
+@check("data jobs: import refuses honestly, puller guards its header and window")
+def _data_jobs():
+    """The import route and the chain puller, with no network anywhere.
+
+    The puller's guard is the load-bearing part. Today's session returns a
+    SHORTER header with no greeks, because greeks are only populated at the
+    close — and the archive this extends cannot be re-fetched at any price
+    beyond the free plan's rolling window, so a greek-less day absorbed into
+    it is permanent damage."""
+    import datetime as _dt
+    import os
+    import tempfile
+    sys.path.insert(0, str(CODE))
+    from backend import onclick
+    from backend.chainimport import Refused, read_path
+
+    # --- the header guard, character for character
+    assert onclick.HEADER.startswith("date,symbol,expiration,strike,type,last,mark,bid")
+    assert onclick.HEADER.endswith("delta,gamma,theta,vega,rho"), \
+        "the guard's header lost its greeks — which is exactly what it exists to detect"
+    assert len(onclick.HEADER.split(",")) == 21, onclick.HEADER
+
+    good = onclick.HEADER + "\n2026-08-04,SPY,2026-09-18,640,put,1,1,1,1,1,1,1,1,1,1,0.14,-0.3,0,0,0,0"
+    assert onclick.check_body(good) == good, "a canonical response was rejected"
+    assert onclick.check_body("") is None, "an empty body must read as 'no such day'"
+    assert onclick.check_body("   \n  ") is None
+    # The real live-session shape: truncated at implied_volatility, no greeks.
+    open_session = ",".join(onclick.HEADER.split(",")[:16]) + "\n2026-08-06,SPY,x,1,put,1,1,1,1,1,1,1,1,1,1,0.14"
+    assert onclick.check_body(open_session) == onclick.MISMATCH, \
+        "a greek-less open session was accepted into an irreplaceable archive"
+    assert onclick.check_body("date,symbol,junk\n1,2,3") == onclick.MISMATCH
+
+    # --- the window is COMPUTED, never remembered. A note taken on one day
+    # recorded this boundary as a permanent paywall date; it is a rolling
+    # window and had moved by 182 days when re-measured.
+    today = _dt.date(2026, 8, 6)
+    lo, hi = onclick.window(today)
+    assert hi == _dt.date(2026, 8, 5), f"the range must end YESTERDAY, got {hi}"
+    assert (today - lo).days == onclick.WINDOW_DAYS
+    s, e, note = onclick.clamp(_dt.date(2020, 1, 1), today, today)
+    assert s == lo and e == hi, (s, e)
+    assert "window" in note.lower() and "greeks" in note.lower(), \
+        f"a silently clamped range reads as the puller finding no data: {note!r}"
+    _, _, quiet = onclick.clamp(lo, hi, today)
+    assert quiet == "", f"an in-range request must not be annotated: {quiet!r}"
+    days = onclick.trading_days(_dt.date(2026, 8, 3), _dt.date(2026, 8, 9))
+    assert len(days) == 5 and all(d.weekday() < 5 for d in days), days
+    assert onclick.MIN_DELAY >= 5.0, "the pace floor protects a free service"
+
+    # --- the import route: kind is declared, never guessed
+    with tempfile.TemporaryDirectory() as td:
+        old = os.environ.get("GRINDSTONE_DATA_DIR")
+        os.environ["GRINDSTONE_DATA_DIR"] = td
+        try:
+            f = Path(td) / "chain.csv"
+            f.write_text(
+                "date,symbol,expiration,strike,type,bid,ask\n"
+                "2026-08-05,SPY,2026-09-18,640.0,put,3.41,3.45\n", encoding="utf-8")
+            p = read_path(f, "option_chain")
+            assert len(p.chain) == 1 and p.source == "upload:chain.csv"
+
+            # the same file read as the WRONG kind must refuse, not import
+            try:
+                read_path(f, "bars")
+                raise AssertionError(
+                    "a chain file imported as bars — a wrongly-guessed kind is "
+                    "discovered months later inside a backtest")
+            except Refused:
+                pass
+
+            from backend.datajobs import DataJobs
+            jobs = DataJobs()
+            assert jobs.import_status["state"] == "idle"
+            st = jobs.pull_status
+            assert st["state"] == "idle", "the puller must be OFF by default"
+            assert st["window_from"] and st["window_to"], st
+            ok, why = jobs.start_pull([], "2026-08-01", "2026-08-05")
+            assert not ok and "ticker" in why, why
+            ok, why = jobs.start_pull(["SPY"], "1999-01-01", "1999-02-01")
+            assert not ok and "free plan" in why, \
+                f"a wholly out-of-window range must be refused up front: {why!r}"
+        finally:
+            if old is None:
+                os.environ.pop("GRINDSTONE_DATA_DIR", None)
+            else:
+                os.environ["GRINDSTONE_DATA_DIR"] = old
+
+
 def dt_date(s: str):
     import datetime as _dt
     return _dt.date.fromisoformat(s)
