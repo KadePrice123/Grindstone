@@ -167,10 +167,43 @@ def main() -> None:
                     help="per-contract history window loaded into hist_chain (default 12)")
     ap.add_argument("--symbols", nargs="*", help="restrict to these underlyings")
     ap.add_argument("--db", type=Path, default=DB_PATH)
+    ap.add_argument("--engine-db", nargs="?", const="APP", default=None, metavar="DIR",
+                    help="ALSO write the BACKTEST ENGINE's store (data/backtest_data/"
+                         "<SYM>.db). Bare flag uses the app's own location; give a "
+                         "directory to put it somewhere that is not cloud-synced. "
+                         "The engine reads only this store — options_history.db "
+                         "feeds the Opt page and nothing else.")
+    ap.add_argument("--engine-months", type=int, default=24,
+                    help="window written to the engine store (default 24). The "
+                         "engine's default warmup is 260 SESSIONS and high_252 "
+                         "needs 252, so anything under ~18 months leaves the "
+                         "gated rules permanently NaN — which reports zero "
+                         "trades and no error at all.")
+    ap.add_argument("--engine-symbols", nargs="*",
+                    help="engine-store symbols (default: SPY, or --symbols)")
     args = ap.parse_args()
 
     syms = set(s.upper() for s in args.symbols) if args.symbols else None
     cutoff = (dt.date.today() - dt.timedelta(days=31 * args.months)).isoformat()
+
+    # --- the engine store, optional and explicitly bounded --------------------
+    engine_syms: set[str] = set()
+    engine_cutoff = "9999-99-99"
+    btdata = ChainRow = None
+    engine_cons: dict[str, sqlite3.Connection] = {}
+    engine_count: dict[str, int] = defaultdict(int)
+    engine_days: dict[str, set] = defaultdict(set)
+    if args.engine_db:
+        sys.path.insert(0, str(CODE))
+        from backend import btdata  # noqa: PLC0415 - optional, heavy-ish
+        from backend.chainimport import ChainRow  # noqa: PLC0415
+        engine_syms = set(s.upper() for s in (args.engine_symbols or args.symbols or ["SPY"]))
+        if syms:
+            engine_syms &= syms
+        engine_cutoff = (dt.date.today()
+                         - dt.timedelta(days=31 * args.engine_months)).isoformat()
+        print(f"engine store: {', '.join(sorted(engine_syms))} from {engine_cutoff} "
+              f"({args.engine_months} months)")
 
     if not ARCHIVE.exists() and not NEW_DIR.exists():
         sys.exit(f"no archive at {ARCHIVE} and no {NEW_DIR}")
@@ -199,6 +232,8 @@ def main() -> None:
     batch: list[tuple] = []
     for sym, day, read in iter_files(syms):
         files += 1
+        engine_batch: list = []
+        want_engine = sym in engine_syms and day >= engine_cutoff
         try:
             for (date, exp, strike, right, bid, ask, last, iv, delta, vol, oi) in parse_day(read()):
                 rows += 1
@@ -228,6 +263,28 @@ def main() -> None:
                             batch)
                         con.commit()
                         batch.clear()
+                # ---- the engine's own store ---------------------------------
+                # Through btdata.import_chain rather than a hand-rolled INSERT,
+                # so the vault takes exactly the same strike rounding, mark
+                # fallback and NULL handling as the recorder and the uploader.
+                # A second mapping here is a second chance to key contracts
+                # the engine can never find again — which does not raise.
+                if want_engine:
+                    engine_batch.append(ChainRow(
+                        date=date, symbol=sym, expiration=exp, strike=strike,
+                        right=right, bid=bid, ask=ask, last=last, mark=None,
+                        volume=vol, open_interest=oi, iv=iv, delta=delta))
+            if engine_batch:
+                ec = engine_cons.get(sym)
+                if ec is None:
+                    path = (btdata.data_db_path(sym) if args.engine_db == "APP"
+                            else Path(args.engine_db) / f"{sym}.db")
+                    Path(path).parent.mkdir(parents=True, exist_ok=True)
+                    ec = engine_cons[sym] = btdata.connect_data(path)
+                    print(f"  engine store for {sym}: {path}")
+                btdata.import_chain(ec, sym, engine_batch, "vault")
+                engine_count[sym] += len(engine_batch)
+                engine_days[sym].add(day)
         except Exception as e:  # a corrupt day must not kill a 10k-file pass
             print(f"  SKIPPED {sym} {day}: {type(e).__name__}: {e}")
         if files % 500 == 0:
@@ -272,6 +329,29 @@ def main() -> None:
     con.close()
     size = args.db.stat().st_size / 1e6
     print(f"{args.db.name}: {kept_recent:,} history rows, {len(out):,} band rows, {size:.0f} MB")
+
+    # ---- the engine store, reported in the terms that decide whether a
+    #      backtest run on it will mean anything -----------------------------
+    for sym, ec in sorted(engine_cons.items()):
+        st = btdata.stats(ec)
+        path = Path(ec.execute("PRAGMA database_list").fetchone()[2])
+        ec.close()
+        mb = path.stat().st_size / 1e6 if path.is_file() else 0
+        print(f"{path.name}: {st['days']} sessions {st['first']} .. {st['last']}, "
+              f"{engine_count[sym]:,} contracts, {mb:.0f} MB")
+        # NOT a silent cap. The engine warms up over 260 sessions by default
+        # and high_252 needs 252 of them; below that, every gated rule stays
+        # NaN, NaN is falsey, and the run reports zero trades with no error —
+        # which reads exactly like a strategy that simply never triggered.
+        if st["days"] < 260:
+            print(f"  WARNING: {st['days']} sessions is under the engine's 260-session "
+                  f"warmup. Rules using sma_200 / high_252 / vix_rank will be NaN for "
+                  f"the whole run and report zero trades WITHOUT an error. "
+                  f"Re-run with --engine-months {max(24, args.engine_months * 2)}.")
+        if mb > 400:
+            print(f"  NOTE: {mb:.0f} MB inside a Drive-synced folder. It is derived and "
+                  f"re-buildable; pass --engine-db <dir> to put it elsewhere and point "
+                  f"Settings > backtest_options_db at it.")
 
 
 if __name__ == "__main__":

@@ -2387,9 +2387,12 @@ def _btdata_schema():
                 f"migration left user_version at {ver}, wanted {btdata.SCHEMA_VERSION}"
             aged_opt = {r[1] for r in con.execute("PRAGMA table_info(opt)")}
             aged_bars = {r[1] for r in con.execute("PRAGMA table_info(bars)")}
-            assert {"src", "imported_at"} <= aged_opt, \
+            assert "src_id" in aged_opt, \
                 f"ALTER never reached an existing opt table: {sorted(aged_opt)}"
-            assert "src" in aged_bars, f"bars.src missing: {sorted(aged_bars)}"
+            assert "src_id" in aged_bars, f"bars.src_id missing: {sorted(aged_bars)}"
+            assert con.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='sources'"
+            ).fetchone()[0] == 1, "the sources table never reached an existing db"
             assert con.execute("SELECT COUNT(*) FROM opt").fetchone()[0] == 1, \
                 "the migration destroyed rows it should have preserved"
             con.close()
@@ -2428,7 +2431,8 @@ def _btdata_schema():
             dcon = btdata.connect_data(store); opened.append(dcon)
             btdata.sync_from_recorded(mcon, dcon, "SPY")
             quiet = dcon.execute(
-                "SELECT bid, ask, mark, delta, src FROM opt WHERE strike=400000").fetchone()
+                "SELECT o.bid, o.ask, o.mark, o.delta, s.src FROM opt o"
+                " LEFT JOIN sources s ON s.id=o.src_id WHERE o.strike=400000").fetchone()
             assert quiet is not None, "the unquoted contract was dropped entirely"
             assert quiet["bid"] is None, f"unquoted bid stored as {quiet['bid']!r}, wanted NULL"
             assert quiet["ask"] is None, f"unquoted ask stored as {quiet['ask']!r}, wanted NULL"

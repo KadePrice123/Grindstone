@@ -37,16 +37,24 @@ CREATE TABLE IF NOT EXISTS opt (
     vol    REAL, oi REAL,
     delta  REAL,               -- NULL = let the engine solve a model delta
     iv     REAL,
-    src    TEXT,               -- provenance: 'recorded', 'onclickmedia',
-    imported_at TEXT,          --   'upload:<file>', 'vault'. NULL = pre-v1.
+    src_id INTEGER,            -- -> sources.id. NULL = written before v1.
     PRIMARY KEY (d, exp, cp, strike)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS bars (
     d INTEGER NOT NULL,        -- trading date, yyyymmdd (ET)
     t TEXT NOT NULL,           -- 'H:MM AM/PM' ET, the engine's parse format
     o REAL, h REAL, l REAL, c REAL,
-    src TEXT,
+    src_id INTEGER,
     PRIMARY KEY (d, t)
+);
+-- Provenance, normalised. Carrying 'vault' + an ISO timestamp on every row
+-- measured at +40% file size (28 bytes/row); an integer id costs +2%. On a
+-- two-year SPY load that is 156 MB, in a folder Google Drive mirrors.
+CREATE TABLE IF NOT EXISTS sources (
+    id       INTEGER PRIMARY KEY,
+    src      TEXT NOT NULL UNIQUE,
+    first_at TEXT NOT NULL,
+    last_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
@@ -59,8 +67,8 @@ CREATE TABLE IF NOT EXISTS sync_state (
 #: tell which of them wrote a row. Two copies of this text is two chances for
 #: them to drift.
 _OPT_INSERT = ("INSERT OR REPLACE INTO opt (d, exp, cp, strike, bid, ask,"
-               " mark, vol, oi, delta, iv, src, imported_at)"
-               " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+               " mark, vol, oi, delta, iv, src_id)"
+               " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
 
 SCHEMA_VERSION = 1
 
@@ -68,9 +76,8 @@ SCHEMA_VERSION = 1
 #: Guarded by user_version, exactly as marketdb does it — see connect_data.
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
-        "ALTER TABLE opt ADD COLUMN src TEXT",
-        "ALTER TABLE opt ADD COLUMN imported_at TEXT",
-        "ALTER TABLE bars ADD COLUMN src TEXT",
+        "ALTER TABLE opt ADD COLUMN src_id INTEGER",
+        "ALTER TABLE bars ADD COLUMN src_id INTEGER",
     ),
 }
 
@@ -108,6 +115,19 @@ def _in_market_hours(et: dt.datetime) -> bool:
 
 def _ymd(d: dt.date) -> int:
     return d.year * 10000 + d.month * 100 + d.day
+
+
+def _source_id(con: sqlite3.Connection, src: str, stamp: str) -> int:
+    """The row id for a provenance string, created on first sight.
+
+    first_at/last_at live here rather than on every row: the question anyone
+    actually asks is "when did this source last write", not "when was this one
+    contract touched"."""
+    con.execute(
+        "INSERT INTO sources (src, first_at, last_at) VALUES (?,?,?)"
+        " ON CONFLICT(src) DO UPDATE SET last_at=excluded.last_at",
+        (src, stamp, stamp))
+    return con.execute("SELECT id FROM sources WHERE src=?", (src,)).fetchone()[0]
 
 
 def _now_iso() -> str:
@@ -167,10 +187,11 @@ def stats(con: sqlite3.Connection) -> dict:
     # point of the provenance column is that a backtest can be traced to the
     # data it ran on.
     sources = [
-        {"src": r[0] or "unknown", "contracts": r[1], "days": r[2]}
+        {"src": r[0] or "unknown", "contracts": r[1], "days": r[2], "last_at": r[3]}
         for r in con.execute(
-            "SELECT src, COUNT(*), COUNT(DISTINCT d) FROM opt"
-            " GROUP BY src ORDER BY COUNT(*) DESC")
+            "SELECT s.src, COUNT(*), COUNT(DISTINCT o.d), s.last_at"
+            " FROM opt o LEFT JOIN sources s ON s.id = o.src_id"
+            " GROUP BY o.src_id ORDER BY COUNT(*) DESC")
     ]
     return {"days": days, "first": _fmt(first), "last": _fmt(last),
             "contracts": contracts, "bar_days": bar_days, "sources": sources}
@@ -210,6 +231,8 @@ def import_chain(data_con: sqlite3.Connection,
     """
     u = underlying.upper()
     stamp = _now_iso()
+    sid = _source_id(data_con, source, stamp)
+    data_con.commit()
     rows = list(rows)
 
     wrong = {r.symbol for r in rows if r.symbol != u}
@@ -258,7 +281,7 @@ def import_chain(data_con: sqlite3.Connection,
                 # Holding.mark quietly falls back to intrinsic.
                 int(round(float(r.strike) * 1000)),
                 r.bid, r.ask, mark, r.volume, r.open_interest,
-                r.delta, r.iv, source, stamp,
+                r.delta, r.iv, sid,
             ))
         with data_con:  # one short transaction per day
             data_con.executemany(
@@ -279,6 +302,8 @@ def import_bars(data_con: sqlite3.Connection,
                 source: str) -> dict:
     """Bars for intraday range (ATR / day_range). Same symbol boundary."""
     u = underlying.upper()
+    sid = _source_id(data_con, source, _now_iso())
+    data_con.commit()
     rows = list(rows)
     wrong = {r.symbol for r in rows if r.symbol != u}
     if wrong:
@@ -296,11 +321,11 @@ def import_bars(data_con: sqlite3.Connection,
                 continue
             et = _et(parsed)
             day, label = et.date(), et.strftime("%I:%M %p").lstrip("0")
-        out.append((_ymd(day), label, r.open, r.high, r.low, r.close, source))
+        out.append((_ymd(day), label, r.open, r.high, r.low, r.close, sid))
     if out:
         with data_con:
             data_con.executemany(
-                "INSERT OR REPLACE INTO bars (d, t, o, h, l, c, src)"
+                "INSERT OR REPLACE INTO bars (d, t, o, h, l, c, src_id)"
                 " VALUES (?,?,?,?,?,?,?)", out)
     return {"bars": len(out), "source": source}
 
@@ -315,6 +340,8 @@ def sync_from_recorded(market_con: sqlite3.Connection,
     Short transactions per day so the recorder is never starved."""
     u = underlying.upper()
     stamp = _now_iso()
+    sid = _source_id(data_con, "recorded", stamp)
+    data_con.commit()
     state = dict(data_con.execute("SELECT key, value FROM sync_state"))
     last_chain = state.get("chain_last_ts", "")
 
@@ -369,7 +396,7 @@ def sync_from_recorded(market_con: sqlite3.Connection,
                 d_i, _ymd(exp.date()), 0 if r["right"] == "C" else 1,
                 int(round(float(r["strike"]) * 1000)),
                 r["bid"], r["ask"], mark, r["volume"], r["open_interest"],
-                r["delta"], r["iv"], "recorded", stamp,
+                r["delta"], r["iv"], sid,
             ))
         with data_con:  # one short transaction per day
             data_con.executemany(
@@ -403,12 +430,12 @@ _OPT_INSERT, out)
             label = ("4:00 PM" if tf == "1Day"
                      else et.strftime("%I:%M %p").lstrip("0"))
             out.append((_ymd(et.date()), label, r["open"], r["high"],
-                        r["low"], r["close"], "recorded"))
+                        r["low"], r["close"], sid))
             newest_bar = max(newest_bar, r["ts"])
         if out:
             with data_con:
                 data_con.executemany(
-                    "INSERT OR REPLACE INTO bars (d, t, o, h, l, c, src)"
+                    "INSERT OR REPLACE INTO bars (d, t, o, h, l, c, src_id)"
                     " VALUES (?,?,?,?,?,?,?)", out)
                 data_con.execute(
                     "INSERT OR REPLACE INTO sync_state VALUES ('bars_last_ts', ?)",
