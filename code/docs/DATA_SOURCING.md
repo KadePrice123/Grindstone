@@ -188,10 +188,37 @@ Three tiers, in descending order of what they actually promise:
 3. **A live key** — all-or-nothing; Alpaca does not scope plain key pairs. May
    be used, but the UI must state that this key can trade.
 
-**Requirement DS-10 — verify, do not trust the label.** On save, probe what the
-key can actually do (does the trading endpoint answer?) and report it. Without
-this, "data key" is only a word the user typed, and the guarantee rests on them
-not making a mistake late at night.
+**Requirement DS-10 — probe the key, and report only what is knowable.**
+
+*(Restated after adversarial review. The first version — "verify the key cannot
+trade" — is NOT IMPLEMENTABLE: Alpaca does not scope plain key pairs, so no
+read-only call can prove a negative about one. A requirement that cannot be met
+is worse than none, because it will be marked done.)*
+
+On save, probe both Alpaca trading hosts with read-only GETs and record one of
+three verdicts:
+
+- **`LIVE_CAPABLE`** — a live host authenticated. Say it in those words: *this
+  key can place real orders.*
+- **`PAPER_ONLY`** — only the paper host authenticated. This key cannot move
+  real money. It is **not** "read-only" — it can still place paper orders and
+  reset the paper account, and the UI must never call it read-only.
+- **`UNDETERMINED`** — network error, 429, or an ambiguous answer. Never
+  recorded as safe.
+
+Fail closed: both hosts answering means `LIVE_CAPABLE`. The unattended toggle
+**refuses** `LIVE_CAPABLE` and `UNDETERMINED` unless the user explicitly
+overrides with the consequence stated in front of them.
+
+**This failure mode is already shipped.** `kind='data'` exists today and its
+adapter only pings the news endpoint (`brokers/alpaca.py:91-104`), so a live,
+fully order-capable key enrolled as "Data only" gets a green **Connected**
+right now. Fixing that is part of this requirement, not a separate task.
+
+OAuth (tier 1) is **out of scope for v1** for a concrete reason rather than
+effort: both HTTP clients hardcode key-pair headers
+(`alpaca.py:68-71`, `alpaca_data.py:163-166`), so a Bearer token cannot be sent
+by either without an auth-mode branch and a refresh path.
 
 **Requirement DS-11 — proportional protection.** Because a tier-1 or tier-2 key
 **cannot trade**, it may be stored under OS-bound encryption for unattended use.
@@ -202,7 +229,32 @@ synced folder, default off"), and `RESEARCH.md:612` records the same. The user's
 
 The blob goes in `%LOCALAPPDATA%`, **never** in `data_dir()` — that tree is
 Drive-synced, and §7.9 makes "outside every synced folder" a placement rule the
-gate should enforce (it currently does not).
+gate should enforce (it currently does not). The property that a stolen blob is
+useless off-machine holds *because* `%LOCALAPPDATA%` does not roam: the DPAPI
+masterkey lives in roaming `%APPDATA%`, so moving the blob there "for symmetry"
+would silently destroy the guarantee while every test still passed.
+
+**Three things this must never do**, each an easy and catastrophic shortcut:
+
+1. **Never wrap the DEK.** §6.6 sanctions a DPAPI-wrapped *DEK* for the separate
+   "skip password on this machine" convenience. Reusing that blob here would
+   hand a background process the key to the user's **live trading
+   credentials** — the exact inversion of this feature's premise.
+2. **Never store the system key in `accounts`/`secrets`.** Two copies with
+   different lifetimes is the bug class that produces "it worked yesterday",
+   and enrolling it as `kind='data'` puts it at `_KIND_PREFERENCE` rank 0
+   (`market.py:22`), silently making it the source for **every** interactive
+   quote, chart and chain — an entitlement downgrade to IEX/indicative with no
+   UI event. The key lives only in the blob; a secret-free metadata file beside
+   it carries the verdict, the key-id last 4, and the enrolment date.
+3. **Never add a system-key fallback to `State.creds_for`.** It has eight
+   interactive callers. Add a separate `State.system_creds()` injected only at
+   the recorder entry point.
+
+On decryption failure the resolver returns `None` — a normal state, never an
+exception, never a retry loop, never a fall back to the user's vault — and the
+recorder writes a system-key-specific status, because `last_status` is the only
+surface the user has.
 
 **Requirement DS-12 — Electron `safeStorage` vs Python DPAPI is a real fork.**
 `safeStorage` is a main-process API, so choosing it forces the auto-start unit
@@ -221,7 +273,16 @@ libsecret/keyring on Linux.
   in. Bars backfill is nearly free — the collector already resumes from
   `MAX(ts)` (`recorder.py:149-157`).
 - **Unattended** (requires DS-11): the recorder holds the system key and runs
-  with no UI session at all.
+  with no app sign-in at all.
+
+**The promise is "starts at your WINDOWS LOGIN", not "starts with the PC".**
+*(Corrected after review — the original wording was unachievable.)* A
+user-scope DPAPI blob can only be decrypted inside that user's logged-on
+session, so a machine rebooted and left sitting at the login screen records
+nothing. The autostart unit is therefore Task Scheduler with an at-logon
+trigger and an interactive token — not a service (LocalSystem cannot read a
+user-scope blob), and not S4U (no access to encrypted data). Say this plainly
+in the UI, or the first overnight test reads as a bug.
 
 **The cost that must be stated out loud:** chain snapshots are point-in-time and
 **cannot be backfilled from Alpaca at any plan**. An overnight lock permanently
