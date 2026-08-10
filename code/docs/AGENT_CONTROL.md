@@ -3,10 +3,15 @@
 Status: **specification, not yet built.** Written before the code so it is built
 against a decided shape.
 
-An AI drives the app the way a person does: it reads the rendered page, clicks,
-types, presses buttons, reads text back. Kade enables it deliberately; while it
-is on, the app runs on a **system key that cannot trade**, so an agent filling
-in forms is safe by construction rather than by my correctness.
+An AI drives **a second instance of the app** the way a person does — its own
+labeled workspace, its own charts and forms — while the user keeps working in
+theirs, watching the agent live from the AI panel (the shape of Claude Code's
+browser feature). The two instances share one sidecar and separate at the
+session: the agent's session carries **no vault access and a system key that
+cannot trade**, so an agent filling in forms is safe by construction rather
+than by my correctness. Data crosses between the two workspaces only through
+the Get/Post primitive ([DATA_EXCHANGE.md](DATA_EXCHANGE.md)) — deliberately,
+typed, and stamped with where it came from.
 
 A secondary goal: reduce dependence on screenshot e2e. That goal constrains the
 design — see §7.
@@ -45,38 +50,106 @@ because it fails open on the next route somebody adds.
 
 ---
 
-## 2. The system-key swap — the primary guarantee
+## 2. The system-key split — the primary guarantee
 
-**Decision.** While agent control is enabled, the app resolves broker
-credentials to the **system key** (per [DATA_SOURCING.md](DATA_SOURCING.md) §6.2
-— OAuth `data` scope, or a paper key), never the user's trading key.
+**Decision (revised).** The agent runs in a **second app instance** sharing
+one sidecar with the user's instance, on an **agent-flagged session that
+carries no DEK** and resolves broker data through `State.system_creds()`
+(the `PAPER_ONLY` recording key) — while the user's own session keeps the
+vault. The user keeps working on real data while the agent works beside them.
 
-This is the load-bearing guarantee, and it is stronger than any check I write,
-because it is enforced by the broker.
+This is the load-bearing guarantee, and it is stronger than any check I
+write, because a session with no DEK **structurally cannot** unwrap broker
+credentials, and the key it does hold cannot trade at a server we don't
+control.
 
-**Requirement AC-3.** The swap lives in `State.creds_for` (`app.py:86`) — the
-single function every broker call resolves credentials through. Not in routes,
-not in the UI. Anywhere else and the next call site added bypasses it.
+**AC-4 is superseded, and the record of why matters.** The first revision
+made the swap app-wide because `creds_for` borrows the newest unlocked
+session, so a credential-less agent session was impossible *within one
+instance*. The cost was that enabling the agent silently downgraded the
+user's own charts and chains to IEX/indicative entitlements. Kade's
+requirement — "the AI works alongside me while I keep working" — is exactly
+the case that made that cost unacceptable, and the second instance is what
+makes per-session separation sound. Three consequences, each a one-line
+mistake away from a quiet failure:
 
-**Requirement AC-4 — it is APP-WIDE, not per-session.** This is forced, not
-chosen: `creds_for` borrows the **newest unlocked session for the user**
-(`sessions.py:93`), so a "read-only agent session" cannot be made
-credential-less while the human is also signed in — the recorder and the quote
-path would still find the human's session. Therefore agent mode swaps
-credentials for the whole app while it is on. This is also the honest UX: there
-is never ambiguity about which key is live.
+**Requirement AC-3 (revised).** `sessions.py` gains `agent: bool` on the
+session entry and snapshot; `POST /api/auth/agent-session` (requiring an
+unlocked *human* session) mints the agent's token with `dek=b""`. Where
+`s.agent`, market-data handlers resolve through `system_creds()` — the
+explicit, intended path for exactly this caller, per that function's own
+docstring.
 
-**Requirement AC-5 — fail closed.** If no system key is configured, enabling
-agent control **refuses**. It must never silently fall back to the user's key.
+**Requirement AC-4 (new) — `any_for_user` skips agent sessions.** The
+recorder and background refresher borrow credentials by newest `last_seen`;
+without the filter they borrow the agent's **empty** vault and background
+market work silently dies while looking unlocked. When only the agent
+session is unlocked, `creds_for` returns None and callers skip — the
+docstring's existing contract, now decided explicitly.
 
-**Requirement AC-6 — the agent cannot disable agent mode.** The toggle is on the
-allow-list as readable and on the blocked list as writable. Only the human, at
-the real UI, or by locking the app. An agent that can un-restrict itself makes
-every other control decorative.
+**Requirement AC-5 — fail closed.** No readable system key → minting an
+agent session **refuses** (503). It must never fall back to the user's key —
+that inversion would hand a CDP-reachable instance the live trading
+credential.
 
-**Requirement AC-7 — unmistakable while on.** A persistent banner, and the
-session's provenance labels say which key is live. The user must never mistake
-an agent-driven session for their own.
+**Requirement AC-6 — the agent cannot free itself.** Agent sessions get 403
+on `/api/accounts*`, `/api/syskey*`, `/api/auth/agent-session`,
+`PUT /api/settings`, `PUT /api/wheels`. Lock kills every session for the
+user, agent included — the existing `revoke_user` is the kill switch, free.
+
+**Requirement AC-7 — unmistakable while on.** The agent instance's chrome is
+visibly the AI workspace (banner + title), its charts are listed as "the
+agent's charts", and payload provenance stamps `workspace: 'agent'`. The
+user must never mistake the agent's window, documents, or data for their own.
+
+---
+
+## 2b. The second instance
+
+**Requirement AC-21 — one sidecar, two shells.** The user's instance spawns
+the agent shell with env — the same pattern it uses to hand the boot token to
+the sidecar today: `GRINDSTONE_ATTACH_PORT`, `GRINDSTONE_BOOT_TOKEN`
+(shared, not re-minted), `GRINDSTONE_AGENT=1`, `GRINDSTONE_SESSION_TOKEN`
+(minted before spawn), `GRINDSTONE_CDP_PORT`. The sidecar module grows an
+attach branch: skip launch, verify `/api/health` with the token, emit ready.
+A connection failure emits `crashed`, and the existing handler already
+auto-locks.
+
+**Requirement AC-22 — separate Chromium profile, bound lifetime.** The agent
+shell sets `userData` to `<dataDir>/agent-profile` before ready (two
+instances on one profile is an untested hazard; nothing overrides `userData`
+today), and its lifetime is bound to one sidecar generation: a sidecar
+restart mints a new port+token, so the user shell kills and respawns the
+agent shell with fresh env. No re-handshake protocol.
+
+**Requirement AC-23 — the AI workspace is a key prefix, backend-enforced.**
+Same `user_id` (a second user is a dead end — sessions carry the DEK and the
+vault unwraps per-user from a password). Every chart-objects key the agent
+instance builds is prefixed `agent|`; the **backend** rejects an agent
+session writing an unprefixed key (403). One-way: the human may read and
+write anything — a human deliberately touching agent docs is fine; the
+reverse is the threat. Rows are disjoint by key, so the single-writer race
+between instances never arises, and deliberate crossing happens only through
+the datapad ([DATA_EXCHANGE.md](DATA_EXCHANGE.md)), stamped with its source
+workspace.
+
+**Requirement AC-24 — the live view.** The user instance's **main process**
+owns a CDP client to the agent shell's debugging port; frames from
+`Page.startScreencast` relay to the AI panel over IPC, and panel clicks go
+back as `Input.dispatchMouseEvent` (trusted input — the e2e harness's proven
+recipe). Each WebContentsView is its own CDP target, so the agent reports
+its active view for the parent to match — genuinely new plumbing. The
+debugging port is an unauthenticated loopback door that grants trusted
+input; it is survivable **only** because the agent instance cannot trade
+(no DEK, paper key), and it must never be opened on the user's instance.
+`Page.startScreencast` on Electron 43 is unproven in this repo — the build
+step that lands it is where that risk surfaces, and `captureScreenshot`
+polling is the fallback.
+
+**Requirement AC-25 — the AI panel is a real page.** No AI surface exists in
+code today (no page, no route, no stub). Adding it moves the `urls.ts` PAGES
+and `tabs.ts` PAGE_NAMES pair together, and must resolve the documented
+collision with the ticker symbol "AI".
 
 ---
 

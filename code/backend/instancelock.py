@@ -33,10 +33,17 @@ from pathlib import Path
 
 from .logs import LOG
 
-#: The dynamic/private range. Derived, not fixed, so two data directories do
-#: not contend — and never colliding with the sidecar's own OS-assigned port.
-_BASE = 49152
-_SPAN = 16384
+#: Derived, not fixed, so two data directories do not contend. The range is
+#: deliberately BELOW every OS's dynamic/ephemeral port range — Windows
+#: assigns outbound connections from 49152-65535 and Linux from 32768-60999 —
+#: because the first version derived ports at 49152+ and the gate caught a
+#: real transient collision: a browser connection happened to occupy the
+#: derived port, the lock read it as "another recorder", and the failure
+#: vanished on re-run. A lock that can be stolen by any passing TCP
+#: connection is not a lock; the sidecar's own OS-assigned port can also
+#: never land here.
+_BASE = 28000
+_SPAN = 4000
 
 
 def port_for(path: Path | str) -> int:

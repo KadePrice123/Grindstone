@@ -957,7 +957,8 @@ beside it, written before the code so each is built against a decided shape:
 |---|---|
 | [DATA_IMPORT.md](DATA_IMPORT.md) | CSV/JSON file formats and the rules the importer enforces. **Built.** |
 | [DATA_SOURCING.md](DATA_SOURCING.md) | Per-kind provider priority, storage relocation, the recording server and the system key, coverage/backfill, auto-record favourites. |
-| [AGENT_CONTROL.md](AGENT_CONTROL.md) | An AI driving the app like a person; `robots.md`; the system-key swap that makes it safe. |
+| [AGENT_CONTROL.md](AGENT_CONTROL.md) | The AI's second app instance beside the user's; the no-DEK agent session and system key; the live view; `robots.md`. |
+| [DATA_EXCHANGE.md](DATA_EXCHANGE.md) | Get data / Post data: enrolled elements hand over typed payloads, targets apply what they understand, everything else greys out. |
 | [OPTIONS.md](OPTIONS.md) · [CONSTRAINTS.md](CONSTRAINTS.md) | Options surfaces and chart constraint behaviour. |
 
 ## 11. Explicitly out of scope (v1)
