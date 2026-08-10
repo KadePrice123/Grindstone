@@ -74,6 +74,102 @@ export function buildChartDocPayload(args: {
   }
 }
 
+/** One contract, ALL 13 backend fields (plus the grid's derived values when
+ *  sourced from a heatmap cell). Built from the backend envelope on purpose:
+ *  the page-local Contract interfaces carry 9 fields, and serializing from
+ *  them would silently drop four greeks that are already on the wire. */
+export function buildContractPayload(args: {
+  contract: Record<string, unknown>
+  page: string
+  address: string
+  symbol: string
+}): DataPayload {
+  return {
+    v: 1,
+    kind: 'contract',
+    data: args.contract,
+    provenance: provenance({ page: args.page, address: args.address, symbol: args.symbol }),
+  }
+}
+
+/** The whole chain envelope, verbatim, plus the query that produced it. */
+export function buildChainPayload(args: {
+  envelope: Record<string, unknown>
+  page: string
+  address: string
+  symbol: string
+}): DataPayload {
+  return {
+    v: 1,
+    kind: 'chain',
+    data: args.envelope,
+    provenance: provenance({ page: args.page, address: args.address, symbol: args.symbol }),
+  }
+}
+
+// ------------------------------------------------------------- compatibility
+/** What each TARGET class accepts (DX-2: declared on the target, appears on
+ *  the source). This map is the renderer's authority; main mirrors it for
+ *  picker greying, and the gate pins the two against each other. */
+export const ACCEPTS: Record<string, PayloadKind[]> = {
+  chart: ['contract', 'chain', 'drawing', 'chart-doc'],
+  'backtest-form': ['contract', 'chain', 'backtest-spec'],
+}
+
+// ------------------------------------------------------------------ applying
+export interface ChartEngine {
+  addLeg(l: Record<string, unknown>): { ok: true; id: string }
+  addLegGroup(specs: Array<Record<string, unknown>>): string
+}
+
+type ApplyResult = { ok: true; what: string } | { ok: false; reason: string }
+
+/** Post onto a chart, THROUGH THE LIVE ENGINE — never a direct PUT: the
+ *  400ms whole-doc autosave silently reverts out-of-band writes (the proven
+ *  in-repo failure). A refusal is a valid conversion and carries its reason. */
+export function applyToChart(engine: ChartEngine, payload: DataPayload): ApplyResult {
+  if (payload.kind === 'contract') {
+    const c = payload.data as { right?: string; expiration?: string; strike?: number; occ_symbol?: string }
+    if (!c.right || !c.expiration || typeof c.strike !== 'number') {
+      return { ok: false, reason: 'contract payload is missing strike/expiration/right' }
+    }
+    engine.addLeg({
+      side: 'long',            // the safe default; flipped in the LegEditor
+      right: c.right,
+      expiration: c.expiration,
+      strike: c.strike,
+      dteTol: 3,
+      strikeTol: 4,
+      pick: c.occ_symbol,
+    })
+    return { ok: true, what: `leg ${c.strike}${c.right} ${c.expiration}` }
+  }
+  if (payload.kind === 'chain') {
+    const rows = (payload.data as { contracts?: Array<Record<string, unknown>> }).contracts ?? []
+    const seen = new Set<string>()
+    const distinct = rows.filter((r) => {
+      const k = `${r.strike}|${r.expiration}|${r.right}`
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+    if (distinct.length > 12) {
+      return {
+        ok: false,
+        reason: `chain has ${distinct.length} contracts; charts hold 12 legs — ` +
+                `narrow the window or post one contract`,
+      }
+    }
+    if (distinct.length === 0) return { ok: false, reason: 'the chain payload holds no contracts' }
+    engine.addLegGroup(distinct.map((r) => ({
+      side: 'long', right: r.right, expiration: r.expiration, strike: r.strike,
+      dteTol: 3, strikeTol: 4, pick: r.occ_symbol,
+    })))
+    return { ok: true, what: `${distinct.length}-leg group` }
+  }
+  return { ok: false, reason: `a chart does not accept ${payload.kind} yet` }
+}
+
 // --------------------------------------------------------------------- pad
 export interface PadEntry {
   id: string
@@ -87,6 +183,20 @@ export interface PadEntry {
  *  be indistinguishable from one that worked. */
 export async function grab(payload: DataPayload, label = ''): Promise<PadEntry> {
   return api<PadEntry>('POST', '/api/notepad', { payload, label })
+}
+
+/** The pad's entries, newest first (the backend orders them). */
+export async function listPad(): Promise<PadEntry[]> {
+  return api<PadEntry[]>('GET', '/api/notepad')
+}
+
+/** The quick-post rule (DX-6): the NEWEST entry whose kind the target class
+ *  accepts. Null is an announceable outcome, not an error. */
+export function mostRecentCompatible(
+  entries: PadEntry[], targetClass: string
+): PadEntry | null {
+  const ok = new Set(ACCEPTS[targetClass] ?? [])
+  return entries.find((e) => ok.has(e.payload.kind)) ?? null
 }
 
 /** Announce what a data action did. The quick variants skip every picker, so

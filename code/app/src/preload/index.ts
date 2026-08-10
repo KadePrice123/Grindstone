@@ -110,9 +110,9 @@ const grindstone = {
    *  element sat under the right-click — and the INTENT (left = deliberate,
    *  right = quick). */
   onDataAction: (
-    cb: (a: { tool: string; intent: 'primary' | 'quick'; spawn: { x: number; y: number } }) => void
+    cb: (a: { tool: string; intent: 'primary' | 'quick'; spawn: { x: number; y: number }; entryId?: string }) => void
   ): (() => void) => {
-    const h = (_e: unknown, a: { tool: string; intent: 'primary' | 'quick'; spawn: { x: number; y: number } }): void => cb(a)
+    const h = (_e: unknown, a: { tool: string; intent: 'primary' | 'quick'; spawn: { x: number; y: number }; entryId?: string }): void => cb(a)
     ipcRenderer.on('data:action', h)
     return () => ipcRenderer.removeListener('data:action', h)
   },

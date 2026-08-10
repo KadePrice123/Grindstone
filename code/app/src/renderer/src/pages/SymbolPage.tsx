@@ -5,7 +5,7 @@
  * feeds the data-draw-* testability attrs and the floating DrawEditor.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { buildChartDocPayload, grab, announce } from '../datapad'
+import { applyToChart, buildChartDocPayload, grab, announce, listPad, mostRecentCompatible } from '../datapad'
 import { api, ApiError, SymbolSummary } from '../api'
 import { makeChartStore } from '../chartStore'
 import {
@@ -357,21 +357,43 @@ export function SymbolPage({
   // the WHOLE chart doc — the spawn-coordinate hit-test for single drawings
   // rides the enrollment pass. The builder is pure; the notepad validates.
   useEffect(() => {
-    const off = window.grindstone.onDataAction(({ tool }) => {
-      if (tool !== 'data:get') return
+    const off = window.grindstone.onDataAction(({ tool, entryId }) => {
       const engine = draw.current
-      if (!engine) return
-      const payload = buildChartDocPayload({
-        key: drawKeyRef.current,
-        doc: engine.getDoc(),
-        page: 'symbol',
-        address: `${symbol.toLowerCase()}.gs`,
-        symbol,
-        timeframe,
-      })
-      grab(payload)
-        .then((e) => announce(`grabbed: ${e.label || 'chart ' + symbol}`))
-        .catch((err) => announce(`get data failed: ${err instanceof Error ? err.message : err}`))
+      if (tool === 'data:get') {
+        if (!engine) return
+        const payload = buildChartDocPayload({
+          key: drawKeyRef.current,
+          doc: engine.getDoc(),
+          page: 'symbol',
+          address: `${symbol.toLowerCase()}.gs`,
+          symbol,
+          timeframe,
+        })
+        grab(payload)
+          .then((e) => announce(`grabbed: ${e.label || 'chart ' + symbol}`))
+          .catch((err) => announce(`get data failed: ${err instanceof Error ? err.message : err}`))
+        return
+      }
+      if (tool === 'data:post' || tool === 'data:apply') {
+        if (!engine) return
+        void listPad()
+          .then((entries) => {
+            // data:apply carries the picker's choice; a quick data:post takes
+            // the newest compatible entry -- and says which one it took,
+            // because the picker was skipped (DX-6).
+            const entry = entryId
+              ? entries.find((e) => e.id === entryId)
+              : mostRecentCompatible(entries, 'chart')
+            if (!entry) {
+              announce(entryId ? 'that notepad entry is gone'
+                               : 'nothing compatible in the notepad')
+              return
+            }
+            const r = applyToChart(engine, entry.payload)
+            announce(r.ok ? `posted: ${entry.label || r.what}` : r.reason)
+          })
+          .catch((err) => announce(`post failed: ${err instanceof Error ? err.message : err}`))
+      }
     })
     return off
   }, [symbol, timeframe])

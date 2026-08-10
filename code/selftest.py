@@ -3309,6 +3309,111 @@ def _notepad():
     assert all(e["id"] != ids["leg"] for e in np.list_entries(db, 1))
 
 
+@check("data exchange: one registry, posts route through the engine, refusals speak")
+def _data_exchange():
+    """The Get/Post primitive's wiring (docs/DATA_EXCHANGE.md).
+
+    The properties here are the ones every future enrollment inherits, so
+    they are pinned before the second element enrolls rather than after the
+    fifth."""
+    app = ROOT / "code" / "app" / "src"
+    datapad = (app / "renderer" / "src" / "datapad.ts").read_text(encoding="utf-8")
+    wheel = (app / "main" / "wheel.ts").read_text(encoding="utf-8")
+    wheels_py = (CODE / "backend" / "wheels.py").read_text(encoding="utf-8")
+    sym = (app / "renderer" / "src" / "pages" / "SymbolPage.tsx").read_text(encoding="utf-8")
+    opt = (app / "renderer" / "src" / "pages" / "OptPage.tsx").read_text(encoding="utf-8")
+
+    # --- THE TWO REGISTRIES MUST AGREE. main and the renderer are separate
+    # bundles, so main keeps a static mirror of ACCEPTS to grey picker
+    # entries. A drift means the wheel offers an entry the page then refuses
+    # (or greys one that would have worked) — invisible in both files alone.
+    def accepts_of(src: str, marker: str) -> dict[str, set[str]]:
+        i = src.index(marker)
+        block = src[i:src.index("}", src.index("{", i + len(marker)))]
+        out: dict[str, set[str]] = {}
+        for m in re.finditer(r"'?([\w-]+)'?\s*:\s*\[([^\]]*)\]", block):
+            out[m.group(1)] = {k.strip().strip("'\"")
+                               for k in m.group(2).split(",") if k.strip()}
+        return out
+
+    r_accepts = accepts_of(datapad, "export const ACCEPTS")
+    m_accepts = accepts_of(wheel, "DATA_ACCEPTS")
+    assert r_accepts, "the renderer ACCEPTS registry did not parse"
+    assert r_accepts == m_accepts, (
+        "main's DATA_ACCEPTS mirror has drifted from the renderer's ACCEPTS — "
+        f"renderer={r_accepts} main={m_accepts}. The picker would grey (or "
+        f"offer) entries the page then disagrees about.")
+
+    # --- every kind a target accepts must be a kind the backend validates,
+    # or a payload could be built that the notepad refuses to hold.
+    sys.path.insert(0, str(CODE))
+    from backend import notepad as np
+    for cls, kinds in r_accepts.items():
+        for k in kinds:
+            assert k in np.KINDS, f"{cls} accepts {k!r}, which notepad.py rejects"
+
+    # --- POSTS GO THROUGH THE LIVE ENGINE. The 400ms whole-doc autosave
+    # silently reverts out-of-band writes; this repo has already shipped that
+    # failure once (the Opt-page pick deletion). applyToChart must speak to
+    # the engine, never to the store.
+    apply_src = datapad[datapad.index("export function applyToChart"):]
+    apply_src = apply_src[:apply_src.index("\n// ---")]
+    assert "addLeg" in apply_src and "addLegGroup" in apply_src, \
+        "applyToChart no longer calls the engine"
+    for banned in ("/api/chart-objects", "PUT"):
+        assert banned not in apply_src, (
+            f"applyToChart writes via {banned!r} instead of the live engine — "
+            f"the 400ms autosave would silently revert it and report success")
+
+    # --- A REFUSAL IS A CONVERSION: every refusal path carries a reason.
+    for m in re.finditer(r"ok:\s*false\s*,\s*reason:\s*([^\n]+)", apply_src):
+        assert m.group(1).strip() not in ("''", '""'), "an empty refusal reason"
+    assert apply_src.count("ok: false") >= 3, \
+        "applyToChart lost its refusal paths — the 12-leg cap, the empty " \
+        "chain, and the unaccepted kind each have to say why"
+    assert "12 legs" in apply_src, "the chain cap no longer names the limit"
+
+    # --- the wheel's vocabulary and the intent axis
+    assert "DATA_TOOLS" in wheels_py and '"data:get"' in wheels_py, \
+        "the backend lost the data tool vocabulary"
+    assert "'data'" in wheel and "sendDataAction" in wheel
+    send = member_body(wheel, "private sendDataAction(")
+    assert "spawn:" in send, (
+        "data:action stopped forwarding the spawn coordinates — without them "
+        "a page cannot resolve WHICH enrolled element was clicked")
+    assert "intent," in send, "data:action stopped forwarding the intent"
+    # quick vs deliberate: the picker is the PRIMARY variant only
+    act = member_body(wheel, "private act(")
+    assert "openPostPicker" in act and "intent === 'primary'" in act, (
+        "Post no longer distinguishes deliberate (picker) from quick "
+        "(most-recent-compatible) — the intent axis is decorative")
+
+    # --- the picker's top segment is ALWAYS the notepad (DX-6)
+    picker = member_body(wheel, "private async openPostPicker(")
+    assert "notepad.gs" in picker, "the picker lost its Open-notepad segment"
+    # The INITIALIZER, not the source order. A mutation that merely moved the
+    # notepad into a later array left it textually first and passed an
+    # order-of-appearance assertion — the array a segment is BUILT into is
+    # what decides where it renders.
+    init = picker[picker.index("const segs: Segment[] = ["):]
+    init = init[: init.index("\n    }]") + 6]
+    assert "notepad.gs" in init, (
+        "the notepad is no longer the FIRST segment the picker builds — it is "
+        "the always-available way to see what you hold at the moment you are "
+        "choosing what to post")
+    assert "entryId" in picker and "payload" not in picker, \
+        "picker segments must carry entry ids only, never payloads"
+
+    # --- enrolled pages declare themselves AND answer the action
+    assert 'data-wheel-context="chain"' in opt, \
+        "the Opt page lost its enrollment declaration — Get would grey there"
+    for page, name in ((sym, "SymbolPage"), (opt, "OptPage")):
+        assert "onDataAction" in page, f"{name} does not answer data:action"
+        assert "announce(" in page, (
+            f"{name} does not announce its result — a grab that silently "
+            f"vanished is indistinguishable from one that worked")
+
+
 def dt_date(s: str):
     import datetime as _dt
     return _dt.date.fromisoformat(s)

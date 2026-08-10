@@ -38,7 +38,7 @@ declare global {
       /** Get/Post data actions: tool + intent (left=primary, right=quick) +
        *  the spawn coordinates the page resolves its element from. */
       onDataAction: (
-        cb: (a: { tool: string; intent: 'primary' | 'quick'; spawn: { x: number; y: number } }) => void
+        cb: (a: { tool: string; intent: 'primary' | 'quick'; spawn: { x: number; y: number }; entryId?: string }) => void
       ) => () => void
       onFavoritesChanged: (cb: () => void) => () => void
     }

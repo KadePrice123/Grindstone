@@ -53,6 +53,8 @@ interface Segment {
   address?: string // link: a favorited .gs address or http(s) URL
   icon?: string
   symbol?: string // the target wheel's symbol, for wheel segments
+  entryId?: string // data: a notepad entry id (picker segments; transient,
+                   // never stored -- wheels.py never sees these)
   disabled?: boolean
 }
 
@@ -754,6 +756,13 @@ export class WheelManager {
         this.sendChartAction(seg)
         return 'close'
       case 'data':
+        // Post's PRIMARY intent is the deliberate variant: the picker wheel,
+        // "Open notepad" pinned top, entries below (DX-6). Everything else --
+        // get, quick post, a picker choice -- delivers to the origin view.
+        if (seg.tool === 'data:post' && intent === 'primary' && !seg.entryId) {
+          void this.openPostPicker()
+          return 'stay'
+        }
         this.sendDataAction(seg, intent)
         return 'close'
       default:
@@ -797,6 +806,59 @@ export class WheelManager {
       tool: seg.tool,
       intent,
       spawn: { x: s.start.x, y: s.start.y },
+      ...(seg.entryId ? { entryId: seg.entryId } : {}),
+    })
+  }
+
+  /** Main's mirror of the renderer's ACCEPTS registry, for greying picker
+   *  entries by the SPAWN CONTEXT class. A static copy, not an import -- main
+   *  and renderer are different bundles -- so the gate pins the two against
+   *  each other by source. */
+  private static DATA_ACCEPTS: Record<string, string[]> = {
+    chart: ['contract', 'chain', 'drawing', 'chart-doc'],
+    'backtest-form': ['contract', 'chain', 'backtest-spec'],
+  }
+
+  /** The post picker: a TRANSIENT wheel built from notepad summaries. Its
+   *  segments carry entry ids only -- payloads stay in the pad. Compatible
+   *  entries are lit, incompatible greyed; the top segment is always the
+   *  notepad itself. */
+  private async openPostPicker(): Promise<void> {
+    const s = this.session
+    if (!s) return
+    let summaries: Array<{ id: string; kind: string; label: string }> = []
+    try {
+      const r = await mainRequest<Array<{ id: string; kind: string; label: string }>>(
+        'GET', '/api/notepad/summaries')
+      if (r.status === 200 && Array.isArray(r.body)) summaries = r.body
+    } catch {
+      /* an unreachable pad shows as empty, which the wheel says honestly */
+    }
+    if (this.session !== s) return // the wheel closed while we fetched
+    const cls = s.ctx?.context ?? ''
+    const ok = new Set(WheelManager.DATA_ACCEPTS[cls] ?? [])
+    const segs: Segment[] = [{
+      // DX-6: the top segment is ALWAYS the notepad. Disabled until the
+      // notepad page ships (DX3b) -- a segment that navigates nowhere real
+      // would read as broken; this one at least says where it will go.
+      type: 'link', label: 'Notepad', address: 'notepad.gs', disabled: true,
+    }]
+    for (const e of summaries.slice(0, 11)) {
+      segs.push({
+        type: 'data', tool: 'data:apply', entryId: e.id,
+        label: e.label || e.kind,
+        // No class under the spawn -> nothing is compatible; every entry
+        // greys and the picker is a read-only view of what you hold.
+        disabled: !ok.has(e.kind),
+      })
+    }
+    if (summaries.length === 0) {
+      segs.push({ type: 'placeholder', label: 'notepad is empty', disabled: true })
+    }
+    s.segments = segs
+    this.push('wheel:update', {
+      wheel: { id: '__datapad', name: 'Post', symbol: '\ud83d\udccb', segments: segs },
+      config: s.doc.config,
     })
   }
 

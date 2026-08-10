@@ -30,6 +30,7 @@ import {
   legWindow, resolveLegDoc, type Drawing, type OptionLeg,
 } from '../components/ChartDraw'
 import { OptHeatmap } from '../components/OptHeatmap'
+import { buildChainPayload, buildContractPayload, grab, announce } from '../datapad'
 import { HistoryPanel, TermPanel, type TermPoint } from '../components/OptCharts'
 import { annualise, capitalFor, midOf, tradingDaysTo, dteBetween, type GridContract } from '../optgrid'
 import { analyse, fmtExtreme, fmtNet, returnOnRisk, type PayoffLeg } from '../payoff'
@@ -424,8 +425,44 @@ export function OptPage({
     ? `${sel.strike.toFixed(sel.strike % 1 === 0 ? 0 : 1)} ${sel.right === 'P' ? 'put' : 'call'} · ${sel.expiration}`
     : null
 
+  // Get data (docs/DATA_EXCHANGE.md). The Opt page is enrolled as the 'chain'
+  // class: a GET grabs the selected CONTRACT when one is picked, else the
+  // whole chain envelope for the first leg. Both serialize from the BACKEND
+  // envelope rows, which carry all 13 fields -- the page's own Contract
+  // interface declares 9, and building from it would drop four greeks that
+  // are already on the wire.
+  useEffect(() => {
+    const off = window.grindstone.onDataAction(({ tool }) => {
+      if (tool !== 'data:get') return
+      const envelope = Object.values(byLeg).find((r) => r && r.available) || null
+      const rows = envelope?.contracts ?? []
+      const picked = sel ? rows.find((c) => c.occ_symbol === sel.occ) : undefined
+      const address = `opt.gs?s=${symbol}`
+      const payload = picked
+        ? buildContractPayload({
+            contract: picked as unknown as Record<string, unknown>,
+            page: 'opt', address, symbol,
+          })
+        : envelope
+          ? buildChainPayload({
+              envelope: envelope as unknown as Record<string, unknown>,
+              page: 'opt', address, symbol,
+            })
+          : null
+      if (!payload) {
+        announce('nothing to grab yet -- the chain has not loaded')
+        return
+      }
+      grab(payload)
+        .then((e) => announce(`grabbed: ${e.label}`))
+        .catch((err) => announce(`get data failed: ${err instanceof Error ? err.message : err}`))
+    })
+    return off
+  }, [byLeg, sel, symbol])
+
   return (
-    <div className="page opt-page" data-opt-symbol={symbol}>
+    <div className="page opt-page" data-opt-symbol={symbol}
+         data-wheel-context="chain" data-chart-symbols={symbol}>
       <div className="page-head">
         <h1>{symbol} Opt</h1>
         <button type="button" className="seg-btn" title="Back to chart"
