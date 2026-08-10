@@ -248,6 +248,48 @@ not chart-only. Adding Get/Post to default wheel layouts bumps `DOC_VERSION`
 
 ---
 
+## 4b. Element classes — the wheel predicts intent from what you clicked
+
+**Decision (Kade's).** Every enrolled element belongs to a **class**, and the
+class does two things beyond Get/Post. The chart already works this way —
+right-clicking a chart spawns the chart wheel — so this generalizes a proven
+pattern rather than inventing one. The cardinal rule, per Kade's correction:
+**prediction changes what tools DO, never where they SIT.** The user's wheel
+layouts never restructure themselves; the chart wheel stays exactly as it is.
+
+**Requirement DX-12 — class declarations.** The enrollment classes ARE the
+wheel context classes: elements declare `data-wheel-context='<class>'`
+(chain, heatmap-cell, form:<kind>, notepad-entry, …) the way the chart
+container already does. One declaration feeds three consumers: Get/Post
+grey-state, class wheels, and quick-intent prediction.
+
+**Requirement DX-13 — predictive quick intent, per class.** A tool may
+declare per-class quick (right-click) variants; the class under the spawn
+picks which one fires. Kade's example, which is v1: the **tab tool over a
+contract cell** (chain row or heatmap cell) opens the Opt page for that
+contract directly — no Get data needed, because the class already knows its
+natural destination. Priority when several predictions could apply:
+
+1. held data wins (tab tool with a payload held → provenance.address, DX-7d),
+2. else the class prediction (contract cell → opt.gs for that symbol,
+   pre-selecting the contract),
+3. else the tool's universal quick variant, if any,
+4. else quick behaves as primary — a tool with one behaviour ignores the axis.
+
+**Requirement DX-14 — the prediction is VISIBLE before commit.** Segments
+whose quick intent is class-predicted show an indicator naming it ("→ Opt
+page") on the wheel face. A predicted action the user cannot see before
+releasing is a misclick generator. The context freezes at spawn, so the
+prediction is computed once and cannot flicker mid-gesture.
+
+**Requirement DX-15 — class wheels are OPT-IN config.** The wheels document
+gains a per-class wheel binding ("right-clicking a form spawns the form
+wheel"), default empty except the chart's existing binding, which becomes the
+first entry of the general mechanism instead of a hardcoded special case.
+Default behaviour is DX-13 only — tools sharpen, layouts hold still.
+
+---
+
 ## 5. Secrets — what Get must never serialize
 
 The pad is read by the agent **by design**, which makes it an exfiltration
