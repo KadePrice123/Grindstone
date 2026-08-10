@@ -217,6 +217,65 @@ export function applyToChart(engine: ChartEngine, payload: DataPayload): ApplyRe
   return { ok: false, reason: `a chart does not accept ${payload.kind} yet` }
 }
 
+/** A payload from already-shaped data -- the thin door for pages whose
+ *  element IS a JSON document (the backtest spec editor). The kind still
+ *  passes the backend validator like every other payload. */
+export function buildFormPayloadRaw(args: {
+  kind: PayloadKind
+  data: Record<string, unknown>
+  page: string
+  address: string
+}): DataPayload {
+  return {
+    v: 1, kind: args.kind, data: args.data,
+    provenance: provenance({ page: args.page, address: args.address }),
+  }
+}
+
+/** Chain/contract -> engine spec JSON: the highest-value cross-type
+ *  conversion in the matrix. Selling is the default action (the app's own
+ *  seeded presets sell), delta is preferred over strike when the row carries
+ *  one, and dte comes from the expiration. The engine's own validator gets
+ *  the final word the moment the spec lands in the editor. */
+export function specFromContracts(
+  rows: Array<Record<string, unknown>>, today: string
+): { ok: true; spec: Record<string, unknown> } | { ok: false; reason: string } {
+  const seen = new Set<string>()
+  const distinct = rows.filter((r) => {
+    const k = `${r.strike}|${r.expiration}|${r.right}`
+    if (seen.has(k)) return false
+    seen.add(k)
+    return true
+  })
+  if (distinct.length === 0) return { ok: false, reason: 'no contracts to convert' }
+  if (distinct.length > 4) {
+    return { ok: false,
+             reason: `${distinct.length} distinct contracts — engine strategies ` +
+                     `hold at most 4 legs; narrow the chain or post one contract` }
+  }
+  const t = Date.parse(today + 'T00:00:00Z')
+  const legs = []
+  for (const r of distinct) {
+    const exp = Date.parse(String(r.expiration) + 'T00:00:00Z')
+    if (!Number.isFinite(exp)) return { ok: false, reason: `bad expiration ${r.expiration}` }
+    const dte = Math.max(0, Math.round((exp - t) / 86_400_000))
+    const delta = typeof r.delta === 'number' ? Math.abs(r.delta) : null
+    legs.push({
+      action: 'sell',
+      right: r.right === 'C' ? 'call' : 'put',
+      // Delta-first: as the market moves, a delta selector keeps meaning the
+      // same trade; a strike selector quietly stops matching (the same
+      // apples-to-apples reasoning as the Opt page's history).
+      ...(delta !== null && delta > 0
+        ? { delta: Number(delta.toFixed(2)) }
+        : { strike: r.strike }),
+      dte,
+    })
+  }
+  return { ok: true, spec: { name: 'from notepad', capital: 100_000, legs,
+                             exits: { dte: 21 } } }
+}
+
 // --------------------------------------------------------------------- pad
 export interface PadEntry {
   id: string

@@ -1574,6 +1574,20 @@ export class ChartDraw {
     return JSON.parse(JSON.stringify(docOf(this.bucket()))) as ChartDoc
   }
 
+  /** The drawing under a CLIENT-space point, or null — the Get tool's
+   *  spawn-coordinate resolution (docs/DATA_EXCHANGE.md DX-8). The wheel
+   *  hands the page the right-click's client coordinates; the ENGINE owns
+   *  the conversion to pane space, because only it knows its host rect, its
+   *  hit radius, and which lines are currently hidden (an invisible line is
+   *  not a target here for the same reason it is not one for trim). */
+  drawingAt(clientX: number, clientY: number): string | null {
+    const r = this.host.getBoundingClientRect()
+    if (clientX < r.left || clientX > r.right ||
+        clientY < r.top || clientY > r.bottom) return null
+    const hit = this.hitTest(clientX - r.left, clientY - r.top)
+    return hit ? hit.drawing.id : null
+  }
+
   /** Chart.tsx rebuilds its series on every data change; re-point at the live one. */
   setSeries(series: ISeriesApi<SeriesType>): void {
     this.series = series

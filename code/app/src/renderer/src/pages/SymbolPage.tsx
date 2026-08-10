@@ -5,7 +5,7 @@
  * feeds the data-draw-* testability attrs and the floating DrawEditor.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { applyToChart, buildChartDocPayload, grab, announce, listPad, mostRecentCompatible } from '../datapad'
+import { applyToChart, buildChartDocPayload, buildDrawingPayload, grab, announce, listPad, mostRecentCompatible } from '../datapad'
 import { api, ApiError, SymbolSummary } from '../api'
 import { makeChartStore } from '../chartStore'
 import {
@@ -357,20 +357,36 @@ export function SymbolPage({
   // the WHOLE chart doc — the spawn-coordinate hit-test for single drawings
   // rides the enrollment pass. The builder is pure; the notepad validates.
   useEffect(() => {
-    const off = window.grindstone.onDataAction(({ tool, entryId }) => {
+    const off = window.grindstone.onDataAction(({ tool, spawn, entryId }) => {
       const engine = draw.current
       if (tool === 'data:get') {
         if (!engine) return
-        const payload = buildChartDocPayload({
-          key: drawKeyRef.current,
-          doc: engine.getDoc(),
-          page: 'symbol',
-          address: `${symbol.toLowerCase()}.gs`,
-          symbol,
-          timeframe,
-        })
+        const doc = engine.getDoc()
+        const common = {
+          doc, page: 'symbol',
+          address: `${symbol.toLowerCase()}.gs`, symbol, timeframe,
+        }
+        // DX-8 resolution order: the element under the right-click, then the
+        // engine's selection, then the whole chart. A hit or a selection
+        // grabs the CONNECTED COMPONENT — Kade's rule: a line constrained to
+        // other entities brings the full chain of objects.
+        const rootId = engine.drawingAt(spawn.x, spawn.y)
+          ?? engine.getState().selected[0]
+          ?? null
+        const payload = rootId
+          ? buildDrawingPayload({ rootId, ...common })
+          : buildChartDocPayload({ key: drawKeyRef.current, ...common })
+        if (!payload) {
+          announce('nothing under the click to grab')
+          return
+        }
+        const linked = payload.kind === 'drawing'
+          ? (payload.data as { subdoc: { drawings: unknown[]; legs: unknown[]; constraints: unknown[] } }).subdoc
+          : null
         grab(payload)
-          .then((e) => announce(`grabbed: ${e.label || 'chart ' + symbol}`))
+          .then((e) => announce(linked
+            ? `grabbed: line + ${linked.drawings.length - 1 + linked.legs.length} linked object(s)`
+            : `grabbed: ${e.label || 'chart ' + symbol}`))
           .catch((err) => announce(`get data failed: ${err instanceof Error ? err.message : err}`))
         return
       }

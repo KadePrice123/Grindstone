@@ -9,6 +9,7 @@
  * a modified engine proves it still makes the trades it is known to have
  * made from the exact data.
  */
+import { announce, buildFormPayloadRaw, grab, listPad, mostRecentCompatible, specFromContracts } from '../datapad'
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import {
   api,
@@ -79,6 +80,67 @@ export function BacktestPage() {
   const [dataNote, setDataNote] = useState<string | null>(null)
 
   const active = runs?.find((r) => r.status === 'running') ?? null
+
+  // Get/Post data (docs/DATA_EXCHANGE.md). GET grabs the spec the editor
+  // holds -- edSpec is already the single truth both views compile into.
+  // POST maps a chain or contract into spec JSON and lands it in the editor,
+  // where the existing debounced validate gives the engine's verdict free.
+  useEffect(() => {
+    const off = window.grindstone.onDataAction(({ tool, entryId }) => {
+      if (tool === 'data:get') {
+        let spec: Record<string, unknown>
+        try {
+          spec = JSON.parse(edSpec) as Record<string, unknown>
+        } catch {
+          announce('the spec editor holds invalid JSON -- fix it before grabbing')
+          return
+        }
+        grab(buildFormPayloadRaw({
+          kind: 'backtest-spec',
+          data: { name: edName, spec },
+          page: 'backtest', address: 'backtest.gs',
+        }))
+          .then((e) => announce(`grabbed: ${e.label || 'backtest spec'}`))
+          .catch((err) => announce(`get data failed: ${err instanceof Error ? err.message : err}`))
+        return
+      }
+      if (tool === 'data:post' || tool === 'data:apply') {
+        void listPad()
+          .then((entries) => {
+            const entry = entryId
+              ? entries.find((e) => e.id === entryId)
+              : mostRecentCompatible(entries, 'backtest-form')
+            if (!entry) {
+              announce(entryId ? 'that notepad entry is gone'
+                               : 'nothing compatible in the notepad')
+              return
+            }
+            const pk = entry.payload.kind
+            if (pk === 'backtest-spec') {
+              const d = entry.payload.data as { name?: string; spec?: unknown }
+              setEdSpec(JSON.stringify(d.spec ?? d, null, 2))
+              setEdMode('json')
+              announce(`posted: ${entry.label || 'backtest spec'}`)
+              return
+            }
+            const rows = pk === 'chain'
+              ? ((entry.payload.data as { contracts?: Array<Record<string, unknown>> }).contracts ?? [])
+              : [entry.payload.data as Record<string, unknown>]
+            const today = new Date().toISOString().slice(0, 10)
+            const r = specFromContracts(rows, today)
+            if (!r.ok) {
+              announce(r.reason)
+              return
+            }
+            setEdSpec(JSON.stringify(r.spec, null, 2))
+            setEdMode('json')  // tryDecompile-null is the existing fall-back signal
+            announce(`posted: ${entry.label} as a ${(r.spec.legs as unknown[]).length}-leg spec`)
+          })
+          .catch((err) => announce(`post failed: ${err instanceof Error ? err.message : err}`))
+      }
+    })
+    return off
+  }, [edSpec, edName])
 
   // Monotonic guard, same reason as DataPage: a slow poll racing a
   // post-action refresh must never resurrect stale rows.
@@ -265,7 +327,7 @@ export function BacktestPage() {
   const lastCalib = runs?.find((r) => r.kind === 'calibration' && r.status === 'done')
 
   return (
-    <div className="page">
+    <div className="page" data-wheel-context="backtest-form">
       <div className="page-head">
         <BacktestIcon />
         <h1>Backtest</h1>
