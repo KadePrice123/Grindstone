@@ -133,6 +133,15 @@ between instances never arises, and deliberate crossing happens only through
 the datapad ([DATA_EXCHANGE.md](DATA_EXCHANGE.md)), stamped with its source
 workspace.
 
+**Requirement AC-23b — copying a tab across workspaces composes from
+primitives.** The AI panel lists the agent's tabs; "copy to my workspace"
+is not new machinery: open the tab's address in the user instance, and for
+chart routes, grab the agent's doc to the notepad and post it into the
+now-open chart **through the live engine** — the only autosave-safe write
+path. The copied doc lands under the user's own key with provenance
+`workspace: 'agent'`, so where it came from stays visible. Nothing copies
+server-side behind an open chart's back; the composition is the safety.
+
 **Requirement AC-24 — the live view.** The user instance's **main process**
 owns a CDP client to the agent shell's debugging port; frames from
 `Page.startScreencast` relay to the AI panel over IPC, and panel clicks go

@@ -89,6 +89,15 @@ def _clean_provenance(p: Any) -> dict[str, Any]:
              "provenance.capturedAt is required — a payload describes "
              "capture-time state and must say when that was")
     out = {"workspace": ws, "capturedAt": p["capturedAt"]}
+    # `address` is the element's own .gs URL — what makes provenance ROUTABLE:
+    # the tab tool and the notepad open the source with openTab(address), no
+    # new machinery. Validated as a shape, not resolved here; a stale address
+    # opens the page it names, which is the honest behaviour for old grabs.
+    addr = p.get("address")
+    if addr is not None:
+        _require(isinstance(addr, str) and 0 < len(addr) <= 200,
+                 "provenance.address must be a short address string")
+        out["address"] = addr
     for opt in ("page", "key", "symbol", "timeframe", "axis", "user"):
         v = p.get(opt)
         if v is not None:

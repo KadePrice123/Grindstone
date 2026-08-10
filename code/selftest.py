@@ -3165,7 +3165,7 @@ def _notepad():
                      "INSERT INTO users (id) VALUES (1);" + np.SCHEMA)
 
     prov = {"workspace": "user", "capturedAt": "2026-08-10T00:00:00Z",
-            "page": "opt", "symbol": "SPY"}
+            "page": "opt", "symbol": "SPY", "address": "opt.gs?s=SPY"}
     full_contract = {
         "occ_symbol": "SPY260918P00761000", "expiration": "2026-09-18",
         "strike": 761.0, "right": "P", "bid": 40.1, "ask": 40.9, "last": 40.5,
@@ -3192,6 +3192,13 @@ def _notepad():
         ids[kind] = e["id"]
         back = np.get(db, 1, e["id"])
         assert back and back["payload"]["kind"] == kind, kind
+
+    # --- provenance is ROUTABLE: the address survives the round trip, so the
+    # tab tool and the notepad can open the source with openTab(address)
+    back = np.get(db, 1, ids["chain"])["payload"]["provenance"]
+    assert back.get("address") == "opt.gs?s=SPY", (
+        "provenance.address was dropped — 'open the source in a new tab' "
+        "has nothing to navigate to")
 
     # --- the 13-field guarantee survives the round trip
     chain = np.get(db, 1, ids["chain"])["payload"]["data"]["contracts"][0]

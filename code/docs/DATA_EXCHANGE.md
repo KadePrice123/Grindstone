@@ -94,6 +94,9 @@ DataPayload = {
                                              // written directly in the notepad
   data: <per-kind>,
   provenance: {
+    address?,                                 // the element's OWN .gs URL — the
+                                              // omnibox scheme, so "open the
+                                              // source" is just openTab(address)
     page, key?, symbol?, timeframe?, axis?,   // EXPLICIT — chart keys are not
                                               // self-describing (symbol-page
                                               // keys omit axis; 'multi|1Day|%'
@@ -172,6 +175,22 @@ every entry rendered **by its kind's own renderer**:
 - **form / backtest-spec** → labeled field/value rows; a spec also shows the
   engine's validate verdict;
 - **note** → the text itself, editable in place.
+
+**Requirement DX-7d — provenance is routable: data remembers where it
+lives.** Every enrolled source whose element has an address records it — the
+same `.gs` URL the omnibox and `openTab` already speak. Two affordances hang
+off it, and both are navigation, not new machinery:
+
+- **the wheel's tab tool, with data held**: right-click opens a new tab at
+  the payload's source — the chart the drawing came from, the form the
+  values came from. Grab on one screen, reopen the source on another;
+  tools work together from inside one platform.
+- **the notepad**: every entry shows its source as an open-in-new-tab
+  affordance, from the same field.
+
+A payload whose source has no address (a transient element) simply lacks the
+field, and the affordances grey — the enrollment rule again, applied to
+navigation.
 
 **Requirement DX-7c — editing is per-kind and declared.** Every entry can be
 deleted or relabeled. Beyond that, each enrollment declares what editing
