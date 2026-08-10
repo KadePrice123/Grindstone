@@ -93,8 +93,13 @@ export function ContentApp({ initial }: { initial: Route }) {
             : route.name === 'help'
               ? route.section
               : undefined
-    window.grindstone.setTabMeta(m.title, m.icon, stack.length - 1,
-                                 gsAddress(route.name, arg))
+    window.grindstone.setTabMeta(
+      m.title, m.icon, stack.length - 1,
+      // The Opt page reports its SYMBOL (and contract) in its address, so
+      // two Opt tabs are distinguishable and "is this already open?" has an
+      // answer. It used to report a bare 'opt.gs' for every symbol.
+      gsAddress(route.name, route.name === 'opt' ? route.symbol : arg,
+                route.name === 'opt' ? route.occ : undefined))
   }, [route, stack.length])
 
   useEffect(() => {
@@ -136,7 +141,7 @@ export function ContentApp({ initial }: { initial: Route }) {
       case 'symbol':
         return <SymbolPage symbol={route.symbol} onNavigate={navigate} />
       case 'opt':
-        return <OptPage symbol={route.symbol} onNavigate={navigate} />
+        return <OptPage symbol={route.symbol} occ={route.occ} onNavigate={navigate} />
       case 'search':
         return <SearchPage query={route.query} onNavigate={navigate} />
       case 'settings':

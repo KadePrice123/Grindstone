@@ -109,9 +109,15 @@ function parseOcc(occ: string): Sel | null {
 
 export function OptPage({
   symbol,
+  occ,
   onNavigate,
 }: {
   symbol: string
+  /** A contract to open on, from `opt.gs?s=SPY&occ=…`. This is what makes
+   *  "grab a contract, ask for its history" land on THAT strike and
+   *  expiration instead of a blank page you then have to click your way
+   *  back into. */
+  occ?: string
   onNavigate?: (r: { name: 'symbol'; symbol: string }) => void
 }) {
   const [legs, setLegs] = useState<OptionLeg[] | null>(null)
@@ -185,15 +191,27 @@ export function OptPage({
     [legs, draws]
   )
 
-  // A persisted pick selects itself: the trade you built is what the page
-  // opens on, not a blank chart waiting for a click you already made.
+  // THE ADDRESS WINS. A contract named in the URL is an explicit request for
+  // that strike and expiration, so it outranks the doc's persisted pick —
+  // otherwise asking for one contract's history would silently show you the
+  // last trade you happened to build. Runs before the pick effect below and
+  // guards on `occ` alone, so it does not fight the user's later clicks.
   useEffect(() => {
-    if (sel !== null) return
+    if (!occ) return
+    const parsed = parseOcc(occ)
+    if (parsed) setSel(parsed)
+  }, [occ])
+
+  // A persisted pick selects itself: the trade you built is what the page
+  // opens on, not a blank chart waiting for a click you already made. Skipped
+  // when the address named a contract — that is a more specific instruction.
+  useEffect(() => {
+    if (sel !== null || occ) return
     const withPick = visible.find(({ leg }) => leg.pick)
     if (!withPick) return
     const parsed = parseOcc(withPick.leg.pick as string)
     if (parsed) setSel(parsed)
-  }, [visible, sel])
+  }, [visible, sel, occ])
 
   // ---- one chain fetch per leg window (the selector's rows) ---------------
   useEffect(() => {

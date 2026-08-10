@@ -225,8 +225,47 @@ def summaries(db: sqlite3.Connection, user_id: int) -> list[dict[str, Any]]:
     same wheel."""
     return [{"id": e["id"], "kind": e["payload"]["kind"],
              "label": e["label"] or _default_label(e["payload"]),
-             "address": e["payload"]["provenance"].get("address", "")}
+             "address": e["payload"]["provenance"].get("address", ""),
+             "destination": _destination(e["payload"])}
             for e in list_entries(db, user_id)]
+
+
+def _destination(p: dict[str, Any]) -> str:
+    """Where this payload's DATA belongs — not where it came from.
+
+    The two are different questions and conflating them was a real mistake.
+    `provenance.address` answers "where did I grab this?", which for a
+    contract pulled off a chain is the ticker page the user was already
+    looking at. Predicting that offers to navigate them to where they
+    already are. What they actually want from a contract is the options
+    workstation for THAT contract — its strike, its expiration, its history.
+
+    Kind-driven and computed here, beside _default_label, so the mapping
+    lives in one place instead of being re-derived by every consumer.
+    Returns '' when a kind has no natural home, and the caller falls back
+    to provenance."""
+    kind, d, prov = p["kind"], p["data"], p["provenance"]
+    sym = (prov.get("symbol") or d.get("underlying") or "").upper()
+    if kind == "contract":
+        occ = d.get("occ_symbol") or ""
+        # The symbol may be absent from provenance; an OCC carries its own
+        # underlying as the LEADING alpha run, so recover it rather than
+        # dropping a destination the data plainly supports. Anchored: taking
+        # every alpha character instead swept up the C/P right-indicator and
+        # turned SPY260918P00755000 into the ticker "SPYP".
+        if not sym and occ:
+            m = re.fullmatch(r"([A-Z.]{1,6})\d{6}[CP]\d{8}", occ.upper())
+            sym = m.group(1) if m else ""
+        if sym and occ:
+            return f"opt.gs?s={sym}&occ={occ}"
+        return f"opt.gs?s={sym}" if sym else ""
+    if kind == "chain":
+        return f"opt.gs?s={sym}" if sym else ""
+    if kind == "backtest-spec":
+        return "backtest.gs"
+    if kind == "note":
+        return "notepad.gs"
+    return ""
 
 
 def _default_label(p: dict[str, Any]) -> str:

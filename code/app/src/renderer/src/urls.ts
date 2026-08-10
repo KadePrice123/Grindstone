@@ -70,6 +70,10 @@ export function pageRoute(page: string): string | null {
 export interface GsTarget {
   page: string
   query: string
+  /** A contract (OCC symbol), when the address names one: opt.gs?s=SPY&occ=…
+   *  Separate from `query` because the Opt page is a SYMBOL plus optionally
+   *  one contract, and one field cannot carry both. */
+  occ?: string
 }
 
 export type Destination =
@@ -110,7 +114,15 @@ export function asGs(input: string): GsTarget | null {
   const name = head.replace(/\.gs$/i, '').toLowerCase()
   if (!name) return null
   const params = new URLSearchParams(qs)
-  return { page: name, query: params.get('q') ?? params.get('id') ?? params.get('s') ?? '' }
+  return {
+    page: name,
+    query: params.get('q') ?? params.get('id') ?? params.get('s') ?? '',
+    // The CONTRACT, carried separately from the page's argument. The Opt
+    // page is "SPY Opt" plus optionally one contract whose history it opens
+    // on; folding that into `query` would make the symbol and the contract
+    // the same field and lose one of them.
+    occ: params.get('occ') ?? undefined,
+  }
 }
 
 /** A .gs target as a route key (App.tsx's parseRoute vocabulary). */
@@ -126,7 +138,13 @@ export function gsRoute(gs: GsTarget): string {
     // opt.gs?s=SPY. A bare `opt.gs` has no symbol to analyse, so it falls back
     // to the multi-chart page rather than opening an empty workstation.
     case 'opt':
-      return gs.query ? `opt:${gs.query.toUpperCase()}` : 'charts'
+      // opt:SPY, or opt:SPY:<occ> when a specific contract should be loaded
+      // — grabbing a contract and asking for its history is the whole point
+      // of predicting this page, and a route with no slot for the contract
+      // silently dropped it at the boundary.
+      return gs.query
+        ? `opt:${gs.query.toUpperCase()}${gs.occ ? `:${gs.occ.toUpperCase()}` : ''}`
+        : 'charts'
     case 'help':
       return gs.query ? `help:${gs.query}` : 'help'
     default:
@@ -156,10 +174,16 @@ export function classify(input: string): Destination {
 }
 
 /** The address shown for a platform page — the inverse of asGs(). */
-export function gsAddress(routeName: string, arg?: string): string {
+export function gsAddress(routeName: string, arg?: string, arg2?: string): string {
   switch (routeName) {
     case 'idle':
       return 'home.gs'
+    // Every Opt tab used to report its address as a bare 'opt.gs', so the
+    // address bar said the same thing for SPY Opt and QQQ Opt, and nothing
+    // could tell whether a given Opt page was ALREADY OPEN.
+    case 'opt':
+      return `opt.gs?s=${(arg ?? '').toUpperCase()}` +
+             (arg2 ? `&occ=${arg2.toUpperCase()}` : '')
     case 'symbol':
       return `${(arg ?? '').toLowerCase()}.gs`
     case 'search':

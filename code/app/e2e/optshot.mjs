@@ -368,6 +368,47 @@ try {
     console.log('PREDICT opened:', JSON.stringify(opened))
     const openOk = opened === 'SPY'
 
+    // ---- A HELD CONTRACT GOES TO ITS OWN OPT PAGE (Kade's correction).
+    // Grab a contract off a chain and ask where it goes: the answer is that
+    // contract's workstation -- its strike, its expiration, its history --
+    // NOT the ticker page it was grabbed from, which is where the user
+    // already is. The hint must name it and the release must land on it,
+    // with the contract SELECTED rather than a blank page to click back into.
+    const HELD_OCC = 'SPY260918P00755000'
+    await spy.eval(`window.grindstone.request('POST','/api/notepad',{
+      payload:{v:1,kind:'contract',
+        data:{occ_symbol:'${HELD_OCC}',expiration:'2026-09-18',strike:755,
+              right:'P',bid:38.1,ask:38.9,iv:0.19,delta:-0.39},
+        provenance:{workspace:'user',capturedAt:new Date().toISOString(),
+                    page:'e2e',address:'spy.gs',symbol:'SPY'}},
+      label:'held 755P'}).then((r)=>r.status)`)
+    const destHint = await hintsNow()
+    console.log('DEST hint:', JSON.stringify(destHint.hints))
+    const destIdx = destHint.labels.findIndex((t) => /tabs/i.test(t))
+    const wheelT3 = await waitFor(async () =>
+      (await targets()).find((t) => t.url.includes('mode=wheel')), 'the wheel overlay', 15000)
+    const wheelUi3 = await connect(wheelT3)
+    await wheelUi3.eval(`(document.querySelector('[data-seg="${destIdx}"]')
+      .dispatchEvent(new MouseEvent('mousedown', {bubbles:true, button:2})), 'ok')`)
+
+    const landed = await waitFor(async () => {
+      for (const t of (await targets()).filter((x) => x.url.includes('mode=content'))) {
+        const c = await connect(t)
+        const raw = await c.eval(`JSON.stringify({
+          sym: document.querySelector('[data-opt-symbol]')?.dataset.optSymbol ?? null,
+          addr: document.querySelector('[data-tab-address]')?.dataset.tabAddress ?? null,
+          body: (document.body.textContent || '').slice(0, 4000),
+        })`)
+        const st = JSON.parse(raw)
+        // The page must be showing the CONTRACT, not merely the symbol: 755
+        // and the September expiry have to appear on it.
+        if (st.sym === 'SPY' && /755/.test(st.body)) return st
+      }
+      return null
+    }, 'the Opt page opened ON the held contract', 25000).catch(() => null)
+    console.log('DEST landed:', landed ? 'yes (755 present)' : 'no')
+    const destOk = !!landed && destHint.hints.some((h) => h.includes('held 755P'))
+
     // ---- THE FLICK MUST STILL NAVIGATE (the regression Kade caught).
     // A hold-release is dispatched as 'quick' too, so a prediction gated on
     // intent alone ate this gesture: sweeping onto Tabs closed the wheel and
@@ -398,7 +439,8 @@ try {
 
 
     process.exit(
-      seen !== null && survived && padOk && predictOk && openOk && flickOk ? 0 : 1)
+      seen !== null && survived && padOk && predictOk && openOk && flickOk && destOk
+        ? 0 : 1)
   }
 
   // SHOT_PAGE=data screenshots the Data and Settings pages instead of the Opt

@@ -32,10 +32,16 @@ export interface PredictCtx {
   symbols?: string[]
 }
 
-/** What the newest routable notepad entry is, or null when nothing is held. */
+/** What the newest routable notepad entry is, or null when nothing is held.
+ *
+ *  `destination` is where the DATA belongs (a contract's own Opt page);
+ *  `address` is where it was GRABBED. They are different questions, and
+ *  answering the first with the second is how "open my contract's history"
+ *  became "navigate to the ticker page you are already looking at". */
 export interface PadHint {
   label: string
   address: string
+  destination?: string
 }
 
 /** A resolved prediction. `kind` says how the release acts on `arg`; `hint`
@@ -91,30 +97,70 @@ const UNIVERSAL_QUICK: Record<ToolKey, (c: PredictCtx) => Prediction | null> = {
  * Resolve what a QUICK release on this tool will do, or null for "behave
  * exactly as primary". Pure: same inputs, same answer, no clock, no I/O.
  */
-export function predictIntent(
+export function predictCandidates(
   tool: ToolKey,
   ctx: PredictCtx | null,
   pad: PadHint | null,
-): Prediction | null {
-  // 1. HELD DATA WINS. It is the most recent thing the user did, and the
-  //    least surprising thing for the app to still be thinking about.
+): Prediction[] {
+  const out: Prediction[] = []
+  // 1. HELD DATA WINS, and its DESTINATION outranks its provenance.
+  //
+  //    Kade's correction, and it is the whole point of the feature: grab a
+  //    contract off a chain, ask where it goes, and the answer is that
+  //    contract's options workstation — its strike, its expiration, its
+  //    history. NOT the ticker page it was grabbed from, which is the page
+  //    the user is already standing on.
   if (pad && HELD_DATA_TOOLS.has(tool)) {
-    return { hint: `→ ${pad.label}`, kind: 'address', arg: pad.address }
+    if (pad.destination) {
+      out.push({ hint: `→ ${pad.label}`, kind: 'address', arg: pad.destination })
+    }
+    // Provenance is the FALLBACK, for kinds with no natural home of their
+    // own — and it is still useful when the destination is already open.
+    if (pad.address && pad.address !== pad.destination) {
+      out.push({ hint: `→ ${pad.label} source`, kind: 'address', arg: pad.address })
+    }
   }
   // 2. THE CLASS PREDICTION.
   const cls = ctx?.context ?? ''
   const row = CLASS_PREDICTIONS[tool]
   const fn = row ? row[cls] : undefined
   const byClass = fn ? fn(ctx ?? {}) : null
-  if (byClass) return byClass
+  if (byClass) out.push(byClass)
   // 3. THE TOOL'S UNIVERSAL QUICK VARIANT.
   const uni = UNIVERSAL_QUICK[tool]
   const byTool = uni ? uni(ctx ?? {}) : null
-  if (byTool) return byTool
-  // 4. No prediction: quick is primary. Returning null rather than a
-  //    no-op prediction keeps that indistinguishable from a tool that was
-  //    never enrolled — which is the honest state.
-  return null
+  if (byTool) out.push(byTool)
+  // 4. Nothing: quick is primary. An empty list rather than a no-op entry
+  //    keeps that indistinguishable from a tool that was never enrolled —
+  //    which is the honest state.
+  return out
+}
+
+/**
+ * The single prediction to show and fire, given what is ALREADY OPEN.
+ *
+ * Kade's rule: "I probably don't want to navigate to the page where I
+ * already am or even a tab I have open — I would just use the regular tab
+ * navigation for that, so I probably want to open something that I don't
+ * already have open." A shortcut whose payoff is a tab you could have
+ * clicked is not a shortcut.
+ *
+ * `isOpen` answers "is this address already on screen or in a tab?". The
+ * first candidate it does not veto wins. If it vetoes every one, the FIRST
+ * is used anyway — focusing an existing tab is a weak outcome, but a wheel
+ * segment that silently does nothing is a worse one, and the hint on the
+ * face has already promised something.
+ */
+export function predictBest(
+  tool: ToolKey,
+  ctx: PredictCtx | null,
+  pad: PadHint | null,
+  isOpen?: (address: string) => boolean,
+): Prediction | null {
+  const all = predictCandidates(tool, ctx, pad)
+  if (all.length === 0) return null
+  if (!isOpen) return all[0]
+  return all.find((c) => !isOpen(c.arg)) ?? all[0]
 }
 
 /** The classes that predict for a tool, for the gate and for docs. */

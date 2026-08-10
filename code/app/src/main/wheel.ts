@@ -34,7 +34,7 @@ import { NAVBAR_H, TABBAR_H, TabManager, WheelTabInfo } from './tabs'
 // overlay report hover back over IPC, but the release event can beat the
 // last hover report across the process boundary — acting on a stale segment.
 import { WHEEL_RADIUS, segmentAt } from '../shared/wheelGeometry'
-import { predictIntent, type PadHint } from './predictCore'
+import { predictBest, type PadHint } from './predictCore'
 
 const CLICK_MOVE_THRESHOLD = 10 // px of travel that turns a click into a hold
 const EDGE_MARGIN = 12
@@ -886,8 +886,24 @@ export class WheelManager {
       : seg.type === 'nav'  ? `nav:${seg.route}`
       : ''
     if (!tool) return seg
-    const p = predictIntent(tool, ctx, this.padHint)
+    // The open-tab veto (DX-16). Reaching a tab you already have is what
+    // ordinary tab navigation is FOR, so a prediction that offers one has
+    // spent the gesture on nothing. Answered from the real tab list, at
+    // spawn, alongside every other frozen input.
+    const p = predictBest(tool, ctx, this.padHint, (addr) => this.addressIsOpen(addr))
     return p ? { ...seg, hint: p.hint, hintKind: p.kind, hintArg: p.arg } : seg
+  }
+
+  /** Is this .gs address already on screen — the page under the wheel, or a
+   *  tab in any window? Compared as ADDRESSES, which is why the Opt page had
+   *  to start reporting its symbol: every Opt tab used to answer 'opt.gs',
+   *  so they were all indistinguishable and this could never be right. */
+  private addressIsOpen(address: string): boolean {
+    const want = address.trim().toLowerCase()
+    if (!want) return false
+    return this.tabs.allTabs().some(
+      (t) => t.kind === 'app' && (t.address ?? '').toLowerCase() === want
+    )
   }
 
   /** The newest notepad entry that carries a routable address, refreshed
@@ -900,15 +916,25 @@ export class WheelManager {
       // The PICKER's endpoint, deliberately: it applies the one default-label
       // rule, so the hint and the picker segment for the same entry always
       // read the same. It carries no payloads, only what a wheel needs.
-      const r = await mainRequest<Array<{ label: string; address?: string }>>(
-        'GET', '/api/notepad/summaries')
+      const r = await mainRequest<
+        Array<{ label: string; address?: string; destination?: string }>
+      >('GET', '/api/notepad/summaries')
       const rows = r.status === 200 && Array.isArray(r.body) ? r.body : []
       // Newest first (notepad.py orders added_at DESC), and only entries whose
       // provenance is actually routable — reconstructing an address from a
       // symbol would drop every non-symbol source and produce a string
       // openAddress silently refuses.
-      const hit = rows.find((e) => /\.gs(\?|$)/i.test(e.address ?? ''))
-      this.padHint = hit ? { label: hit.label, address: hit.address! } : null
+      // Routable means EITHER endpoint routes: a payload whose kind has a
+      // natural home is useful even if its provenance was never recorded.
+      const routable = (v?: string): boolean => /\.gs(\?|$)/i.test(v ?? '')
+      const hit = rows.find((e) => routable(e.destination) || routable(e.address))
+      this.padHint = hit
+        ? {
+            label: hit.label,
+            address: routable(hit.address) ? hit.address! : '',
+            destination: routable(hit.destination) ? hit.destination : undefined,
+          }
+        : null
     } catch {
       this.padHint = null
     }

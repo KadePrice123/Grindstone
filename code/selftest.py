@@ -3246,10 +3246,32 @@ def _notepad():
     # serving it here is what keeps the predictive hint and the picker
     # reading ONE label rule instead of two.
     for s_ in np.summaries(db, 1):
-        assert set(s_) == {"id", "kind", "label", "address"}, s_
+        assert set(s_) == {"id", "kind", "label", "address", "destination"}, s_
         assert s_["label"], "an entry with no label gets a derived one"
-        assert not isinstance(s_["address"], dict), \
-            "a summary must never carry structured payload data"
+        for field in ("address", "destination"):
+            assert not isinstance(s_[field], dict), \
+                "a summary must never carry structured payload data"
+
+    # --- DESTINATION is where the DATA belongs; ADDRESS is where it came
+    # from. Conflating them is what made "open my contract's history" mean
+    # "navigate to the ticker page you are already looking at".
+    dest = {s_["kind"]: s_["destination"] for s_ in np.summaries(db, 1)}
+    assert dest["contract"].startswith("opt.gs?s=") and "occ=" in dest["contract"], (
+        f"a held contract must route to its OWN Opt page with the contract "
+        f"named, got {dest['contract']!r}")
+    assert dest["chain"].startswith("opt.gs?s="), dest["chain"]
+    assert dest["backtest-spec"] == "backtest.gs", dest["backtest-spec"]
+    assert dest["note"] == "notepad.gs", dest["note"]
+    # A kind with no natural home says so, and the caller falls back to
+    # provenance — an empty string, never a wrong guess.
+    assert dest["chart-doc"] == "", dest["chart-doc"]
+    # The underlying is recoverable from the OCC's LEADING alpha run. Taking
+    # every alpha character instead swept up the C/P right-indicator and
+    # turned SPY260918P00755000 into the ticker "SPYP".
+    assert np._destination({"kind": "contract", "provenance": {},
+                            "data": {"occ_symbol": "SPY260918P00755000"}}) \
+        == "opt.gs?s=SPY&occ=SPY260918P00755000"
+
     lbl = {s_["id"]: s_["label"] for s_ in np.summaries(db, 1)}
     assert lbl[ids["chain"]] == "chain SPY ×1"
     assert lbl[ids["contract"]] == "761P 09-18"
@@ -3494,21 +3516,55 @@ def _predict_intent():
         raise Skipped("no usable node runtime — the prediction order cannot be run")
 
     probe = r"""
-import { predictIntent, predictingClasses } from './src/main/predictCore.ts'
+import { predictBest, predictCandidates, predictingClasses } from './src/main/predictCore.ts'
 const out = []
 const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail: String(detail) })
 
 const TAB = 'wheel:tabs'
 const chain = { context: 'chain', symbols: ['SPY'], occ: 'SPY260116C00500000' }
-const pad = { label: 'SPY chain', address: 'spy.gs' }
+// A grabbed contract: its DATA belongs on its own Opt page; its PROVENANCE
+// is the ticker page it was grabbed from.
+const pad = { label: 'SPY 755P', address: 'spy.gs',
+              destination: 'opt.gs?s=SPY&occ=SPY260918P00755000' }
 
-// 1. HELD DATA WINS — even standing over a class that predicts something else.
-const both = predictIntent(TAB, chain, pad)
-ok('held data outranks the class prediction',
-   both && both.arg === 'spy.gs', both && both.arg)
+// 1. HELD DATA WINS -- and it goes where the DATA belongs, not where it was
+//    grabbed. This is the correction: predicting provenance offered to
+//    navigate the user to the page they were already standing on.
+const held = predictBest(TAB, chain, pad)
+ok('a held contract predicts ITS OWN Opt page, not its source',
+   held && held.arg === 'opt.gs?s=SPY&occ=SPY260918P00755000', held && held.arg)
+ok('held data still outranks the class prediction',
+   held && held.arg.includes('occ='), held && held.arg)
 
-// 2. THE CLASS PREDICTION, once nothing is held.
-const byClass = predictIntent(TAB, chain, null)
+// Provenance survives as a LOWER candidate, for kinds with no natural home.
+const cands = predictCandidates(TAB, chain, pad)
+ok('provenance is kept as a fallback candidate',
+   cands.some((c) => c.arg === 'spy.gs'), cands.map((c) => c.arg).join(' | '))
+ok('the destination is ordered ahead of the provenance',
+   cands.findIndex((c) => c.arg.startsWith('opt.gs')) <
+   cands.findIndex((c) => c.arg === 'spy.gs'), cands.map((c) => c.arg).join(' | '))
+const noDest = predictBest(TAB, chain, { label: 'a chart', address: 'spy.gs' })
+ok('a payload with no natural home falls back to its provenance',
+   noDest && noDest.arg === 'spy.gs', noDest && noDest.arg)
+
+// 2. THE OPEN-TAB VETO. Reaching an open tab is what tab navigation is for.
+const isOpen = (a) => a === 'opt.gs?s=SPY&occ=SPY260918P00755000'
+const vetoed = predictBest(TAB, chain, pad, isOpen)
+ok('a destination already open is skipped for the next candidate',
+   vetoed && vetoed.arg !== 'opt.gs?s=SPY&occ=SPY260918P00755000', vetoed && vetoed.arg)
+ok('and the next candidate is a real one',
+   vetoed && /\.gs(\?|$)/.test(vetoed.arg), vetoed && vetoed.arg)
+ok('nothing open changes nothing',
+   predictBest(TAB, chain, pad, () => false).arg === 'opt.gs?s=SPY&occ=SPY260918P00755000',
+   predictBest(TAB, chain, pad, () => false).arg)
+// Everything open: still predict SOMETHING. A segment whose hint promises a
+// destination and then does nothing is worse than focusing an open tab.
+const allOpen = predictBest(TAB, chain, pad, () => true)
+ok('when every candidate is open it still fires the first, never nothing',
+   allOpen && allOpen.arg === 'opt.gs?s=SPY&occ=SPY260918P00755000', allOpen && allOpen.arg)
+
+// 3. THE CLASS PREDICTION, once nothing is held.
+const byClass = predictBest(TAB, chain, null)
 ok('a contract cell predicts the Opt page for its symbol',
    byClass && byClass.arg.startsWith('opt.gs?s=SPY'), byClass && byClass.arg)
 ok('the occ travels so the page can open on THAT contract',
@@ -3517,30 +3573,26 @@ ok('the occ travels so the page can open on THAT contract',
 // THE ADDRESS VOCABULARY. tabs.openAddress drops anything without a .gs
 // head SILENTLY: a route-shaped prediction shows a hint and then does
 // nothing at all, which is worse than predicting nothing.
-for (const [name, p] of [['held', both], ['class', byClass]]) {
+for (const [name, p] of [['held', held], ['class', byClass]]) {
   ok(name + ' prediction is a .gs ADDRESS, not a route',
      p && /^[a-z0-9.]+\.gs(\?|$)/i.test(p.arg), p && p.arg)
 }
 
-// 3/4. No class, nothing held -> no prediction at all: quick is primary.
+// 4. No class, nothing held -> no prediction at all: quick is primary.
 ok('an unenrolled class predicts nothing',
-   predictIntent(TAB, { context: 'news', symbols: ['SPY'] }, null) === null, 'null')
-ok('a null ctx predicts nothing', predictIntent(TAB, null, null) === null, 'null')
+   predictBest(TAB, { context: 'news', symbols: ['SPY'] }, null) === null, 'null')
+ok('a null ctx predicts nothing', predictBest(TAB, null, null) === null, 'null')
 ok('an unknown tool predicts nothing even holding data',
-   predictIntent('nav:news', chain, pad) === null, 'null')
-
-// The class needs a symbol to name a destination; without one it must
-// decline rather than route to opt.gs?s= and land on a blank workstation.
+   predictBest('nav:news', chain, pad) === null, 'null')
 ok('a chain with no symbol declines',
-   predictIntent(TAB, { context: 'chain' }, null) === null, 'null')
+   predictBest(TAB, { context: 'chain' }, null) === null, 'null')
 
 // PURITY: the same inputs answer the same way. The face is drawn from one
 // snapshot and the release acts on it later; a prediction that drifted
 // between those two moments would fire something the user never saw.
-const a = predictIntent(TAB, chain, null), b = predictIntent(TAB, chain, null)
+const a = predictBest(TAB, chain, null), b = predictBest(TAB, chain, null)
 ok('prediction is pure', JSON.stringify(a) === JSON.stringify(b), JSON.stringify(a))
 
-// Every declared class is one the wheel can actually be over.
 ok('the tab tool predicts for chain and heatmap',
    predictingClasses(TAB).join(',') === 'chain,heatmap', predictingClasses(TAB).join(','))
 
@@ -3712,16 +3764,29 @@ def _address_translation():
         raise Skipped("no usable node runtime — the translation cannot be run")
 
     probe = r"""
-import { asGs, gsRoute, isKnownPage } from './src/renderer/src/urls.ts'
+import { asGs, gsRoute, gsAddress, isKnownPage } from './src/renderer/src/urls.ts'
 const out = []
 const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail: String(detail) })
 const route = (addr) => { const g = asGs(addr); return g ? gsRoute(g) : null }
 
 // The regression, first and by name.
 ok('opt.gs?s=SPY reaches the Opt page', route('opt.gs?s=SPY') === 'opt:SPY', route('opt.gs?s=SPY'))
-ok('the predictive hint address routes too (extra params survive)',
-   route('opt.gs?s=SPY&occ=SPY260918P00755000') === 'opt:SPY',
+// THE CONTRACT SURVIVES THE ROUTE. Grabbing a contract and asking for its
+// history is the whole point of predicting this page, and the occ used to be
+// dropped at the boundary — you landed on the symbol and had to click your
+// way back to the strike you started from.
+ok('the contract rides through to the route',
+   route('opt.gs?s=SPY&occ=SPY260918P00755000') === 'opt:SPY:SPY260918P00755000',
    route('opt.gs?s=SPY&occ=SPY260918P00755000'))
+ok('and an opt address with no contract still routes to the bare symbol',
+   route('opt.gs?s=SPY') === 'opt:SPY', route('opt.gs?s=SPY'))
+// ROUND TRIP: the address a tab reports must translate back to the route it
+// is showing, or "is this already open?" can never be answered.
+ok('opt round-trips address -> route -> address',
+   gsAddress('opt', 'SPY', 'SPY260918P00755000') === 'opt.gs?s=SPY&occ=SPY260918P00755000',
+   gsAddress('opt', 'SPY', 'SPY260918P00755000'))
+ok('a bare Opt tab reports its SYMBOL, not just opt.gs',
+   gsAddress('opt', 'SPY') === 'opt.gs?s=SPY', gsAddress('opt', 'SPY'))
 
 // EVERY page, so the next one added cannot quietly dead-end. A route that
 // parseRoute does not know resolves to idle, which is indistinguishable

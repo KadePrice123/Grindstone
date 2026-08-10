@@ -324,6 +324,27 @@ Two things the build corrected, both worth keeping written down:
   serves the entry's `address` (a route is not a payload) and both read from
   it.
 
+**Requirement DX-16 — a payload's DESTINATION is not its provenance.** Where
+data came from and where it belongs are different questions. A contract
+grabbed off a chain has provenance `spy.gs` — the ticker page the user is
+already standing on — and a destination of `opt.gs?s=SPY&occ=<contract>`, its
+own workstation, opened on that strike and expiration. The destination is
+computed by KIND (`notepad.py::_destination`, beside the label rule) and
+serves as the first prediction candidate; provenance survives as the fallback
+for kinds with no natural home.
+
+**Requirement DX-17 — never predict a page already open.** Kade's rule:
+"I probably don't want to navigate to the page where I already am or even a
+tab I have open — I would just use the regular tab navigation for that."
+`predictCandidates` returns an ORDERED list and `predictBest` takes the first
+one not already on screen. If every candidate is open it fires the first
+anyway: focusing an existing tab is a weak outcome, but a segment whose hint
+promised a destination and then does nothing is a worse one. This required
+the Opt page to start reporting its symbol in its address — every Opt tab
+answered a bare `opt.gs`, so "is this already open?" had no answer.
+
+---
+
 ### What shipped (DX-15)
 
 `config.class_wheels` in the wheels document: element class -> wheel id,
