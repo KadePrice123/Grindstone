@@ -1222,19 +1222,23 @@ def _gesture_wheels():
     assert set(wheels.BUILTIN_IDS) <= set(ids), "a default wheel is missing"
     main = next(w for w in doc["wheels"] if w["id"] == "main")
     segs = main["segments"]
-    # v6: 10 segments — the 8-point compass PLUS the Get/Post data pair, per
-    # Kade's instruction ("add a tool to the main tool wheel called get
-    # data"). The compass positions are untouched; the data tools append.
-    assert len(segs) == 10, \
-        "the main wheel is the 8-point compass plus Get data / Post data"
-    # N=AI wheel, E=tabs wheel, S=search tool, W=Favorites wheel (v4: the
-    # hand-typed tickers wheel became the dynamic Favorites wheel)
-    assert segs[0] == {"type": "wheel", "wheel": "ai", "label": "AI"}, segs[0]
+    # EIGHT, and THE COUNT IS THE LAYOUT: segmentAt picks by angle, so a ninth
+    # segment slides E/S/W from 2/4/6 to 3/5/8 and every position in Kade's
+    # spec moves under the same muscle memory. Adding Get/Post as a 9th and
+    # 10th did exactly that and broke four direction-driven e2e assertions.
+    # The count is pinned here so it cannot happen quietly again.
+    assert len(segs) == 8, (
+        "the main wheel must stay 8 segments: the wheel selects by ANGLE, so "
+        "changing the count silently rotates every compass position")
+    # v6: Get data took N and Post data NW (Kade's call — AI and Settings
+    # stepped aside), so E/W remain wheel-navs and S remains Search: the
+    # compass he specified is intact. settings.gs is still reachable from the
+    # omnibox and the launcher; the AI wheel still exists to be placed by hand.
+    assert segs[0] == {"type": "data", "tool": "data:get", "label": "Get data"}, segs[0]
     assert segs[2]["type"] == "wheel" and segs[2]["wheel"] == "tabs", segs[2]
     assert segs[4]["type"] == "tool" and segs[4]["tool"] == "search", segs[4]
     assert segs[6]["type"] == "wheel" and segs[6]["wheel"] == "favorites", segs[6]
-    assert segs[8] == {"type": "data", "tool": "data:get", "label": "Get data"}, segs[8]
-    assert segs[9] == {"type": "data", "tool": "data:post", "label": "Post data"}, segs[9]
+    assert segs[7] == {"type": "data", "tool": "data:post", "label": "Post data"}, segs[7]
     # And the vocabulary holds: 'data' validates, an unknown data tool fails.
     try:
         wheels.validate({**wheels.default_doc(), "wheels": [{
@@ -1244,10 +1248,12 @@ def _gesture_wheels():
         raise AssertionError("an unknown data tool validated")
     except ValueError:
         pass
-    # between them: home, news, Charts, settings (v2: the SPY slot became the
-    # multi-chart page, per Kade's 2026-08-02 spec change)
-    others = {s.get("route") or s.get("ticker") for s in (segs[1], segs[3], segs[5], segs[7])}
-    assert others == {"idle", "news", "charts", "settings"}, others
+    # Between the compass points: home, news, Charts — and NW is now Post data
+    # (v6: Settings stepped aside for it, and settings.gs stays reachable from
+    # the omnibox and the launcher). v2 had turned the SPY slot into the
+    # multi-chart page, per Kade's 2026-08-02 spec change.
+    others = {s.get("route") or s.get("ticker") for s in (segs[1], segs[3], segs[5])}
+    assert others == {"idle", "news", "charts"}, others
     tabs_wheel = next(w for w in doc["wheels"] if w["id"] == "tabs")
     assert tabs_wheel.get("dynamic") == "tabs", "the tabs wheel must be dynamic"
 

@@ -119,16 +119,21 @@ def default_doc() -> dict[str, Any]:
                 # slot became the multi-chart page, per spec).
                 "id": "main", "name": "Main", "symbol": "◆", "builtin": True,
                 "segments": [
-                    {"type": "wheel", "wheel": "ai", "label": "AI"},            # N
+                    # EIGHT, always. The wheel selects by ANGLE, so segment
+                    # count IS the layout: at ten, E/S/W slide to 3/5/8 and
+                    # every position Kade specified moves under the same
+                    # muscle memory. Get/Post took the AI and Settings slots
+                    # by his call rather than growing the ring — settings.gs
+                    # stays reachable from the omnibox and the launcher, and
+                    # the AI wheel still exists to be placed back by hand.
+                    {"type": "data", "tool": "data:get", "label": "Get data"},  # N
                     {"type": "nav", "route": "idle", "label": "Home"},          # NE
                     {"type": "wheel", "wheel": "tabs", "label": "Tabs"},        # E
                     {"type": "nav", "route": "news", "label": "News"},          # SE
                     {"type": "tool", "tool": "search", "label": "Search"},      # S
                     {"type": "nav", "route": "charts", "label": "Charts"},      # SW
                     {"type": "wheel", "wheel": "favorites", "label": "Favorites"},  # W
-                    {"type": "nav", "route": "settings", "label": "Settings"},  # NW
-                    {"type": "data", "tool": "data:get", "label": "Get data"},
-                    {"type": "data", "tool": "data:post", "label": "Post data"},
+                    {"type": "data", "tool": "data:post", "label": "Post data"},  # NW
                 ],
             },
             {

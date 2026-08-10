@@ -737,8 +737,8 @@ try {
     8000
   ).catch(() => null)
   check(
-    !!clickState && clickState.segs === 10 && clickState.id === 'main' && clickState.hub,
-    'wheel: right-click spawns the main wheel (8 compass + Get/Post) with the lock hub',
+    !!clickState && clickState.segs === 8 && clickState.id === 'main' && clickState.hub,
+    'wheel: right-click spawns the 8-segment main wheel with the lock hub',
     JSON.stringify(clickState)
   )
 
