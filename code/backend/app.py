@@ -31,6 +31,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import backtests as backtests_mod
 from . import datajobs as datajobs_mod
+from . import keyprobe as keyprobe_mod
+from . import syskey as syskey_mod
 from . import chartobjects as chartobjects_mod
 from . import options as options_mod
 from . import opthist as opthist_mod
@@ -90,6 +92,24 @@ class State:
             return None
         with self.db() as db:
             return market.alpaca_creds_for(db, user_id, snap.dek)
+
+    def system_creds(self) -> dict[str, str] | None:
+        """The unattended recorder's credentials, or None.
+
+        A SEPARATE accessor rather than a fallback inside `creds_for`, on
+        purpose. `creds_for` has eight interactive callers — quotes, charts,
+        chains, news — and quietly answering them with the system key would
+        swap every one of them onto a paper account's entitlements (IEX and
+        indicative only) with no UI event and no way for the user to notice.
+        Only the recorder asks this.
+
+        Reaches no vault: no DEK, no session, no `security` import. A
+        background process that could unwrap the DEK would hold the keys to
+        live trading credentials."""
+        data = syskey_mod.load()
+        if not data:
+            return None
+        return {"key_id": data["key_id"], "secret_key": data["secret_key"]}
 
     def live_news_allowed(self, symbol: str, cooldown: float = 60.0) -> bool:
         """Rate-gate for the omnibox live-news fallthrough: without this,
@@ -206,6 +226,14 @@ class RunIn(BaseModel):
 
 class BtDataIn(BaseModel):
     underlying: str = Field(default="SPY", min_length=1, max_length=12)
+
+
+class SystemKeyIn(BaseModel):
+    key_id: str = Field(min_length=8, max_length=256)
+    secret_key: str = Field(min_length=8, max_length=512)
+    #: Set only after the user has been shown, in words, that the key can place
+    #: real orders. Never defaulted true, and never inferred.
+    accept_live_risk: bool = False
 
 
 class ImportIn(BaseModel):
@@ -1029,6 +1057,43 @@ def create_app(state: State) -> FastAPI:
         if cur.rowcount == 0:
             raise HTTPException(404, "no such job")
         return {"ok": True}
+
+    @app.get("/api/syskey")
+    def syskey_status(s=Depends(current_session)) -> dict[str, Any]:
+        return syskey_mod.status()
+
+    @app.post("/api/syskey")
+    def syskey_enrol(body: SystemKeyIn, s=Depends(current_session)) -> dict[str, Any]:
+        """Probe the key, then seal it — in that order, and never the reverse.
+
+        The probe is what makes this more than a text box: a key is stored for
+        unattended use only when it has been shown it cannot move real money,
+        or when the user has explicitly accepted that it can."""
+        if not syskey_mod.available():
+            raise HTTPException(422, "unattended recording needs Windows on this build")
+        p = keyprobe_mod.probe(body.key_id, body.secret_key)
+        v = p["verdict"]
+        if v == keyprobe_mod.UNDETERMINED:
+            raise HTTPException(422, p["detail"])
+        if v == keyprobe_mod.LIVE_CAPABLE and not body.accept_live_risk:
+            # Not stored. The caller must come back having shown the user the
+            # sentence, so consent is to the consequence rather than to a
+            # checkbox they met before the fact.
+            raise HTTPException(409, p["detail"] + " Confirm to store it anyway.")
+        syskey_mod.store(body.key_id, body.secret_key, v,
+                         dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        return {**syskey_mod.status(), "probe": p}
+
+    @app.post("/api/syskey/probe")
+    def syskey_probe(body: SystemKeyIn, s=Depends(current_session)) -> dict[str, Any]:
+        """What would happen — stores nothing. Lets the UI show the verdict
+        before asking the user to commit to it."""
+        return keyprobe_mod.probe(body.key_id, body.secret_key)
+
+    @app.delete("/api/syskey")
+    def syskey_remove(s=Depends(current_session)) -> dict[str, Any]:
+        syskey_mod.remove()
+        return syskey_mod.status()
 
     @app.post("/api/datamgmt/import")
     def data_import(body: ImportIn, s=Depends(current_session)) -> dict[str, Any]:

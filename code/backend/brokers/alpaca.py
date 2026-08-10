@@ -100,8 +100,18 @@ class AlpacaAdapter(BrokerAdapter):
                 return {"ok": False, "error": f"alpaca data: network error — {e.__class__.__name__}"}
             if r.status_code != 200:
                 return {"ok": False, "error": f"alpaca data: HTTP {r.status_code}"}
+            # REACHING THE NEWS FEED SAYS NOTHING ABOUT TRADING. Until this
+            # check existed, a live, fully order-capable key pair enrolled as
+            # "Data only" got a green Connected here — the news host answers
+            # for any valid key, live or paper. So ask the question the label
+            # implies, and report the answer even when it is unwelcome.
+            from .. import keyprobe
+            p = keyprobe.probe(self._headers["APCA-API-KEY-ID"],
+                               self._headers["APCA-API-SECRET-KEY"],
+                               timeout=self._timeout)
             return {"ok": True, "broker": "alpaca", "kind": "data",
-                    "detail": "news endpoint reachable"}
+                    "detail": p["detail"], **{k: p[k] for k in
+                                              ("verdict", "safe_to_store_unattended")}}
         try:
             acct = parse_account(self._get("/v2/account"))
         except BrokerError as e:

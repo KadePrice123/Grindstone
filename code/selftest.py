@@ -2769,6 +2769,189 @@ def _data_jobs():
                 os.environ["GRINDSTONE_DATA_DIR"] = old
 
 
+@check("system key: sealed to this user, outside every synced folder, no vault reach")
+def _system_key():
+    """The unattended recorder's credential.
+
+    Three of these assertions guard mistakes that ROUND-TRIP PERFECTLY for
+    whoever makes them, which is why they are source scans rather than
+    behaviour tests:
+
+      * CRYPTPROTECT_LOCAL_MACHINE seals to the MACHINE — every local account
+        can then decrypt the key, and it works flawlessly on the developer's
+        box.
+      * szDataDescr is stored in CLEARTEXT inside the blob (measured), so a
+        helpful label there advertises what the file is.
+      * A blob under data_dir() would be copied off the machine by Drive,
+        which is the one property §7.9 actually claims.
+    """
+    import os
+    import sys as _sys
+    import tempfile
+    sys.path.insert(0, str(CODE))
+    from backend import syskey
+
+    src = (CODE / "backend" / "syskey.py").read_text(encoding="utf-8")
+
+    # --- G2: the flags, by source. All three fail silently at runtime.
+    assert "_LOCAL_MACHINE" in src, "the constant must exist so this check can pin it"
+    # Comments stripped FIRST — the protect call carries a "# and never
+    # _LOCAL_MACHINE" note, and scanning raw lines flagged that note as the
+    # very thing it warns against.
+    code_only = [ln.split("#")[0] for ln in src.splitlines()]
+    passed_machine = [ln for ln in code_only
+                      if "_LOCAL_MACHINE" in ln and "=" not in ln]
+    assert not passed_machine, (
+        "CRYPTPROTECT_LOCAL_MACHINE appears to be PASSED, not merely defined: "
+        f"{passed_machine}. Machine scope lets every local account on this PC "
+        "decrypt the system key, and it round-trips perfectly for whoever set it.")
+    assert "_UI_FORBIDDEN,             # and never _LOCAL_MACHINE" in src, \
+        "the protect flags changed — re-verify no machine scope crept in"
+    assert src.count("None,                      # szDataDescr") == 1, \
+        "szDataDescr must stay None: it is stored in cleartext inside the blob"
+
+    # --- no path into the vault, by source. This is the catastrophic shortcut.
+    for banned in ("unwrap_dek", "decrypt_secret", "alpaca_creds_for",
+                   "from .security", "from .sessions", "import security",
+                   "import sessions", "dek"):
+        assert banned not in src, (
+            f"syskey.py references {banned!r} — a background process that can "
+            f"reach the DEK holds the keys to LIVE TRADING credentials, which "
+            f"inverts this feature's premise (see REQUIREMENTS.md 6.6)")
+
+    # --- G1: placement. Resolve first; a substring test on an unresolved path
+    # is defeated by a single junction.
+    d = syskey.key_dir().resolve()
+    parts = [p.lower() for p in d.parts]
+    for synced in ("onedrive", "google drive", "googledrive", "dropbox", "icloud"):
+        assert not any(synced in p for p in parts), \
+            f"the system key would live inside a synced folder: {d}"
+    assert not str(d).startswith("\\\\"), f"UNC path for the key store: {d}"
+    # And prove the path is not DERIVED from data_dir(), by pointing data_dir
+    # somewhere synced-looking and re-resolving.
+    old = os.environ.get("GRINDSTONE_DATA_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        fake = Path(td) / "OneDrive" / "synced"
+        fake.mkdir(parents=True)
+        os.environ["GRINDSTONE_DATA_DIR"] = str(fake)
+        try:
+            from backend.db import data_dir
+            again = syskey.key_dir().resolve()
+            assert again == d, "the key path moved with GRINDSTONE_DATA_DIR"
+            assert data_dir().resolve() != again, \
+                "the key store resolved inside data_dir() — that tree is synced"
+        finally:
+            if old is None:
+                os.environ.pop("GRINDSTONE_DATA_DIR", None)
+            else:
+                os.environ["GRINDSTONE_DATA_DIR"] = old
+
+    if _sys.platform != "win32":
+        assert not syskey.available(), "non-Windows must report no sealing"
+        return
+
+    # --- G3: round trip and negative controls, on a NON-credential fixture.
+    saved = syskey.key_path().read_bytes() if syskey.key_path().is_file() else None
+    saved_meta = (syskey.meta_path().read_bytes()
+                  if syskey.meta_path().is_file() else None)
+    FIX_ID, FIX_SECRET = "PKSELFTESTKEYID0", "selftest-not-a-real-secret-000000"
+    try:
+        syskey.store(FIX_ID, FIX_SECRET, "PAPER_ONLY", "2026-01-01T00:00:00Z")
+        got = syskey.load()
+        assert got and got["key_id"] == FIX_ID and got["secret_key"] == FIX_SECRET
+
+        raw = syskey.key_path().read_bytes()
+        assert FIX_SECRET.encode() not in raw, "the secret is sitting in the file in clear"
+        assert FIX_ID.encode() not in raw
+        meta = syskey.meta_path().read_bytes()
+        assert FIX_SECRET.encode() not in meta, "the metadata file leaked the secret"
+
+        st = syskey.status()
+        assert st["enrolled"] and st["readable"] and st["verdict"] == "PAPER_ONLY"
+
+        # --- G4 half A: simulate ANOTHER MACHINE without a second machine.
+        # Bytes 24..40 are the master-key GUID; mutating them makes Windows
+        # look for a key this profile does not have — exactly the stolen-file
+        # condition. (Mutating the PROVIDER guid at 4..20 still decrypts, so
+        # only this field is a faithful simulation.)
+        alien = bytearray(raw)
+        for i in range(24, 40):
+            alien[i] ^= 0xFF
+        syskey.key_path().write_bytes(bytes(alien))
+        assert syskey.load() is None, (
+            "a blob whose master key belongs to another machine still "
+            "decrypted — the off-machine guarantee is not real")
+        assert syskey.status()["readable"] is False
+        # G4 half B: the failure is a STATE, not an exception, and nothing
+        # anywhere fell back to the user's vault to compensate.
+        assert FIX_SECRET.encode() not in syskey.key_path().read_bytes()
+
+        assert syskey.remove() is True
+        assert syskey.load() is None and syskey.status()["enrolled"] is False
+    finally:
+        # Never destroy a real enrolment by running the gate.
+        if saved is not None:
+            syskey.key_path().write_bytes(saved)
+        else:
+            syskey.key_path().unlink(missing_ok=True)
+        if saved_meta is not None:
+            syskey.meta_path().write_bytes(saved_meta)
+        else:
+            syskey.meta_path().unlink(missing_ok=True)
+
+
+@check("key probe: the verdict is exhaustive, fails closed, and never says read-only")
+def _key_probe():
+    """DS-10, restated honestly. Alpaca does not scope plain key pairs, so the
+    probe can prove a key CAN trade and can never prove it cannot. Every
+    combination is table-tested offline against the pure function, so this
+    costs the gate no network — which matters, because the gate already makes
+    one real Alpaca call it should not."""
+    sys.path.insert(0, str(CODE))
+    from backend import keyprobe as kp
+
+    LIVE, PAPER, UND = kp.LIVE_CAPABLE, kp.PAPER_ONLY, kp.UNDETERMINED
+    table = [
+        # (live host, paper host)          -> verdict
+        ((kp.OK, kp.OK), LIVE, "a key answering on BOTH hosts can still trade"),
+        ((kp.OK, kp.REJECTED), LIVE, "the live host authenticated"),
+        ((kp.OK, kp.UNCLEAR), LIVE, "the live host authenticated"),
+        ((kp.REJECTED, kp.OK), PAPER, "paper-only is the one safe verdict"),
+        ((kp.REJECTED, kp.REJECTED), UND, "neither host accepted the key"),
+        ((kp.REJECTED, kp.UNCLEAR), UND, "the paper host never answered"),
+        ((kp.UNCLEAR, kp.OK), UND,
+         "a LIVE key behind a 429 would read as paper-only if this concluded"),
+        ((kp.UNCLEAR, kp.REJECTED), UND, "nothing was established"),
+        ((kp.UNCLEAR, kp.UNCLEAR), UND, "nothing was established"),
+    ]
+    for (live, paper), want, why in table:
+        got = kp.verdict_of(live, paper)
+        assert got == want, f"verdict_of({live},{paper}) = {got}, wanted {want} — {why}"
+
+    # Exhaustive: no combination may fall through to something unlisted.
+    seen = {(a, b) for (a, b), _, _ in table}
+    for a in (kp.OK, kp.REJECTED, kp.UNCLEAR):
+        for b in (kp.OK, kp.REJECTED, kp.UNCLEAR):
+            assert (a, b) in seen, f"untested outcome pair ({a},{b})"
+            assert kp.verdict_of(a, b) in (LIVE, PAPER, UND)
+
+    # Only PAPER_ONLY is storable unattended without an explicit override.
+    assert kp.verdict_of(kp.REJECTED, kp.OK) == PAPER
+    for v in (LIVE, UND):
+        assert "read-only" not in kp.describe(v).lower()
+    assert "read-only" not in kp.describe(PAPER).lower(), (
+        "a paper key must never be called read-only — it can still place "
+        "paper orders and reset the paper account")
+    assert "real orders" in kp.describe(LIVE).lower(), \
+        "the live verdict must say what it means in plain words"
+
+    # The probe stays inside the read-only guarantee the gate pins elsewhere.
+    src = (CODE / "backend" / "keyprobe.py").read_text(encoding="utf-8")
+    for banned in ("httpx.post", "httpx.put", "httpx.delete", "httpx.patch",
+                   "/v2/orders"):
+        assert banned not in src, f"keyprobe.py contains {banned!r}"
+
+
 def dt_date(s: str):
     import datetime as _dt
     return _dt.date.fromisoformat(s)

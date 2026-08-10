@@ -54,6 +54,21 @@ interface PullStatus {
   delay?: number
 }
 
+interface SysKey {
+  enrolled: boolean
+  readable: boolean
+  platform_ok: boolean
+  verdict?: string
+  enrolled_at?: string
+  key_id_last4?: string
+}
+
+interface Probe {
+  verdict: 'LIVE_CAPABLE' | 'PAPER_ONLY' | 'UNDETERMINED'
+  detail: string
+  safe_to_store_unattended: boolean
+}
+
 function hhmm(sec: number): string {
   if (sec < 90) return `${Math.round(sec)}s`
   if (sec < 5400) return `${Math.round(sec / 60)} min`
@@ -77,6 +92,16 @@ export function DataPage() {
   const [pullSyms, setPullSyms] = useState('SPY')
   const [pullFrom, setPullFrom] = useState('')
   const [pullTo, setPullTo] = useState('')
+
+  // The recording key. Deliberately a two-step flow: check, SEE the verdict,
+  // then store. A single "save" button would make the probe decoration, and
+  // the whole point is that the user consents to what the key can actually do
+  // rather than to the label they picked for it.
+  const [sk, setSk] = useState<SysKey | null>(null)
+  const [skId, setSkId] = useState('')
+  const [skSecret, setSkSecret] = useState('')
+  const [probe, setProbe] = useState<Probe | null>(null)
+  const [skBusy, setSkBusy] = useState(false)
 
   // Monotonic guard: the 20s tick racing a post-add refresh made a
   // just-added job vanish when the older response landed last.
@@ -118,6 +143,58 @@ export function DataPage() {
     const t = window.setInterval(pollJobs, running ? 2_500 : 15_000)
     return () => window.clearInterval(t)
   }, [pollJobs, running])
+
+  const loadSk = useCallback(async () => {
+    try {
+      setSk(await api<SysKey>('GET', '/api/syskey'))
+    } catch {
+      /* the page's error line owns real failures */
+    }
+  }, [])
+  useEffect(() => {
+    loadSk()
+  }, [loadSk])
+
+  const checkKey = async () => {
+    setSkBusy(true)
+    setError(null)
+    setProbe(null)
+    try {
+      setProbe(await api<Probe>('POST', '/api/syskey/probe', {
+        key_id: skId.trim(), secret_key: skSecret.trim()
+      }))
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setSkBusy(false)
+    }
+  }
+
+  const storeKey = async (acceptLive: boolean) => {
+    setSkBusy(true)
+    setError(null)
+    try {
+      await api('POST', '/api/syskey', {
+        key_id: skId.trim(), secret_key: skSecret.trim(), accept_live_risk: acceptLive
+      })
+      setSkId(''); setSkSecret(''); setProbe(null)
+      await loadSk()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setSkBusy(false)
+    }
+  }
+
+  const removeKey = async () => {
+    if (!confirm('Remove the recording key? Unattended recording will stop.')) return
+    try {
+      await api('DELETE', '/api/syskey')
+      await loadSk()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    }
+  }
 
   const pickAndImport = async () => {
     setError(null)
@@ -312,6 +389,80 @@ export function DataPage() {
           {busy ? 'Adding…' : 'Add job'}
         </button>
       </form>
+
+      <div className="card">
+        <h2>Recording key</h2>
+        <div className="subtle" style={{ marginBottom: 10 }}>
+          A separate broker key for background recording, sealed to your Windows
+          account so the recorder can run without you signing in. Use a{' '}
+          <strong>paper</strong> key — it cannot move real money. Your trading
+          keys stay in the encrypted vault and are never used for this.
+        </div>
+
+        {sk?.enrolled ? (
+          <>
+            <div className={`acct-row${sk.readable ? '' : ' bad'}`}>
+              <span className={`badge ${sk.readable ? 'paper' : 'data'}`}>
+                {sk.readable ? sk.verdict === 'PAPER_ONLY' ? 'paper only' : 'live capable' : 'unreadable'}
+              </span>
+              <strong>key ····{sk.key_id_last4}</strong>
+              <span className="subtle">
+                {sk.readable
+                  ? `enrolled ${(sk.enrolled_at ?? '').slice(0, 10)}`
+                  : 'this key was sealed on a different Windows account or before a password reset — enter it again'}
+              </span>
+              <button className="btn" onClick={removeKey}>Remove</button>
+            </div>
+          </>
+        ) : null}
+
+        {!sk?.platform_ok ? (
+          <div className="subtle">
+            Unattended recording needs Windows on this build. Elsewhere, sign in
+            and the recorder runs while the app is open.
+          </div>
+        ) : (
+          <>
+            <div className="acct-row">
+              <input
+                className="field" value={skId} spellCheck={false}
+                onChange={(e) => { setSkId(e.target.value); setProbe(null) }}
+                placeholder="key id" style={{ maxWidth: 240 }}
+              />
+              <input
+                className="field" type="password" value={skSecret} spellCheck={false}
+                onChange={(e) => { setSkSecret(e.target.value); setProbe(null) }}
+                placeholder="secret key" style={{ maxWidth: 300 }}
+              />
+              <button
+                className="btn" onClick={checkKey}
+                disabled={skBusy || !skId.trim() || !skSecret.trim()}
+              >
+                {skBusy ? 'checking…' : 'Check key'}
+              </button>
+            </div>
+
+            {probe ? (
+              <div className={`acct-row${probe.verdict === 'PAPER_ONLY' ? '' : ' bad'}`}>
+                <span className={`badge ${probe.verdict === 'PAPER_ONLY' ? 'paper' : 'data'}`}>
+                  {probe.verdict === 'PAPER_ONLY' ? 'paper only'
+                    : probe.verdict === 'LIVE_CAPABLE' ? 'can trade' : 'unknown'}
+                </span>
+                <span className="subtle">{probe.detail}</span>
+                {probe.verdict === 'PAPER_ONLY' ? (
+                  <button className="btn" onClick={() => storeKey(false)} disabled={skBusy}>
+                    Store it
+                  </button>
+                ) : probe.verdict === 'LIVE_CAPABLE' ? (
+                  <button className="btn" onClick={() => storeKey(true)} disabled={skBusy}>
+                    Store anyway
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
 
       <div className="card">
         <h2>Import a file</h2>
