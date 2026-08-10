@@ -3414,6 +3414,110 @@ def _data_exchange():
             f"vanished is indistinguishable from one that worked")
 
 
+@check("component grab: a constrained line brings its full chain of objects")
+def _component_grab():
+    """Kade's rule, verbatim: 'if we grab one line that is constrained to
+    other entities we need to grab the full chain of objects.' The walk runs
+    HERE, under node, against a fixture whose shape exercises every edge —
+    a source scan cannot prove transitivity, and transitivity is the rule."""
+    app_dir = ROOT / "code" / "app"
+    exe = _node_exe()
+    if exe is None:
+        raise Skipped("no usable node runtime — the component walk cannot be run")
+
+    probe = r"""
+import { componentOf } from './src/renderer/src/datapadCore.ts'
+const out = []
+const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail: String(detail) })
+
+// The chain Kade described: A -c1- B -c2- C, a measure bridging C to D, a
+// leg whose bounding lines are D and E, a second leg sharing E's vline pair,
+// and F referenced by nothing. Grabbing A must bring everything except F.
+const doc = {
+  drawings: ['A','B','C','D','E','T1','T2','F'].map((id) => ({ id })),
+  measures: [
+    { id: 'm1', a: { drawingId: 'C' }, b: { drawingId: 'D' } },
+    { id: 'm2', a: { drawingId: 'F' }, b: {} },            // F's own; stays out
+  ],
+  constraints: [
+    { id: 'c1', a: { id: 'A' }, b: { id: 'B' } },
+    { id: 'c2', a: { id: 'B' }, b: { id: 'C' } },
+    { id: 'c3', a: { id: 'F' } },                          // F's own; stays out
+  ],
+  legs: [
+    { id: 'L1', strikeHostA: 'D', strikeHostB: 'E', timeHostA: 'T1', timeHostB: 'T2' },
+    { id: 'L2', strikeHostA: 'E', timeHostA: 'T1', timeHostB: 'T2' }, // sibling via shared lines
+    { id: 'L3', priceHostId: 'Z' },                        // hosts nothing in the component
+  ],
+}
+
+const comp = componentOf(doc, 'A')
+const set = (xs) => xs.slice().sort().join(',')
+ok('the constraint chain is transitive (A pulls B and C)',
+   comp.drawings.includes('B') && comp.drawings.includes('C'), set(comp.drawings))
+ok('a measure bridges to its other anchor (C pulls D)',
+   comp.drawings.includes('D'), set(comp.drawings))
+ok('a hosted leg joins, with ALL its guide lines (D pulls L1, E, T1, T2)',
+   comp.legs.includes('L1') && ['E','T1','T2'].every((d) => comp.drawings.includes(d)),
+   set(comp.drawings) + ' legs=' + set(comp.legs))
+ok('sibling legs join through shared guides (L2 rides in)',
+   comp.legs.includes('L2'), set(comp.legs))
+ok('both constraints travel with their endpoints',
+   set(comp.constraints) === 'c1,c2', set(comp.constraints))
+ok('the bridging measure travels',
+   comp.measures.includes('m1'), set(comp.measures))
+ok('the unrelated drawing stays OUT',
+   !comp.drawings.includes('F') && !comp.constraints.includes('c3')
+     && !comp.measures.includes('m2') && !comp.legs.includes('L3'),
+   set(comp.drawings))
+
+// A leg as the root works the same walk in reverse.
+const fromLeg = componentOf(doc, 'L2')
+ok('rooting at a leg pulls its guides and its siblings',
+   fromLeg.legs.includes('L1') && fromLeg.drawings.includes('D'),
+   set(fromLeg.drawings) + ' legs=' + set(fromLeg.legs))
+
+// A lone line is a component of one; an unknown root is empty, not a throw.
+const lone = componentOf({ drawings: [{ id: 'X' }], measures: [], constraints: [], legs: [] }, 'X')
+ok('a lone line is just itself', set(lone.drawings) === 'X' && lone.legs.length === 0, set(lone.drawings))
+const none = componentOf(doc, 'NOPE')
+ok('an unknown root yields empty', none.drawings.length === 0 && none.legs.length === 0,
+   set(none.drawings))
+
+console.log(JSON.stringify(out))
+"""
+    probe_path = app_dir / ".selftest-component.mjs"
+    try:
+        probe_path.write_text(probe, encoding="utf-8")
+        r = subprocess.run([exe, str(probe_path)], cwd=app_dir,
+                           capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, f"component probe crashed:\n{(r.stderr or r.stdout)[:1500]}"
+        results = json.loads(r.stdout.strip().splitlines()[-1])
+    finally:
+        probe_path.unlink(missing_ok=True)
+    bad = [x for x in results if not x["cond"]]
+    assert not bad, "the component walk is wrong:\n" + "\n".join(
+        f"  - {x['name']} (got {x['detail']})" for x in bad)
+    assert len(results) >= 10, f"the probe lost assertions: only {len(results)} ran"
+
+    # And the leg reference fields must stay COMPLETE: a field missing from
+    # the walk silently orphans that relationship in every grab. The seven
+    # names mirror OptionLeg; the probe above cannot see an edge the fixture
+    # forgot, so the list itself is pinned.
+    core = (app_dir / "src" / "renderer" / "src" / "datapadCore.ts").read_text(encoding="utf-8")
+    assert "import " not in core, (
+        "datapadCore.ts grew an import — the probe runs it under plain node, "
+        "which cannot resolve Vite-style imports, so this file must stay "
+        "dependency-free")
+    fields = core[core.index("const LEG_REF_FIELDS"):]
+    fields = fields[:fields.index("] as const")]
+    for f in ("hostId", "timeHostId", "priceHostId",
+              "strikeHostA", "strikeHostB", "timeHostA", "timeHostB"):
+        assert f"'{f}'" in fields, (
+            f"LEG_REF_FIELDS lost {f!r} — every grab would silently orphan "
+            f"the relationship that field carries")
+
+
 def dt_date(s: str):
     import datetime as _dt
     return _dt.date.fromisoformat(s)

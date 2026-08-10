@@ -11,6 +11,7 @@
  * so "open the source" is `openTab(address)` — no new machinery (DX-7d).
  */
 import { api } from './api'
+import { componentOf } from './datapadCore'
 import type { ChartDoc } from './components/ChartDraw'
 
 export type PayloadKind =
@@ -104,6 +105,52 @@ export function buildChainPayload(args: {
     kind: 'chain',
     data: args.envelope,
     provenance: provenance({ page: args.page, address: args.address, symbol: args.symbol }),
+  }
+}
+
+/** A single drawing (or leg) grab: the component, as a SUBDOC — the same
+ *  shape a chart-doc payload carries, so the post path is one code path. */
+export function buildDrawingPayload(args: {
+  rootId: string
+  doc: ChartDoc
+  page: string
+  address: string
+  symbol?: string
+  timeframe?: string
+}): DataPayload | null {
+  const d = args.doc as unknown as Parameters<typeof componentOf>[0]
+  const comp = componentOf(d, args.rootId)
+  if (comp.drawings.length === 0 && comp.legs.length === 0) return null
+  const keep = {
+    drawings: new Set(comp.drawings), measures: new Set(comp.measures),
+    constraints: new Set(comp.constraints), legs: new Set(comp.legs),
+  }
+  const doc = args.doc as unknown as {
+    version: number
+    drawings: Array<{ id: string }>
+    measures: Array<{ id: string }>
+    pins: unknown[]
+    constraints: Array<{ id: string }>
+    legs: Array<{ id: string }>
+  }
+  return {
+    v: 1,
+    kind: 'drawing',
+    data: {
+      root: args.rootId,
+      subdoc: {
+        version: doc.version,
+        drawings: doc.drawings.filter((x) => keep.drawings.has(x.id)),
+        measures: doc.measures.filter((x) => keep.measures.has(x.id)),
+        pins: [],   // pins anchor to bars, not to drawings — never part of a component
+        constraints: doc.constraints.filter((x) => keep.constraints.has(x.id)),
+        legs: doc.legs.filter((x) => keep.legs.has(x.id)),
+      },
+    },
+    provenance: provenance({
+      page: args.page, address: args.address,
+      symbol: args.symbol, timeframe: args.timeframe,
+    }),
   }
 }
 

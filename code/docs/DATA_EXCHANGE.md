@@ -117,10 +117,15 @@ Grounding rules that came out of the scout, each preventing a real bug:
 - **leg serializes the RESOLVED leg** (`resolveLegDoc`), never the stored
   birth values — the Opt page already shipped a bug by reading stored fields
   (`OptPage.tsx:18-24`). The stored leg and the pick ride along.
-- **drawing carries its closure**: the constraints naming it, measures
-  anchored on it, legs hosting it. A line alone is two points; its meaning
-  lives in the collections that reference its id. The *target* decides what
-  of the closure to keep.
+- **drawing carries its CONNECTED COMPONENT** *(Kade's rule: "if we grab one
+  line that is constrained to other entities we need to grab the full chain
+  of objects")*. Not just the collections naming the line — the transitive
+  closure over every reference edge: constraints join their two endpoint
+  drawings, measures join the drawings their anchors sit on, a leg joins all
+  seven of its host drawings, and the walk repeats from everything joined
+  until nothing new appears. A constraint always travels with both endpoints,
+  so nothing dangles at post time. Sibling legs of a strategy join through
+  their shared vline pair — no special case for groups.
 - **capture is spawn-time.** The wheel freezes context at the spawning
   right-click by design (stale-hover race, `wheel.ts:33-36`); `capturedAt`
   makes that honest rather than surprising.
@@ -327,7 +332,7 @@ data vanishes, no error anywhere."
 | contract → chart | yes | `engine.addLeg({right, expiration, strike, pick})`; side defaults long, flipped in the LegEditor |
 | chain → chart | yes, capped | ≤12 distinct (strike, expiration) → `addLegGroup` as one strategy group; more → refuse with the count. Charting strike/max-gain/expiration as a derived *series* needs a new engine element — named v2 gap. |
 | contract/chain → backtest form | yes | map to spec JSON (underlying, per-leg right/strike-or-delta/dte), write into the spec editor; the existing debounced validate gives the engine's verdict free |
-| drawing → chart | yes | re-mint id; keep absolute time/price; drop constraints whose other endpoint is absent; `legOwned` lines refuse ("guide lines belong to their leg — post the leg") |
+| drawing → chart | yes | the component posts WHOLE: re-mint every id with one consistent map so constraints and host references survive; keep absolute time/price. Grabbing a leg-owned guide pulls its leg and the leg's other guides into the component — this supersedes the earlier refusal ("post the leg"), because the component IS the leg and its lines. |
 | chart-doc → chart | yes | append with a consistent old→new id map so intra-doc refs survive; refuse over 500/collection or 12 legs, with counts |
 | form → same-kind form | yes | apply through the form's own save path, respecting its sequence guards — never raw setState |
 | contract → Opt page | refuse | teaching reason: "the Opt page mirrors the chart — post to the chart instead." The Opt page is a pure reader by hard-won rule. |
