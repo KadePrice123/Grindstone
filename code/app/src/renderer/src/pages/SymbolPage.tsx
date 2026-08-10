@@ -5,6 +5,7 @@
  * feeds the data-draw-* testability attrs and the floating DrawEditor.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { buildChartDocPayload, grab, announce } from '../datapad'
 import { api, ApiError, SymbolSummary } from '../api'
 import { makeChartStore } from '../chartStore'
 import {
@@ -351,6 +352,29 @@ export function SymbolPage({
     })
     return off
   }, [toggle, toggleIndVis, toggleDrawVis, deleteAction])
+
+  // Get/Post data (docs/DATA_EXCHANGE.md). v1 of GET on a symbol chart grabs
+  // the WHOLE chart doc — the spawn-coordinate hit-test for single drawings
+  // rides the enrollment pass. The builder is pure; the notepad validates.
+  useEffect(() => {
+    const off = window.grindstone.onDataAction(({ tool }) => {
+      if (tool !== 'data:get') return
+      const engine = draw.current
+      if (!engine) return
+      const payload = buildChartDocPayload({
+        key: drawKeyRef.current,
+        doc: engine.getDoc(),
+        page: 'symbol',
+        address: `${symbol.toLowerCase()}.gs`,
+        symbol,
+        timeframe,
+      })
+      grab(payload)
+        .then((e) => announce(`grabbed: ${e.label || 'chart ' + symbol}`))
+        .catch((err) => announce(`get data failed: ${err instanceof Error ? err.message : err}`))
+    })
+    return off
+  }, [symbol, timeframe])
 
   const q = data?.quote
   const flags = [

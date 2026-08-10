@@ -35,6 +35,11 @@ declare global {
         }
       ) => void
       onChartAction: (cb: (a: { tool: string; symbol?: string }) => void) => () => void
+      /** Get/Post data actions: tool + intent (left=primary, right=quick) +
+       *  the spawn coordinates the page resolves its element from. */
+      onDataAction: (
+        cb: (a: { tool: string; intent: 'primary' | 'quick'; spawn: { x: number; y: number } }) => void
+      ) => () => void
       onFavoritesChanged: (cb: () => void) => () => void
     }
     grindstoneSplit: {

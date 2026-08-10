@@ -1566,6 +1566,14 @@ export class ChartDraw {
 
   // ---- public surface -----------------------------------------------------
 
+  /** The bucket's document, CLONED (docs/DATA_EXCHANGE.md: get chart-doc).
+   *  A clone because the bucket is live shared state — a caller mutating the
+   *  returned doc must not be editing the chart behind the engine's back,
+   *  which is precisely the out-of-band write the autosave would then race. */
+  getDoc(): ChartDoc {
+    return JSON.parse(JSON.stringify(docOf(this.bucket()))) as ChartDoc
+  }
+
   /** Chart.tsx rebuilds its series on every data change; re-point at the live one. */
   setSeries(series: ISeriesApi<SeriesType>): void {
     this.series = series
