@@ -20,6 +20,17 @@ ROOT = CODE.parent
 CHECKS: list[tuple[str, callable]] = []
 
 
+class Skipped(Exception):
+    """This check could not run here, and says so.
+
+    Distinct from both pass and fail on purpose. A skipped check that printed
+    `ok` would be a lie, and one that printed FAIL would send the reader
+    hunting a defect that is not there. The summary line changes shape when
+    anything skips, so a partial run can never match the checkpoint's pinned
+    expectation — a checkpoint has to mean the whole gate ran."""
+
+
+
 def check(name):
     def wrap(fn):
         CHECKS.append((name, fn))
@@ -3231,6 +3242,8 @@ def _frontend():
     # Linux or macOS. It still counted `ok`, which made the gate report coverage
     # it did not have. The portable copy stays as a fallback, now cross-platform.
     exe = shutil.which("node")
+    if exe and _is_foreign_node(exe):
+        exe = None          # a Windows node cannot read this platform's paths
     if not exe:
         portable = ROOT.parent.parent / "runtimes" / "node"
         cands = [portable / "node.exe", portable / "node"]
@@ -3242,16 +3255,44 @@ def _frontend():
         cands += sorted((Path.home() / ".local/share/grindstone").glob("node-*/bin/node"),
                         reverse=True)
         for cand in cands:
-            if cand.exists():
+            if cand.exists() and not _is_foreign_node(str(cand)):
                 exe = str(cand)
                 break
     # typescript is installed, so the toolchain was meant to be here. Skipping
     # now would recreate exactly the false green this check exists to avoid.
     assert exe, ("typescript is installed but no node runtime is on PATH — "
                  "the typecheck would be skipped while still reporting ok")
+    # A FOREIGN node is not a usable node. Under WSL, PATH interop exposes the
+    # Windows install, so `which node` succeeds and then receives Linux paths
+    # it cannot read: tsc failed here with
+    #     Cannot find module 'C:\mnt\c\Users\...'
+    # because Windows node rewrote /mnt/c/... as a drive-relative path. That is
+    # a broken TOOLCHAIN, not broken source, and reporting it as a typecheck
+    # failure sends the reader looking for a type error that does not exist.
+    foreign = sys.platform != "win32" and (
+        exe.lower().endswith(".exe") or exe.startswith("/mnt/"))
+    if foreign:
+        print(f"      (skipping typecheck — {exe} is a Windows node reached "
+              f"through interop and cannot take {sys.platform} paths; run the "
+              f"typecheck on the platform that owns the toolchain)")
+        return
     r = subprocess.run([exe, str(tsc), "--noEmit"], cwd=app_dir,
                        capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, f"tsc failed:\n{(r.stdout or r.stderr)[:1500]}"
+
+
+def _is_foreign_node(exe: str) -> bool:
+    """A node that cannot read this platform's paths is not a usable node.
+
+    Under WSL, PATH interop exposes the Windows install and `which node`
+    happily returns it — or, as here, the workspace's own portable
+    `runtimes/node/node.exe`. Handing either a Linux path produces
+    `Cannot find module 'C:\\mnt\\c\\Users\\...'`, because Windows node rewrote
+    /mnt/c/... as drive-relative. Every probe below then reports "crashed",
+    which reads as broken source rather than a toolchain that was never
+    usable."""
+    return sys.platform != "win32" and (
+        exe.lower().endswith(".exe") or exe.startswith("/mnt/"))
 
 
 def _node_exe() -> str | None:
@@ -3259,14 +3300,14 @@ def _node_exe() -> str | None:
     merging them means touching the check that closed the typecheck false
     green, and this one is new."""
     exe = shutil.which("node")
-    if exe:
+    if exe and not _is_foreign_node(exe):
         return exe
     portable = ROOT.parent.parent / "runtimes" / "node"
     cands = [portable / "node.exe", portable / "node"]
     cands += sorted((Path.home() / ".local/share/grindstone").glob("node-*/bin/node"),
                     reverse=True)
     for cand in cands:
-        if cand.exists():
+        if cand.exists() and not _is_foreign_node(str(cand)):
             return str(cand)
     return None
 
@@ -3294,7 +3335,8 @@ def _chart_time():
         print("      (node_modules absent — npm install enables the chart-time check)")
         return
     exe = _node_exe()
-    assert exe, "no node runtime on PATH — the chart-time arithmetic cannot be run"
+    if exe is None:
+        raise Skipped("no usable node runtime on this platform — the chart-time arithmetic cannot be run")
     ver = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
     m = re.match(r"v(\d+)\.(\d+)", ver.stdout.strip())
     assert m, f"could not read node version: {ver.stdout!r}"
@@ -3668,7 +3710,8 @@ def _chart_persistence():
         print("      (node_modules absent — npm install enables the engine probe)")
         return
     exe = _node_exe()
-    assert exe, "no node runtime on PATH — the persistence round-trip cannot be run"
+    if exe is None:
+        raise Skipped("no usable node runtime on this platform — the persistence round-trip cannot be run")
 
     probe = r"""
 import { ChartDraw, CHART_DOC_VERSION } from './src/renderer/src/components/ChartDraw.ts'
@@ -4366,7 +4409,8 @@ def _chart_legs():
         print("      (node_modules absent — npm install enables the leg probe)")
         return
     exe = _node_exe()
-    assert exe, "no node runtime on PATH — the leg arithmetic cannot be run"
+    if exe is None:
+        raise Skipped("no usable node runtime on this platform — the leg arithmetic cannot be run")
 
     probe = r"""
 import { ChartDraw, legStrikeOnTrend, legWindow, resolveLegDoc, SIDE_INK, tradingDayOffset }
@@ -5366,7 +5410,8 @@ def _chart_constraints():
         print("      (node_modules absent — npm install enables the constraint probe)")
         return
     exe = _node_exe()
-    assert exe, "no node runtime on PATH — the constraint arithmetic cannot be run"
+    if exe is None:
+        raise Skipped("no usable node runtime on this platform — the constraint arithmetic cannot be run")
 
     probe = r"""
 import { ChartDraw, slotsOf, degreesOfFreedom, analyze, propagate }
@@ -5702,15 +5747,28 @@ def main() -> int:
             return 1
         seen[fn] = name
 
+    skipped: list[str] = []
     for name, fn in CHECKS:
         try:
             fn()
+        except Skipped as e:
+            skipped.append(f"{name}: {e}")
+            print(f"skip  {name} — {e}")
+            continue
         except Exception as e:  # noqa: BLE001 - report, don't crash the runner
             print(f"FAIL  {name}: {e}")
             print(f"SELFTEST FAILED {passed}/{total}")
             return 1
         passed += 1
         print(f"ok    {name}")
+    if skipped:
+        # Deliberately NOT the "SELFTEST OK n/n" shape the checkpoint pins: a
+        # run that could not execute part of itself must not be checkpointable.
+        print(f"SELFTEST INCOMPLETE {passed}/{total} — {len(skipped)} skipped "
+              f"on {sys.platform}:")
+        for s_ in skipped:
+            print(f"  - {s_}")
+        return 0
     print(f"SELFTEST OK {passed}/{total}")
     return 0
 
