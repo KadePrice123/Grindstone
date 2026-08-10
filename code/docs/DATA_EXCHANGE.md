@@ -39,8 +39,14 @@ carrying:
 2. its **target resolver** (how the clicked instance is found — see DX-8),
 3. for targets: the payload kinds it **accepts**, and per accepted kind,
    what *applying* concretely means,
-4. **tests**: a fixture payload that round-trips, plus a refusal test for
-   every non-accepted kind.
+4. its **notepad renderer** — how a grabbed payload of this kind displays in
+   the notepad (§3) — and, where editing is meaningful, its editor,
+5. **tests**: a fixture payload that round-trips, a refusal test for every
+   non-accepted kind, and a render test for the notepad.
+
+Rendering is part of enrollment, not an afterthought: a kind that cannot
+display itself properly is not enrolled, so nothing in the notepad can ever
+fall back to a wall of raw JSON.
 
 **Requirement DX-2 — compatibility lives with the target, appears on the
 source.** A news article's effective target set simply lacks "chart", so Post
@@ -84,7 +90,8 @@ A discriminated union, versioned, with provenance:
 DataPayload = {
   v: 1,
   kind: 'chart-doc' | 'drawing' | 'leg' | 'chain' | 'contract'
-      | 'form' | 'backtest-spec',
+      | 'form' | 'backtest-spec' | 'note',   // note = user-authored text,
+                                             // written directly in the notepad
   data: <per-kind>,
   provenance: {
     page, key?, symbol?, timeframe?, axis?,   // EXPLICIT — chart keys are not
@@ -117,23 +124,62 @@ Grounding rules that came out of the scout, each preventing a real bug:
 
 ---
 
-## 3. The pad — one holding slot, backend-held
+## 3. The notepad — grabbed data is a visible collection
 
-**Requirement DX-5.** The held payload lives in the backend
-(`backend/datapad.py`, `GET/PUT /api/datapad`, one slot per user, ≤256 KB,
-strict validator in the `chartobjects.py` style). Not renderer state, not
-main-process state — the backend is the only component both app instances
-see, so a pad held anywhere else is invisible to the agent. The wheel's main
-process caches only a `hasPayload` boolean to light/grey the Post segment.
+**Decision (Kade's, superseding the one-slot design).** The user grabs
+**multiple** points of data. Posting opens a wheel showing everything held;
+the notepad is a page where grabs are viewed, edited, and removed. The
+original one-slot rationale was "a stack nobody can see is a bug factory" —
+this answers it by making the stack *seen*, which is strictly better than
+capping it.
 
-**Requirement DX-6.** One slot, replaced on every Get. A clipboard history is
-v2; a stack nobody can see is a bug factory.
+**Requirement DX-5 — backend-held, a collection.** `backend/notepad.py`,
+`/api/notepad` CRUD: list, add, edit, delete. Per-user; entries are
+`{id, payload, label?, addedAt}` with the payload validated on every write —
+**including edits**, because an edited payload must still be the typed thing
+its kind claims, or every post target breaks. Caps: 32 entries, ≤256 KB each;
+adding beyond the cap refuses with the count rather than silently evicting.
+Backend-held for the same reason as before: it is the only place both app
+instances can see, and the agent's grabs land in the same notepad, stamped
+`workspace: 'agent'`, visible to the user like everything else.
+
+**Requirement DX-6 — the post wheel.** Post data over a target **always**
+opens a picker wheel. The **top segment is always "Open notepad"** — viewing
+and editing what you hold is one click away at exactly the moment you are
+deciding what to post. Below it, the held entries: each segment labeled from
+kind + provenance ("chain SPY ×38", "leg 761P", "note"), **compatible with
+the target lit, incompatible greyed** — the same enrollment rule as
+everywhere, now applied per entry. Segments carry the entry id only;
+payloads stay in the notepad (wheel segments are deliberately payload-free).
+More entries than segments → most recent first; the notepad, always at the
+top, is the overflow. No special case for a single entry — one consistent
+gesture.
 
 **Requirement DX-7 — one codepath.** Human gesture → `data:action` IPC →
-page adapter → `/api/datapad`. Agent → `get_data`/`post_data` tools →
-`/api/datapad` directly, or drives its own UI which runs the same adapters.
-No second serialization path exists, so the payload the agent produces is
-byte-compatible with the one the wheel produces.
+page adapter → `/api/notepad`. Agent → `get_data`/`post_data` tools → the
+same routes. The wheel's main process caches only the entry summaries
+(id, kind, label, compatibility) needed to build the picker.
+
+**Requirement DX-7b — the notepad surface.** A page (`notepad.gs`), listing
+every entry rendered **by its kind's own renderer**:
+
+- **chain** → a table carrying all 13 fields, sortable, with its query
+  window and source label;
+- **contract** → a card (occ, bid/ask/mid, greeks, dte);
+- **chart-doc / drawing / leg** → a compact chart preview — bars fetched
+  from provenance's symbol+timeframe, drawings overlaid — reusing the
+  existing compact chart mode; counts and leg summaries beside it;
+- **form / backtest-spec** → labeled field/value rows; a spec also shows the
+  engine's validate verdict;
+- **note** → the text itself, editable in place.
+
+**Requirement DX-7c — editing is per-kind and declared.** Every entry can be
+deleted or relabeled. Beyond that, each enrollment declares what editing
+means: a note is free text; a chain supports row removal (narrowing the
+grab); form values are editable field by field and re-validated. Deep edits
+go through the element's own editor — **the editor for chart data is a
+chart**: post it to an agent-or-scratch chart, edit there, grab it back.
+The notepad never grows a parallel chart editor.
 
 ---
 
@@ -225,4 +271,9 @@ data vanishes, no error anywhere."
    (gate, 422); the accounts form has no adapter (gate, registry scan).
 6. **Refusals say why** — every non-accepted pair refuses with a non-empty
    reason (gate, table-driven).
-7. **Mutation-tested** via `tools/mutate.py` before any of it is trusted.
+7. **Renderer parity** — every enrolled kind has a registered notepad
+   renderer (gate, registry scan) and renders without fallback (e2e: a chain
+   entry shows a 13-column table, not JSON).
+8. **Edits revalidate** — an edited entry that no longer validates is
+   refused with the reason; a chain with rows removed still posts (gate).
+9. **Mutation-tested** via `tools/mutate.py` before any of it is trusted.
