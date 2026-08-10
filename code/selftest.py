@@ -3573,9 +3573,20 @@ console.log(JSON.stringify(out))
     # user has already learned, which is the one thing DX-13 forbids.
     act = member_body(wheel, "private act(")
     fire = act[act.index("hintKind"):]
-    assert "intent === 'quick'" in act[:act.index("hintKind")], (
+    guard = act[:act.index("hintKind")]
+    assert "intent === 'quick'" in guard, (
         "the prediction no longer fires only on quick intent — a left-click "
         "would silently do something other than the tool's own job")
+    # AND CLICK MODE. 'quick' alone is not enough and asserting only that
+    # shipped a regression: a hold-release flick is dispatched as 'quick'
+    # too, and the flick is how this wheel NAVIGATES. Predicting there ate
+    # the gesture — sweeping onto Tabs closed the wheel and did nothing.
+    # DX-14 agrees independently: a hint is only readable on a face sitting
+    # still, so the shortcut belongs to click mode by its own rule.
+    assert "s.mode === 'click'" in guard, (
+        "the prediction fires during a HOLD-RELEASE flick again — that "
+        "gesture is how the user reaches a sub-wheel, and the prediction "
+        "swallows it whole")
     assert "openAddress" in fire[:200], "the prediction fires nothing"
 
     # --- LAYOUTS NEVER RESTRUCTURE (Kade's rule, and the reason the main

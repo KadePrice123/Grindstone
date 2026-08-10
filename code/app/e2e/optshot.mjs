@@ -368,9 +368,37 @@ try {
     console.log('PREDICT opened:', JSON.stringify(opened))
     const openOk = opened === 'SPY'
 
+    // ---- THE FLICK MUST STILL NAVIGATE (the regression Kade caught).
+    // A hold-release is dispatched as 'quick' too, so a prediction gated on
+    // intent alone ate this gesture: sweeping onto Tabs closed the wheel and
+    // did nothing. Every assertion above drove CLICK mode and none of them
+    // noticed. So drive the real flick: press, travel east past the click
+    // threshold, release over Tabs -- the tabs wheel must open AND STAY.
+    await spy.eval(`(window.grindstone.wheelEvt('down', 900, 300,
+        {context:'chain', symbols:['SPY']}), 'ok')`)
+    await sleep(350)
+    for (const dx of [40, 90, 150]) {
+      await spy.eval(`(window.grindstone.wheelEvt('move', ${900 + dx}, 300), 'ok')`)
+    }
+    await spy.eval(`(window.grindstone.wheelEvt('up', ${900 + 170}, 300), 'ok')`)
+    const flicked = await waitFor(async () => {
+      const t = (await targets()).find((x) => x.url.includes('mode=wheel'))
+      if (!t) return null
+      const ui = await connect(t)
+      const raw = await ui.eval(`JSON.stringify({
+        id: document.querySelector('.wheel-face')?.dataset.wheel ?? null,
+        segs: document.querySelectorAll('.wf-seg').length,
+      })`)
+      const st = JSON.parse(raw)
+      return st.id === 'tabs' ? st : null
+    }, 'the flick to open the tabs wheel', 10000).catch(() => null)
+    console.log('FLICK:', JSON.stringify(flicked))
+    const flickOk = !!flicked && flicked.id === 'tabs'
 
 
-    process.exit(seen !== null && survived && padOk && predictOk && openOk ? 0 : 1)
+
+    process.exit(
+      seen !== null && survived && padOk && predictOk && openOk && flickOk ? 0 : 1)
   }
 
   // SHOT_PAGE=data screenshots the Data and Settings pages instead of the Opt

@@ -768,9 +768,22 @@ export class WheelManager {
     if (!s) return 'close'
     const seg = index !== null ? s.segments[index] : undefined
     if (!seg || seg.disabled) return 'close'
-    // THE PREDICTION FIRES ON QUICK, and only on quick: left-click keeps
-    // every tool's declared behaviour, so nothing a user has learned changes.
-    if (intent === 'quick' && seg.hintKind === 'address' && seg.hintArg) {
+    // THE PREDICTION FIRES ON A RIGHT-CLICK IN CLICK MODE, and nowhere else.
+    //
+    // 'quick' alone is NOT the right condition, and reading it as such broke
+    // the wheel's core gesture. A hold-release flick is also dispatched as
+    // 'quick' (see the wheel:evt 'up' handler) -- and the flick is how you
+    // NAVIGATE: hold, sweep onto Tabs, release, and the tabs wheel opens.
+    // Predicting there swallowed that gesture whole; flicking onto Tabs
+    // closed the wheel and did nothing anyone asked for.
+    //
+    // DX-14 settles it on its own terms. The prediction must be VISIBLE
+    // before commit, and its hint is only readable when the face is sitting
+    // still in click mode -- mid-flick nobody is reading anything. So the
+    // shortcut belongs to the deliberate right-click on a face you can see,
+    // and every gesture a user already learned keeps its declared behaviour.
+    if (intent === 'quick' && s.mode === 'click'
+        && seg.hintKind === 'address' && seg.hintArg) {
       this.tabs.openAddress(s.winId, seg.hintArg)
       return 'close'
     }
