@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS chart_objects (
     updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     PRIMARY KEY (user_id, key)
 );
+-- The Get/Post notepad (docs/DATA_EXCHANGE.md). A new TABLE, so this
+-- executescript-per-connect schema delivers it to existing installs; only
+-- ALTERs need a migration path here.
+CREATE TABLE IF NOT EXISTS notepad (
+    user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    id       TEXT NOT NULL,
+    payload  TEXT NOT NULL,
+    label    TEXT NOT NULL DEFAULT '',
+    added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (user_id, id)
+);
 CREATE TABLE IF NOT EXISTS backtest_presets (
     id          INTEGER PRIMARY KEY,
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

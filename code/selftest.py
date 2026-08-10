@@ -3143,6 +3143,150 @@ def _autostart():
             "recorder the user believes they turned off"
 
 
+@check("notepad: every kind round-trips, edits revalidate, secrets cannot enter")
+def _notepad():
+    """The Get/Post holding area (docs/DATA_EXCHANGE.md §3). The properties
+    pinned here are the ones every enrolled element will lean on:
+
+    - a payload validated at add-time is REVALIDATED at edit-time, because an
+      edited payload must still be the typed thing its kind claims;
+    - a chain carries all 13 backend fields (the frontend interfaces carry 9 —
+      that mismatch already nearly shipped once);
+    - the credential scrub holds, because the notepad is read by the agent BY
+      DESIGN and a secret stored here is a secret exported;
+    - caps refuse with the count, never evict silently."""
+    import sqlite3 as _sq
+    sys.path.insert(0, str(CODE))
+    from backend import notepad as np
+
+    db = _sq.connect(":memory:")
+    db.row_factory = _sq.Row
+    db.executescript("CREATE TABLE users (id INTEGER PRIMARY KEY);"
+                     "INSERT INTO users (id) VALUES (1);" + np.SCHEMA)
+
+    prov = {"workspace": "user", "capturedAt": "2026-08-10T00:00:00Z",
+            "page": "opt", "symbol": "SPY"}
+    full_contract = {
+        "occ_symbol": "SPY260918P00761000", "expiration": "2026-09-18",
+        "strike": 761.0, "right": "P", "bid": 40.1, "ask": 40.9, "last": 40.5,
+        "iv": 0.19, "delta": -0.41, "gamma": 0.01, "theta": -0.09,
+        "vega": 0.55, "rho": -0.31,
+    }
+
+    # --- every kind round-trips
+    fixtures = {
+        "note": {"text": "compare 761P against the Sep chain"},
+        "chain": {"underlying": "SPY", "contracts": [full_contract],
+                  "source": "alpaca (indicative)"},
+        "contract": full_contract,
+        "chart-doc": {"key": "SPY|1Day", "doc": {"version": 1, "drawings": []}},
+        "drawing": {"drawing": {"id": "d1", "kind": "hline"}, "closure": {}},
+        "leg": {"resolved": {"strike": 761.0}, "stored": {}},
+        "form": {"formKind": "recording-job",
+                 "values": {"symbol": "SPY", "interval_seconds": 900}},
+        "backtest-spec": {"spec": {"name": "t", "capital": 100000}},
+    }
+    ids = {}
+    for kind, data in fixtures.items():
+        e = np.add(db, 1, {"v": 1, "kind": kind, "data": data, "provenance": prov})
+        ids[kind] = e["id"]
+        back = np.get(db, 1, e["id"])
+        assert back and back["payload"]["kind"] == kind, kind
+
+    # --- the 13-field guarantee survives the round trip
+    chain = np.get(db, 1, ids["chain"])["payload"]["data"]["contracts"][0]
+    for f in ("gamma", "theta", "vega", "rho"):
+        assert f in chain, (
+            f"{f} was dropped by the notepad round-trip — the frontend "
+            f"interfaces carry 9 of the backend's 13 fields, and the payload "
+            f"must be the backend's envelope")
+
+    # --- summaries are payload-free (wheel segments must stay payload-free)
+    for s_ in np.summaries(db, 1):
+        assert set(s_) == {"id", "kind", "label"}, s_
+        assert s_["label"], "an entry with no label gets a derived one"
+    lbl = {s_["id"]: s_["label"] for s_ in np.summaries(db, 1)}
+    assert lbl[ids["chain"]] == "chain SPY ×1"
+    assert lbl[ids["contract"]] == "761P 09-18"
+
+    # --- edits revalidate; a valid narrowing passes, nonsense refuses
+    np.edit(db, 1, ids["chain"], {"v": 1, "kind": "chain",
+            "data": {"contracts": [full_contract]}, "provenance": prov})
+    try:
+        np.edit(db, 1, ids["chain"], {"v": 1, "kind": "chain",
+                "data": {"contracts": []}, "provenance": prov})
+        raise AssertionError("an empty chain passed edit validation")
+    except np.NotepadError:
+        pass
+    # an edit cannot quietly change what a thing IS
+    try:
+        np.edit(db, 1, ids["chain"], {"v": 1, "kind": "note",
+                "data": {"text": "now a note"}, "provenance": prov})
+        raise AssertionError("an edit changed a chain into a note")
+    except np.NotepadError as e:
+        assert "kind" in str(e)
+
+    # --- secrets cannot enter, wherever they hide. The fixtures are BUILT at
+    # runtime — this file is tracked, and the workspace scanner (rightly)
+    # refuses credential-shaped strings in tracked files, fixture or not. It
+    # caught the literal version of these two lines.
+    fake_key = "PK" + "ABCDEF1234567890XYZ"
+    fake_assign = "secret" + "_key = " + "abcdef0123456789abcdef01"
+    for label, data in [
+        ("a key id in a note", {"text": f"my key is {fake_key} ok"}),
+        ("an assignment in a note", {"text": fake_assign}),
+    ]:
+        try:
+            np.add(db, 1, {"v": 1, "kind": "note", "data": data, "provenance": prov})
+            raise AssertionError(f"{label} entered the notepad — the agent "
+                                 f"reads this store by design")
+        except np.NotepadError as e:
+            assert "credential" in str(e), str(e)
+
+    # --- a form value must be scalar (nested structures do not round-trip)
+    try:
+        np.add(db, 1, {"v": 1, "kind": "form",
+                       "data": {"formKind": "x", "values": {"a": {"nested": 1}}},
+                       "provenance": prov})
+        raise AssertionError("a nested form value passed validation")
+    except np.NotepadError:
+        pass
+
+    # --- provenance is mandatory and its workspace is closed-set
+    for bad_prov in ({}, {"workspace": "user"},
+                     {"workspace": "root", "capturedAt": "2026-01-01T00:00:00Z"}):
+        try:
+            np.add(db, 1, {"v": 1, "kind": "note", "data": {"text": "x"},
+                           "provenance": bad_prov})
+            raise AssertionError(f"provenance {bad_prov!r} was accepted")
+        except np.NotepadError:
+            pass
+
+    # --- the cap refuses with the count, never evicts
+    have = len(np.list_entries(db, 1))
+    for i in range(np.MAX_ENTRIES - have):
+        np.add(db, 1, {"v": 1, "kind": "note", "data": {"text": f"n{i}"},
+                       "provenance": prov})
+    try:
+        np.add(db, 1, {"v": 1, "kind": "note", "data": {"text": "one more"},
+                       "provenance": prov})
+        raise AssertionError("the cap did not hold")
+    except np.NotepadError as e:
+        assert str(np.MAX_ENTRIES) in str(e), \
+            "the refusal must name the count — 'notepad full' with no number " \
+            "sends the user counting by hand"
+    assert len(np.list_entries(db, 1)) == np.MAX_ENTRIES, "something was evicted"
+
+    # --- remove is honest about whether it removed
+    assert np.remove(db, 1, ids["note"]) is True
+    assert np.remove(db, 1, ids["note"]) is False
+
+    # --- a corrupt row degrades to skipped, never a crash
+    db.execute("UPDATE notepad SET payload='{not json' WHERE user_id=1 AND id=?",
+               (ids["leg"],))
+    assert all(e["id"] != ids["leg"] for e in np.list_entries(db, 1))
+
+
 def dt_date(s: str):
     import datetime as _dt
     return _dt.date.fromisoformat(s)

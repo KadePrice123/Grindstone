@@ -32,6 +32,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import backtests as backtests_mod
 from . import datajobs as datajobs_mod
 from . import autostart as autostart_mod
+from . import notepad as notepad_mod
 from . import keyprobe as keyprobe_mod
 from . import syskey as syskey_mod
 from . import chartobjects as chartobjects_mod
@@ -239,6 +240,16 @@ class SystemKeyIn(BaseModel):
     #: Set only after the user has been shown, in words, that the key can place
     #: real orders. Never defaulted true, and never inferred.
     accept_live_risk: bool = False
+
+
+class NotepadAddIn(BaseModel):
+    payload: dict[str, Any]
+    label: str = Field(default="", max_length=80)
+
+
+class NotepadEditIn(BaseModel):
+    payload: dict[str, Any] | None = None
+    label: str | None = Field(default=None, max_length=80)
 
 
 class ImportIn(BaseModel):
@@ -1062,6 +1073,40 @@ def create_app(state: State) -> FastAPI:
         if cur.rowcount == 0:
             raise HTTPException(404, "no such job")
         return {"ok": True}
+
+    @app.get("/api/notepad")
+    def notepad_list(s=Depends(current_session)) -> list[dict[str, Any]]:
+        with state.db() as db:
+            return notepad_mod.list_entries(db, s.user_id)
+
+    @app.get("/api/notepad/summaries")
+    def notepad_summaries(s=Depends(current_session)) -> list[dict[str, Any]]:
+        """What the post wheel builds its segments from — never payloads."""
+        with state.db() as db:
+            return notepad_mod.summaries(db, s.user_id)
+
+    @app.post("/api/notepad")
+    def notepad_add(body: NotepadAddIn, s=Depends(current_session)) -> dict[str, Any]:
+        try:
+            with state.db() as db:
+                return notepad_mod.add(db, s.user_id, body.payload, body.label)
+        except notepad_mod.NotepadError as e:
+            raise HTTPException(422, str(e)) from None
+
+    @app.patch("/api/notepad/{entry_id}")
+    def notepad_edit(entry_id: str, body: NotepadEditIn,
+                     s=Depends(current_session)) -> dict[str, Any]:
+        try:
+            with state.db() as db:
+                return notepad_mod.edit(db, s.user_id, entry_id,
+                                        body.payload, body.label)
+        except notepad_mod.NotepadError as e:
+            raise HTTPException(422, str(e)) from None
+
+    @app.delete("/api/notepad/{entry_id}")
+    def notepad_remove(entry_id: str, s=Depends(current_session)) -> dict[str, Any]:
+        with state.db() as db:
+            return {"removed": notepad_mod.remove(db, s.user_id, entry_id)}
 
     @app.get("/api/syskey")
     def syskey_status(s=Depends(current_session)) -> dict[str, Any]:
