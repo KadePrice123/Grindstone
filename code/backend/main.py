@@ -47,7 +47,11 @@ def _die_with_parent() -> None:
 
 
 def main() -> int:
-    if os.environ.get("GRINDSTONE_BOOT_TOKEN") and not sys.stdin.closed:
+    # getattr, not sys.stdin.closed: under a console-less launch (pythonw, a
+    # scheduled task, a --noconsole build) sys.stdin is None, and the bare
+    # attribute access is an AttributeError whose traceback goes nowhere,
+    # because print() is also a no-op with no console attached.
+    if os.environ.get("GRINDSTONE_BOOT_TOKEN") and getattr(sys.stdin, "closed", True) is False:
         _die_with_parent()
 
     boot_token = os.environ.get("GRINDSTONE_BOOT_TOKEN")
@@ -87,8 +91,26 @@ def main() -> int:
     boot_con = connect_market()
     state.universe.load(boot_con)
     boot_con.close()
-    state.recorder = Recorder(connect_market(), state.creds_for)
-    state.recorder.start()
+    # ONE recorder per data directory. If an unattended recorder already owns
+    # this store, the app runs without one: two would halve each other's
+    # effective interval against a shared 200 req/min budget and flap every
+    # job's status. The Data page still shows everything, because it reads
+    # record_jobs rather than in-memory state.
+    from backend import instancelock
+    from backend.db import data_dir as _data_dir
+
+    state.recorder_lock = instancelock.acquire_or_none(_data_dir())
+    if state.recorder_lock is not None:
+        # Only the process that owns the runner may declare its runs orphaned.
+        if state.backtests is not None:
+            n = state.backtests.sweep_orphans()
+            if n:
+                LOG.info("marked %d interrupted backtest run(s)", n)
+        state.recorder = Recorder(connect_market(), state.creds_for)
+        state.recorder.start()
+    else:
+        LOG.info("an unattended recorder owns this data directory — the app "
+                 "will not start a second one")
 
     # NO HEAVY IMPORTS HERE, EAGER OR LAZY. A heavy import holds the GIL and
     # the import lock, so every in-flight request stalls for its duration —

@@ -2952,6 +2952,118 @@ def _key_probe():
         assert banned not in src, f"keyprobe.py contains {banned!r}"
 
 
+@check("unattended recorder: one per data dir, and building the app breaks nothing")
+def _unattended_recorder():
+    """Two recorders against one store is not untidiness — it doubles provider
+    calls against a shared 200 req/min budget, mutually de-schedules jobs
+    through a single `last_run_at`, flaps every status, and kills in-flight
+    backtests. The guard is a socket rather than a PID file because the kernel
+    releases it however the process dies, and `os.kill(pid, 0)` is not a
+    liveness probe on Windows."""
+    import os
+    import tempfile
+    sys.path.insert(0, str(CODE))
+    from backend import instancelock
+
+    with tempfile.TemporaryDirectory() as td:
+        a, b = Path(td) / "one", Path(td) / "two"
+        a.mkdir(); b.mkdir()
+        assert instancelock.port_for(a) != instancelock.port_for(b), \
+            "two data directories collided on one port — a second store would " \
+            "be locked out by the first"
+        # Two SPELLINGS of one directory must be one lock. `resolve()` is what
+        # guarantees that — absolute, junction-followed, canonical-cased on
+        # Windows — so this pins the NORMALISATION rather than any case-folding
+        # of our own. (An extra .lower() lived here until a mutation test
+        # showed it changed nothing on Windows and would wrongly collide
+        # /data/Foo with /data/foo on POSIX.)
+        assert instancelock.port_for(a) == instancelock.port_for(a / "."), \
+            "a non-normalised path got its own lock"
+        assert instancelock.port_for(a) == instancelock.port_for(str(a) + os.sep), \
+            "a trailing separator got its own lock"
+
+        first = instancelock.acquire_or_none(a)
+        assert first is not None, "the first recorder could not take its own lock"
+        try:
+            assert instancelock.acquire_or_none(a) is None, \
+                "a SECOND recorder acquired the same data directory"
+            other = instancelock.acquire_or_none(b)
+            assert other is not None, \
+                "a different data directory was locked out by an unrelated one"
+            other.release()
+        finally:
+            first.release()
+        # Released means genuinely re-acquirable, or a crashed recorder would
+        # lock the user out until reboot.
+        again = instancelock.acquire_or_none(a)
+        assert again is not None, "the lock was not released"
+        again.release()
+
+    # --- constructing the app must NOT be destructive. This used to run in
+    # BacktestManager.__init__, so a second process starting — a recorder, a
+    # test, a stray create_app — errored out a backtest the FIRST process was
+    # still writing to, and its runner kept writing into a row the UI had
+    # already given up on.
+    bt = (CODE / "backend" / "backtests.py").read_text(encoding="utf-8")
+    head = bt[bt.index("class BacktestManager"):]
+    init = head[head.index("def __init__"):head.index("def sweep_orphans")]
+    assert "interrupted by app restart" not in init, (
+        "the orphan sweep is back inside __init__ — merely constructing the "
+        "app now errors out another process's running backtests")
+    assert "def sweep_orphans" in bt, "the explicit sweep entry point is gone"
+    main_src = (CODE / "backend" / "main.py").read_text(encoding="utf-8")
+    assert "sweep_orphans()" in main_src, \
+        "nothing calls sweep_orphans — orphaned runs would stay 'running' forever"
+    assert "acquire_or_none" in main_src, \
+        "the sidecar starts a recorder without taking the lock"
+
+    # --- the console-less landmine. Under pythonw / a scheduled task /
+    # --noconsole, sys.stdin is None: the bare attribute access raises, and the
+    # print that would report it is a no-op with no console attached.
+    # Comments stripped first. Every source scan in this file that forgot to
+    # do that matched its OWN warning text and failed on correct code — three
+    # times in one session. The rule: scan code, never prose.
+    main_code = "\n".join(ln.split("#")[0] for ln in main_src.splitlines())
+    assert "sys.stdin.closed" not in main_code, (
+        "main.py dereferences sys.stdin.closed — that is an AttributeError in "
+        "any console-less launch (pythonw, a scheduled task, --noconsole), and "
+        "it fails silently because print() has no console to report it on")
+
+    # --- the recorder entry point stays lean: no API, no BacktestManager.
+    #
+    # PARSED, not grepped. This module's own docstring explains that it must
+    # not import FastAPI, so a string scan matches the very prose that
+    # documents the rule — the fourth time that happened while writing these
+    # checks. An AST sees imports and names; it cannot see English.
+    import ast
+    rm_src = (CODE / "backend" / "recorder_main.py").read_text(encoding="utf-8")
+    tree = ast.parse(rm_src)
+    imported: set[str] = set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imported.add(node.module.split(".")[0])
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    for banned in ("fastapi", "uvicorn", "FastAPI", "create_app",
+                   "BacktestManager", "backtests"):
+        assert banned not in imported, (
+            f"recorder_main imports {banned!r} — the unattended path must not "
+            f"construct the app (which sweeps another process's orphans) nor "
+            f"serve an API whose self-minted boot token no client knows")
+    assert "syskey" in imported, \
+        "the unattended recorder must resolve the system key"
+    for banned in ("unwrap_dek", "decrypt_secret", "alpaca_creds_for"):
+        assert banned not in imported and banned not in names, \
+            f"recorder_main reaches the vault via {banned!r}"
+
+
 def dt_date(s: str):
     import datetime as _dt
     return _dt.date.fromisoformat(s)

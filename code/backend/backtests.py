@@ -250,17 +250,27 @@ class BacktestManager:
         self._sync_lock = threading.Lock()
         self._sync_thread: threading.Thread | None = None
         self._sync_status: dict[str, Any] = {"state": "idle"}
-        # A sidecar restart orphans any 'running' row — the subprocess died
-        # with us (parent watchdog) or will write into a row nobody reads.
+
+    def sweep_orphans(self) -> int:
+        """Mark runs the previous process left flagged 'running' as errored.
+
+        CALLED BY THE SIDECAR ENTRY POINT, never from __init__. It used to run
+        on construction, which made merely BUILDING the app destructive: a
+        second process starting — an unattended recorder, a test, a stray
+        `create_app` — would error out a backtest the first process was still
+        writing to, and the runner subprocess would keep writing into a row the
+        UI had already given up on. Only the process that owns the runner may
+        decide its runs are orphaned."""
         con = self._market()
         try:
             with con:
-                con.execute(
+                cur = con.execute(
                     "UPDATE backtest_runs SET status='error',"
                     " error='interrupted by app restart',"
                     " finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')"
                     " WHERE status='running'"
                 )
+                return cur.rowcount or 0
         finally:
             con.close()
 

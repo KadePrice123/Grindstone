@@ -66,6 +66,10 @@ class State:
         self.market_path = market_path
         self.universe = Universe()
         self.recorder = None  # set by main.py; tests may leave it None
+        #: Held for the process lifetime when this process owns recording.
+        #: Kept on State so the socket is not garbage-collected, which would
+        #: silently release the lock and let a second recorder start.
+        self.recorder_lock = None
         self.backtests = None  # BacktestManager, created by create_app
         # One owner for both background data jobs, so "is an import already
         # running" has a single answer. Two importers writing the same
@@ -1081,7 +1085,8 @@ def create_app(state: State) -> FastAPI:
             # checkbox they met before the fact.
             raise HTTPException(409, p["detail"] + " Confirm to store it anyway.")
         syskey_mod.store(body.key_id, body.secret_key, v,
-                         dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                         dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         user_id=s.user_id)
         return {**syskey_mod.status(), "probe": p}
 
     @app.post("/api/syskey/probe")

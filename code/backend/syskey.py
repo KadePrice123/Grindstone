@@ -173,7 +173,8 @@ def _unprotect(blob: bytes) -> bytes:
 
 
 # ------------------------------------------------------------------- store
-def store(key_id: str, secret_key: str, verdict: str, enrolled_at: str) -> None:
+def store(key_id: str, secret_key: str, verdict: str, enrolled_at: str,
+          user_id: int | None = None) -> None:
     """Seal the key. Overwrites any previous one."""
     if not available():
         raise SystemKeyUnavailable(
@@ -185,6 +186,12 @@ def store(key_id: str, secret_key: str, verdict: str, enrolled_at: str) -> None:
         "format": FORMAT, "broker": "alpaca",
         "key_id": key_id, "secret_key": secret_key,
         "verdict": verdict, "enrolled_at": enrolled_at,
+        # WHOSE key. A provider that ignored this and answered with one key for
+        # every profile would run one user's jobs on another's credentials and
+        # budget. Optional because blobs written before this field existed
+        # carry no owner, and answering for anyone is correct on the single
+        # -profile machine they were written on.
+        "user_id": user_id,
     }).encode("utf-8")
     blob = _protect(payload)
     # Write-then-replace so a crash mid-write cannot leave a truncated blob
