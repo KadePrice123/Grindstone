@@ -17,6 +17,7 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { backtestReportUrl } from './api'
 import { log } from './log'
+import { asGs, gsRoute, isKnownPage } from '../renderer/src/urls'
 
 /** Untrusted third-party pages live in their own session: no preload, no
  *  node, denied permissions, downloads blocked. Article reading must never
@@ -263,12 +264,12 @@ export interface TabInfo {
   url?: string
 }
 
-/** Platform page names that are NOT tickers, mirrored from the renderer's
- *  urls.ts PAGES — a data.gs tab must not offer "add DATA to chart". */
-const PAGE_NAMES = new Set([
-  'home', 'accounts', 'data', 'settings', 'search', 'article', 'news', 'charts',
-  'help', 'backtest', 'opt', 'notepad',
-])
+/** Platform page names that are NOT tickers — a data.gs tab must not offer
+ *  "add DATA to chart". Backed by urls.ts rather than copied out of it: this
+ *  used to be a hand-kept mirror, and the copy of gsRoute that sat beside it
+ *  silently lost the `opt` case, so every `opt.gs?s=SPY` main opened landed
+ *  on Home. Two decision procedures for one question is the bug. */
+const PAGE_NAMES = { has: (n: string): boolean => isKnownPage(n) }
 
 /**
  * The window / taskbar icon, generated from logo.svg by
@@ -1394,7 +1395,7 @@ export class TabManager {
       this.newBrowserTab(w, text)
       return
     }
-    const [head, qs = ''] = text.split('?')
+    const [head] = text.split('?')
     if (!/\.gs$/i.test(head)) return
     const existing = this.allTabs().find(
       (t) => t.kind === 'app' && t.address === text.toLowerCase()
@@ -1403,19 +1404,12 @@ export class TabManager {
       this.activateTabGlobal(existing.id)
       return
     }
-    // The same address→route translation the renderer's gsRoute() makes.
-    // The vocabulary is tiny and PAGE_NAMES is already mirrored here — the
-    // gate holds both mirrors to the renderer's list.
-    const name = head.slice(0, -3).toLowerCase()
-    const q = new URLSearchParams(qs)
-    let route: string
-    if (!PAGE_NAMES.has(name)) route = `symbol:${name.toUpperCase()}`
-    else if (name === 'home') route = 'idle'
-    else if (name === 'search') route = `search:${q.get('q') ?? ''}`
-    else if (name === 'article') route = `article:${q.get('id') ?? ''}`
-    else if (name === 'help') route = q.get('s') ? `help:${q.get('s')}` : 'help'
-    else route = name
-    this.newTab(w, route)
+    // THE address→route translation, not a copy of it. urls.ts is
+    // dependency-free string logic, so main imports the real thing; the
+    // hand-rolled duplicate that used to live here is what dropped `opt`.
+    const gs = asGs(text)
+    if (!gs) return
+    this.newTab(w, gsRoute(gs))
   }
 
   /** The window whose CHROME view this sender is — for chrome-originated

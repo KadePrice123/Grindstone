@@ -1952,17 +1952,23 @@ def _favorites_system():
     assert "favorites:changed" in api_ts and "/api/favorites" in api_ts, \
         "the api proxy must broadcast favorites mutations to every view"
 
-    # ---- the platform-page list has TWO mirrors that must agree with
-    # urls.ts (this drift actually happened: 'help' was missing from tabs.ts
-    # and a help.gs tab counted as ticker HELP in symbolTabs) ---------------
+    # ---- the platform-page list has ONE home. It used to have two mirrors,
+    # and they drifted twice: 'help' went missing from tabs.ts and a help.gs
+    # tab counted as ticker HELP in symbolTabs; then the copy of gsRoute that
+    # sat beside it lost 'opt', and every opt.gs address main opened landed
+    # on Home. Deleting the copy is the fix — this asserts it stays deleted.
     urls_ts = (CODE / "app/src/renderer/src/urls.ts").read_text(encoding="utf-8")
     m = re_mod.search(r"const PAGES = \[(.*?)\]", urls_ts, re_mod.S)
+    assert m, "urls.ts PAGES no longer parses — it is the single source of pages"
     renderer_pages = set(re_mod.findall(r"'([a-z]+)'", m.group(1)))
+    assert {"opt", "help", "notepad", "backtest"} <= renderer_pages, \
+        f"urls.ts PAGES lost a page: {sorted(renderer_pages)}"
     tabs_ts = (CODE / "app/src/main/tabs.ts").read_text(encoding="utf-8")
-    m = re_mod.search(r"const PAGE_NAMES = new Set\(\[(.*?)\]\)", tabs_ts, re_mod.S)
-    main_pages = set(re_mod.findall(r"'([a-z]+)'", m.group(1)))
-    assert renderer_pages == main_pages, \
-        f"urls.ts PAGES != tabs.ts PAGE_NAMES, diff: {renderer_pages ^ main_pages}"
+    assert re_mod.search(r"const PAGE_NAMES = new Set\(\[", tabs_ts) is None, (
+        "tabs.ts has its own copy of the page list again — that copy is what "
+        "drifted, twice. PAGE_NAMES must delegate to urls.ts isKnownPage")
+    assert "isKnownPage" in tabs_ts, \
+        "tabs.ts no longer derives its page names from urls.ts"
 
     # ---- the built surfaces consume the store (string-level; the e2e is
     # the functional proof of each) -----------------------------------------
@@ -3454,7 +3460,9 @@ def _data_exchange():
     content = (app / "renderer" / "src" / "modes" / "ContentApp.tsx").read_text(encoding="utf-8")
     app_tsx = (app / "renderer" / "src" / "App.tsx").read_text(encoding="utf-8")
     assert "'notepad'" in urls, "notepad.gs is not addressable"
-    assert "'notepad'" in tabs, "tabs.ts PAGE_NAMES lost notepad — it would "         "be treated as a ticker"
+    assert "isKnownPage" in tabs, (
+        "main stopped deriving its page names from urls.ts — with its own "
+        "copy, notepad.gs would be treated as ticker NOTEPAD")
     assert "case 'notepad':" in content and "NotepadPage" in content,         "ContentApp never mounts the notepad"
     assert "'notepad'" in app_tsx, "App.tsx parseRoute dead-ends notepad to idle"
 
@@ -3604,6 +3612,162 @@ console.log(JSON.stringify(out))
     assert "hint" not in wheels_py, (
         "wheels.py knows about 'hint' — predictions are computed per spawn "
         "and must never be persisted into a stored layout")
+
+
+@check("chains: recorded data reads WITHOUT a key; only fetching needs one")
+def _chain_without_key():
+    """A key is needed to FETCH, never to READ.
+
+    The creds guard used to sit directly above a block commented "the
+    DATABASE cache, tried first", which meant it fired before the cache was
+    ever consulted. The recorder fills that cache unattended with the system
+    key; a user with no account of their own was then told to "add an Alpaca
+    account to see live chains" while sitting on data already recorded to
+    their own disk. Nothing in the gate covered the ordering, so moving the
+    guard changed no test — which is why this exists."""
+    import datetime as _dt
+    import tempfile
+    sys.path.insert(0, str(CODE))
+    from backend import options as opt
+    from backend.marketdb import connect_market
+
+    today = _dt.date.today()
+    d_to = today + _dt.timedelta(days=30)
+    rows = [{"occ_symbol": "SPY260918P00755000", "underlying": "SPY",
+             "expiration": (today + _dt.timedelta(days=14)).isoformat(),
+             "strike": 755.0, "right": "P", "bid": 38.1, "ask": 38.9,
+             "last": 38.5, "iv": 0.19, "delta": -0.39, "gamma": 0.01,
+             "theta": -0.09, "vega": 0.55, "rho": -0.3}]
+
+    with tempfile.TemporaryDirectory() as td:
+        con = connect_market(Path(td) / "market.db")
+        try:
+            opt.cache_store(con, "SPY", today, d_to, 700.0, 800.0, None, rows)
+
+            # THE POINT: no creds at all, and the recorded row still comes back.
+            got = opt.fetch(None, "SPY", today.isoformat(), d_to.isoformat(),
+                            700.0, 800.0, None, con=con, ttl_minutes=60.0)
+            assert got["available"], (
+                f"a recorded chain was refused without a key: "
+                f"{got.get('reason')!r} — the recorder writes this cache, and "
+                f"reading your own recorded data cannot require credentials")
+            assert len(got["contracts"]) == 1, got["contracts"]
+            assert "cached" in got["source"], got["source"]
+
+            # And the refusal is still REAL when there is genuinely nothing:
+            # a window the cache does not cover, with no key to go fetch one.
+            far = today + _dt.timedelta(days=300)
+            miss = opt.fetch(None, "SPY", far.isoformat(),
+                             (far + _dt.timedelta(days=5)).isoformat(),
+                             700.0, 800.0, None, con=con, ttl_minutes=60.0)
+            assert not miss["available"],                 "an uncached window with no key must still refuse"
+            assert "no data key" in (miss["reason"] or ""), miss["reason"]
+        finally:
+            con.close()
+
+    # --- AND THE REFUSAL IS VISIBLE. This endpoint answers 200 on a refusal
+    # by design, so the access log reads identically whether the user got a
+    # chain or got told they have no key. That is what turned one report into
+    # an afternoon of inference.
+    app_src = (CODE / "backend" / "app.py").read_text(encoding="utf-8")
+    body = app_src[app_src.index("def symbol_options("):]
+    body = body[:body.index("@app.get", 10)]
+    # The GUARD, not the words. `if False:` left both "unavailable" and
+    # "LOG." in the file and sailed past an in-check — the same prose-matching
+    # miss this suite has now made five times.
+    assert re.search(r'if not answer\.get\("available"\)', body), (
+        "an unavailable chain answer is no longer logged on its own "
+        "condition — a refusal that returns 200 and says nothing to the log "
+        "is invisible, which is what made this bug an afternoon of inference")
+    assert re.search(r'LOG\.\w+\([^)]*reason', body, re.S),         "the log line no longer carries the REASON, which is the whole point"
+
+
+@check("addresses: ONE translation, and every page round-trips through it")
+def _address_translation():
+    """A .gs address must mean the same thing wherever it is opened.
+
+    main used to keep a hand-rolled copy of gsRoute beside its own copy of
+    PAGES. The copy never learned `opt`, so `opt.gs?s=SPY` -- what the Opt
+    page records as its provenance, what a favorite stores, and what the
+    predictive tab hint fires -- translated to the bare route 'opt', which
+    parseRoute does not recognise and resolves to idle. The wheel showed a
+    correct hint, the release opened a tab, and the tab was Home.
+
+    So the translation is exercised for EVERY page here, not just the one
+    that broke, and the duplicate is asserted gone."""
+    app_dir = ROOT / "code" / "app"
+    exe = _node_exe()
+    if exe is None:
+        raise Skipped("no usable node runtime — the translation cannot be run")
+
+    probe = r"""
+import { asGs, gsRoute, isKnownPage } from './src/renderer/src/urls.ts'
+const out = []
+const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail: String(detail) })
+const route = (addr) => { const g = asGs(addr); return g ? gsRoute(g) : null }
+
+// The regression, first and by name.
+ok('opt.gs?s=SPY reaches the Opt page', route('opt.gs?s=SPY') === 'opt:SPY', route('opt.gs?s=SPY'))
+ok('the predictive hint address routes too (extra params survive)',
+   route('opt.gs?s=SPY&occ=SPY260918P00755000') === 'opt:SPY',
+   route('opt.gs?s=SPY&occ=SPY260918P00755000'))
+
+// EVERY page, so the next one added cannot quietly dead-end. A route that
+// parseRoute does not know resolves to idle, which is indistinguishable
+// from "the click did nothing".
+const PARSEABLE = (r) =>
+  r === 'idle' || /^(symbol|opt|search|article|help):/.test(r) ||
+  ['accounts','data','settings','news','charts','backtest','notepad','help'].includes(r)
+for (const p of ['home','accounts','data','settings','news','charts','backtest','notepad','opt','help','search','article']) {
+  const bare = route(p + '.gs')
+  ok(`${p}.gs resolves to a route parseRoute knows`, PARSEABLE(bare), `${p}.gs -> ${bare}`)
+}
+
+// A ticker is anything that is not a page, and must stay that way.
+ok('spy.gs is a ticker', route('spy.gs') === 'symbol:SPY', route('spy.gs'))
+ok('a page name is not a ticker', isKnownPage('opt') && !isKnownPage('spy'), '')
+
+// Query-carrying pages keep their argument.
+ok('search keeps its query', route('search.gs?q=oil') === 'search:oil', route('search.gs?q=oil'))
+ok('help keeps its section', route('help.gs?s=drawing') === 'help:drawing', route('help.gs?s=drawing'))
+ok('a bare opt.gs has no symbol, so it falls back rather than opening empty',
+   route('opt.gs') === 'charts', route('opt.gs'))
+
+console.log(JSON.stringify(out))
+"""
+    probe_path = app_dir / ".selftest-address.mjs"
+    try:
+        probe_path.write_text(probe, encoding="utf-8")
+        r = subprocess.run([exe, str(probe_path)], cwd=app_dir,
+                           capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, f"address probe crashed:\n{(r.stderr or r.stdout)[:1500]}"
+        results = json.loads(r.stdout.strip().splitlines()[-1])
+    finally:
+        probe_path.unlink(missing_ok=True)
+    bad = [x for x in results if not x["cond"]]
+    assert not bad, "the address translation is wrong:\n" + "\n".join(
+        f"  - {x['name']} (got {x['detail']})" for x in bad)
+
+    # --- THE DUPLICATE MUST STAY GONE. This is the actual fix; the probe
+    # above only proves the surviving copy is right.
+    tabs = (CODE / "app/src/main/tabs.ts").read_text(encoding="utf-8")
+    assert "from '../renderer/src/urls'" in tabs, (
+        "main no longer imports the shared address logic — it has its own "
+        "copy again, and a copy is what dropped `opt` and sent every "
+        "opt.gs tab to Home")
+    open_addr = member_body(tabs, "openAddress(")
+    assert "gsRoute(" in open_addr, "openAddress stopped using the shared translation"
+    for banned in ("=== 'home'", "=== 'search'", "=== 'help'", "=== 'article'"):
+        assert banned not in open_addr, (
+            f"openAddress is hand-translating {banned} again — one address, "
+            f"two decision procedures, is exactly the bug this replaced")
+
+    # urls.ts stays dependency-free: main imports it across the bundle
+    # boundary and the probe runs it under plain node.
+    urls = (CODE / "app/src/renderer/src/urls.ts").read_text(encoding="utf-8")
+    assert "import " not in urls, (
+        "urls.ts grew an import — main bundles it into the main process and "
+        "the gate runs it under bare node; it must stay pure string logic")
 
 
 @check("class wheels: opt-in bindings, and the chart is just the first one")
@@ -3787,8 +3951,9 @@ def _backtest_page():
     assert "BacktestPage" in content and "case 'backtest':" in content, \
         "ContentApp never mounts BacktestPage"
     tabs_src = (CODE / "app" / "src" / "main" / "tabs.ts").read_text(encoding="utf-8")
-    assert "'backtest'" in tabs_src, \
-        "main tabs.ts PAGE_NAMES: the wheel would misread backtest.gs as a ticker"
+    assert "'backtest'" in urls_src and "isKnownPage" in tabs_src, \
+        "backtest is not a known page name, so the wheel would misread " \
+        "backtest.gs as a ticker"
     assert "backtest:openReport" in tabs_src, "report-open IPC not wired in main"
     strip = (rend / "components" / "TabStrip.tsx").read_text(encoding="utf-8")
     assert "case 'backtest':" in strip, "tab strip has no backtest icon case"

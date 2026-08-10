@@ -719,12 +719,22 @@ def create_app(state: State) -> FastAPI:
             # come back None and pass straight through, which is the
             # setup-recording precedent — do not hard-require the universe.
             known = state.universe.exact(symbol)
-            return options_mod.fetch(
+            answer = options_mod.fetch(
                 state.creds_for(s.user_id), symbol,
                 exp_from, exp_to, strike_from, strike_to,
                 right.upper() if right else None,
                 con=state.market(), ttl_minutes=ttl,
                 asset_class=(known or {}).get("asset_class"))
+            # A REFUSAL IS A 200 HERE, by design — the panel renders the
+            # reason instead of throwing. That also makes it invisible in the
+            # access log: "GET /options -> 200" reads identically whether the
+            # user got a chain or got told they have no key. Log the reason so
+            # the next report of "it says I have no key" is one grep, not an
+            # afternoon of inference.
+            if not answer.get("available"):
+                LOG.info("chain %s unavailable: %s", symbol,
+                         answer.get("reason") or "(no reason given)")
+            return answer
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
 

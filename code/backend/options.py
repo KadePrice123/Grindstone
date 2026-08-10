@@ -288,11 +288,13 @@ def fetch(creds: dict[str, str] | None, underlying: str,
                     "total": 0, "truncated": False, "expirations": [],
                     "source": "none", "reason": refusal}
 
-    if creds is None:
-        return {"underlying": underlying, "available": False, "contracts": [],
-                "total": 0, "truncated": False, "expirations": [],
-                "source": "none",
-                "reason": "no data key — add an Alpaca account to see live chains"}
+    # NOTE the guard for missing creds is NOT here. It used to be, sitting
+    # directly above a block commented "the DATABASE cache, tried first" —
+    # which meant data already recorded on this machine was unreachable
+    # without a live key. The recorder fills that cache unattended with the
+    # system key; refusing to READ it because the interactive user has no key
+    # of their own tells someone they need credentials to see data they
+    # already own. A key is needed to FETCH, never to READ.
 
     # ---- the DATABASE cache, tried first --------------------------------
     # Keyed by COVERAGE, not by the exact request. The in-memory cache below is
@@ -331,6 +333,16 @@ def fetch(creds: dict[str, str] | None, underlying: str,
         else:
             rows = None
     if rows is None:
+        # THE CREDS GUARD LIVES HERE, at the only point that needs a key: the
+        # live fetch. Both caches above have already been tried and missed, so
+        # this refusal now means "nothing recorded and no way to fetch",
+        # which is what the message claims — rather than firing over a cache
+        # full of data the recorder pulled ten minutes ago.
+        if creds is None:
+            return {"underlying": underlying, "available": False, "contracts": [],
+                    "total": 0, "truncated": False, "expirations": [],
+                    "source": "none",
+                    "reason": "no data key — add an Alpaca account to see live chains"}
         # NAMED fields, like every other call site. `AlpacaData(*creds)` on this
         # dict unpacks its KEYS, so the client authenticated with the literal
         # strings "key_id" and "secret_key" and Alpaca answered 401 — a real

@@ -82,6 +82,12 @@ async function waitFor(fn, what, ms = 30000) {
 }
 
 async function shot(conn, name) {
+  // Chromium will not composite a BACKGROUND view, so captureScreenshot on a
+  // page whose tab is not active NEVER SETTLES — the process then exits 13 on
+  // an unsettled top-level await, naming no page. Page.bringToFront does not
+  // rescue it either: visibility here belongs to Electron's WebContentsView,
+  // not to Chromium's tab machinery. So the rule is ordering — anything that
+  // opens a new tab runs AFTER the last screenshot.
   const r = await conn.send('Page.captureScreenshot', { format: 'png' })
   writeFileSync(path.join(OUT, name), Buffer.from(r.data, 'base64'))
   console.log('shot:', name)
@@ -196,6 +202,7 @@ try {
         const raw = await ui.eval(`JSON.stringify({
           mode: document.querySelector('.wheel-face')?.dataset.mode ?? null,
           hints: [...document.querySelectorAll('.wf-hint')].map((h)=>h.textContent.trim()),
+          labels: [...document.querySelectorAll('.wf-seg')].map((t)=>t.textContent.trim()),
         })`)
         const st = JSON.parse(raw)
         return st.mode === 'click' ? st : null
@@ -323,7 +330,47 @@ try {
     console.log('NOTEPAD:', JSON.stringify(pad))
     await shot(padT, 'notepad.png')
     const padOk = pad.entries >= 4 && pad.chainCols === 12 && !pad.rawJson
-    process.exit(seen !== null && survived && padOk && predictOk ? 0 : 1)
+
+    // ---- AND THE RELEASE MUST ACTUALLY OPEN IT (the bug Kade reported).
+    // LAST, deliberately: it opens a tab, which pushes every other view
+    // into the background, and a background view cannot be screenshotted.
+    // Rendering the hint and opening the tab are two different things, and
+    // the first version of this asserted only the first. The face said
+    // "-> SPY Opt", the release called openAddress('opt.gs?s=SPY'), and
+    // main's private copy of gsRoute -- which never learned 'opt' -- turned
+    // that into the bare route 'opt', which parseRoute resolves to idle.
+    // A tab opened. It was Home. So: assert the PAGE, not the hint.
+    await spy.eval(`window.grindstone.request('GET','/api/notepad')
+      .then((r)=>Promise.all((r.body??[]).map((e)=>
+        window.grindstone.request('DELETE','/api/notepad/'+e.id))))`)
+    const classAgain = await hintsNow()          // empty pad -> the class rung
+    // The label text carries the segment's icon glyph AND now its hint, so an
+    // anchored /^tabs/ matches nothing — the real text is "⧉Tabs→ SPY Opt".
+    const tabsIdx = classAgain.labels.findIndex((t) => /tabs/i.test(t))
+    console.log('tabs segment index:', tabsIdx, JSON.stringify(classAgain.labels))
+    if (tabsIdx < 0) throw new Error('the main wheel has no Tabs segment')
+
+    const wheelT2 = await waitFor(async () =>
+      (await targets()).find((t) => t.url.includes('mode=wheel')), 'the wheel overlay', 15000)
+    const wheelUi2 = await connect(wheelT2)
+    await wheelUi2.eval(`(document.querySelector('[data-seg="${tabsIdx}"]')
+      .dispatchEvent(new MouseEvent('mousedown', {bubbles:true, button:2})), 'ok')`)
+
+    const opened = await waitFor(async () => {
+      for (const t of (await targets()).filter((x) => x.url.includes('mode=content'))) {
+        const c = await connect(t)
+        const sym = await c.eval(
+          `document.querySelector('[data-opt-symbol]')?.dataset.optSymbol ?? null`)
+        if (sym) return sym
+      }
+      return null
+    }, 'a tab actually showing the Opt page', 20000).catch(() => null)
+    console.log('PREDICT opened:', JSON.stringify(opened))
+    const openOk = opened === 'SPY'
+
+
+
+    process.exit(seen !== null && survived && padOk && predictOk && openOk ? 0 : 1)
   }
 
   // SHOT_PAGE=data screenshots the Data and Settings pages instead of the Opt
