@@ -13,6 +13,7 @@ import { UserChip } from '../components/UserChip'
 import { Accounts } from '../pages/Accounts'
 import { ArticlePage } from '../pages/ArticlePage'
 import { BacktestPage } from '../pages/BacktestPage'
+import { NotepadPage } from '../pages/NotepadPage'
 import { DataPage } from '../pages/DataPage'
 import { ChartsPage } from '../pages/ChartsPage'
 import { OptPage } from '../pages/OptPage'
@@ -43,6 +44,8 @@ function meta(route: Route): { title: string; icon: string } {
       return { title: 'Charts', icon: 'chart' }
     case 'backtest':
       return { title: 'Backtest', icon: 'backtest' }
+    case 'notepad':
+      return { title: 'Notepad', icon: 'data' }
     case 'help':
       return { title: 'Help', icon: 'page' }
     case 'article':
@@ -128,6 +131,8 @@ export function ContentApp({ initial }: { initial: Route }) {
         return <Accounts />
       case 'data':
         return <DataPage />
+      case 'notepad':
+        return <NotepadPage />
       case 'symbol':
         return <SymbolPage symbol={route.symbol} onNavigate={navigate} />
       case 'opt':

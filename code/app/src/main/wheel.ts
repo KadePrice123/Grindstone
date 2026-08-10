@@ -838,10 +838,9 @@ export class WheelManager {
     const cls = s.ctx?.context ?? ''
     const ok = new Set(WheelManager.DATA_ACCEPTS[cls] ?? [])
     const segs: Segment[] = [{
-      // DX-6: the top segment is ALWAYS the notepad. Disabled until the
-      // notepad page ships (DX3b) -- a segment that navigates nowhere real
-      // would read as broken; this one at least says where it will go.
-      type: 'link', label: 'Notepad', address: 'notepad.gs', disabled: true,
+      // DX-6: the top segment is ALWAYS the notepad -- the way to see and
+      // edit what you hold, at the moment you are choosing what to post.
+      type: 'link', label: 'Notepad', address: 'notepad.gs',
     }]
     for (const e of summaries.slice(0, 11)) {
       segs.push({

@@ -24,6 +24,7 @@ export type Route =
   | { name: 'news' }
   | { name: 'charts' }
   | { name: 'backtest' }
+  | { name: 'notepad' }
   | { name: 'help'; section?: string }
   | { name: 'article'; id?: number; url?: string }
 
@@ -43,7 +44,7 @@ export function parseRoute(raw: string | null): Route {
     return { name: 'help', ...(section ? { section } : {}) }
   }
   if (raw === 'accounts' || raw === 'data' || raw === 'settings' || raw === 'news'
-      || raw === 'charts' || raw === 'backtest') {
+      || raw === 'charts' || raw === 'backtest' || raw === 'notepad') {
     return { name: raw }
   }
   return { name: 'idle' }

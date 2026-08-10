@@ -217,7 +217,47 @@ try {
       before: before.length, after: still.length,
     }))
     await shot(spy, 'datapad-post.png')
-    process.exit(seen !== null && survived ? 0 : 1)
+
+    // And the notepad renders what was grabbed, by KIND -- the page the
+    // picker's top segment leads to. Seed one of every kind first so every
+    // declared renderer is exercised, not just the one the tripwire made.
+    for (const [kind, data] of [
+      ['note', { text: 'a note, rendered as text' }],
+      ['chain', { underlying: 'SPY', contracts: [
+        { occ_symbol: 'SPY260918P00755000', expiration: '2026-09-18', strike: 755,
+          right: 'P', bid: 38.1, ask: 38.9, last: 38.5, iv: 0.19, delta: -0.39,
+          gamma: 0.01, theta: -0.09, vega: 0.55, rho: -0.3 }] }],
+      ['backtest-spec', { spec: { name: 'demo', capital: 100000,
+        legs: [{ action: 'sell', right: 'put', delta: 0.3, dte: 45 }] } }],
+    ]) {
+      await spy.eval(`window.grindstone.request('POST','/api/notepad',{payload:{
+        v:1,kind:${JSON.stringify(kind)},data:${JSON.stringify(data)},
+        provenance:{workspace:'user',capturedAt:new Date().toISOString(),
+                    page:'e2e',address:'spy.gs',symbol:'SPY'}}}).then(r=>r.status)`)
+    }
+    await spy.eval(`window.grindstone.openTab('notepad')`)
+    const padT = await waitFor(async () => {
+      const ts = await targets()
+      for (const t of ts.filter((x) => x.url.includes('mode=content'))) {
+        const c = await connect(t)
+        if (await c.eval(`document.querySelector('h1')?.textContent === 'Notepad'`)) return c
+      }
+      return null
+    }, 'the notepad page', 20000)
+    await padT.send('Emulation.setDeviceMetricsOverride', {
+      width: 1400, height: 1100, deviceScaleFactor: 1, mobile: false,
+    })
+    await sleep(1800)
+    const pad = JSON.parse(await padT.eval(`JSON.stringify({
+      entries: document.querySelectorAll('.np-entry').length,
+      kinds: [...document.querySelectorAll('[data-entry-kind]')].map((e)=>e.dataset.entryKind),
+      chainCols: document.querySelector('.np-table thead tr')?.children.length ?? 0,
+      rawJson: document.body.textContent.includes('"occ_symbol"'),
+    })`))
+    console.log('NOTEPAD:', JSON.stringify(pad))
+    await shot(padT, 'notepad.png')
+    const padOk = pad.entries >= 4 && pad.chainCols === 12 && !pad.rawJson
+    process.exit(seen !== null && survived && padOk ? 0 : 1)
   }
 
   // SHOT_PAGE=data screenshots the Data and Settings pages instead of the Opt

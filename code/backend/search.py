@@ -29,6 +29,8 @@ PAGES = [
     {"key": "ai", "title": "AI", "words": ["ai", "assistant", "chat"], "ready": False},
     {"key": "positions", "title": "Positions", "words": ["positions", "portfolio", "pnl", "p&l"],
      "ready": False},
+    {"key": "notepad", "title": "Notepad",
+     "words": ["notepad", "notes", "pad", "clipboard", "grabbed"], "ready": True},
     {"key": "data", "title": "Data management",
      "words": ["data", "recording", "storage", "history", "import", "upload",
                "puller", "csv"], "ready": True},

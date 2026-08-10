@@ -1356,3 +1356,78 @@ html.wheel-mode #root {
   font-size: 12px;
   color: var(--text-dim);
 }
+
+/* ---- Get/Post data: app-wide affordances --------------------------------
+   These live in styles.css, the GLOBAL sheet, and NOT in charts.css — which
+   only the two chart pages import. Parked there, the notepad and the announce
+   toast were styled nowhere, and every button fell back to the browser
+   default. Only the screenshot showed it: typecheck and gate were both green,
+   because neither can see a stylesheet that was never loaded. */
+
+/* The announce line: quiet, fixed, self-dismissing. Quick post skips every
+   picker, so this is what keeps it legible. */
+.datapad-notice {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  z-index: 60;
+  pointer-events: none;
+  max-width: 70vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A QUIET text button. `.btn` is the app's real button — chrome, padding,
+   border — and six of those per notepad entry would be a wall of buttons. */
+.btn-link {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+.btn-link:hover:not(:disabled) { color: var(--text); background: var(--surface-raised); }
+.btn-link:disabled { opacity: 0.35; cursor: default; }
+.btn-link.bad { color: var(--loss); }
+.btn-link.bad:hover:not(:disabled) { filter: brightness(1.25); }
+
+/* ---- the notepad (docs/DATA_EXCHANGE.md §3) ---------------------------- */
+.np-entry { padding: 12px 14px; }
+.np-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.np-head strong { font-size: 13px; }
+.np-head .subtle { margin-right: auto; font-size: 11px; }
+.np-rows { display: grid; gap: 3px; }
+.np-row { display: grid; grid-template-columns: 130px 1fr; gap: 10px; font-size: 12px; }
+.np-note { white-space: pre-wrap; font-size: 13px; line-height: 1.45; }
+.np-edit { display: flex; gap: 8px; align-items: flex-start; }
+.np-edit .field { flex: 1; font-family: inherit; }
+/* The chain table scrolls INSIDE its card: 13 columns must never widen the
+   page, and dropping columns to fit would hide fields the payload carries.
+   Self-contained rather than extending the chain panel's .cp-table, which
+   lives in a stylesheet this page does not load. */
+.np-scroll { overflow-x: auto; max-width: 100%; }
+.np-table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 11px; }
+.np-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 4px 8px 4px 0;
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+.np-table td { padding: 3px 8px 3px 0; white-space: nowrap; }
+.np-table td.em { color: var(--text); font-weight: 600; }

@@ -3410,6 +3410,46 @@ def _data_exchange():
     assert "entryId" in picker and "payload" not in picker, \
         "picker segments must carry entry ids only, never payloads"
 
+    # --- RENDERING IS PART OF ENROLLMENT (DX-1.4). Every payload kind the
+    # backend accepts must have a notepad renderer, or a grab lands somewhere
+    # that cannot show it — and "the notepad falls back to raw JSON" is the
+    # exact outcome the enrollment rule exists to prevent.
+    np_src = (app / "renderer" / "src" / "pages" / "NotepadPage.tsx").read_text(encoding="utf-8")
+    body = np_src[np_src.index("function Body("):np_src.index("export function NotepadPage")]
+    for kind in np.KINDS:
+        assert f"case '{kind}':" in body, (
+            f"the notepad has no renderer for {kind!r} — a kind the backend "
+            f"accepts must be displayable, or enrollment is a half-promise")
+    assert "default:" in body,         "the renderer needs an honest fallthrough for kinds a NEWER build wrote"
+
+    # --- APP-WIDE STYLES MUST LIVE IN THE GLOBAL SHEET. charts.css is
+    # imported by exactly two pages; classes parked there are styled nowhere
+    # else, and the failure is invisible to both the typechecker and this
+    # gate — every notepad button rendered as a raw browser default until a
+    # screenshot showed it.
+    styles = (app / "renderer" / "src" / "styles.css").read_text(encoding="utf-8")
+    charts_css = (app / "renderer" / "src" / "charts.css").read_text(encoding="utf-8")
+    for cls in (".datapad-notice", ".btn-link", ".np-entry", ".np-table"):
+        assert cls in styles, (
+            f"{cls} is not in the GLOBAL stylesheet — pages outside the two "
+            f"that import charts.css would render it unstyled")
+        assert cls not in charts_css, (
+            f"{cls} is duplicated into charts.css; one class, one home")
+
+    # --- the page is registered in every seam that must agree, the pairing
+    # urls.ts and tabs.ts already document.
+    urls = (app / "renderer" / "src" / "urls.ts").read_text(encoding="utf-8")
+    tabs = (app / "main" / "tabs.ts").read_text(encoding="utf-8")
+    content = (app / "renderer" / "src" / "modes" / "ContentApp.tsx").read_text(encoding="utf-8")
+    app_tsx = (app / "renderer" / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "'notepad'" in urls, "notepad.gs is not addressable"
+    assert "'notepad'" in tabs, "tabs.ts PAGE_NAMES lost notepad — it would "         "be treated as a ticker"
+    assert "case 'notepad':" in content and "NotepadPage" in content,         "ContentApp never mounts the notepad"
+    assert "'notepad'" in app_tsx, "App.tsx parseRoute dead-ends notepad to idle"
+
+    # --- and the picker's notepad segment actually leads there
+    assert "disabled: true" not in picker[:picker.index("for (const e of")],         "the picker's Open-notepad segment is still disabled — the page exists now"
+
     # --- enrolled pages declare themselves AND answer the action
     assert 'data-wheel-context="chain"' in opt, \
         "the Opt page lost its enrollment declaration — Get would grey there"
