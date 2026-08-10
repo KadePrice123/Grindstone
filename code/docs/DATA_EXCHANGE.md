@@ -158,6 +158,13 @@ More entries than segments → most recent first; the notepad, always at the
 top, is the overflow. No special case for a single entry — one consistent
 gesture.
 
+**Right-click on the Post tool skips the picker**: it posts the **most
+recent compatible** entry — the newest one whose kind the target under the
+cursor accepts. None compatible → the quick variant greys with the reason,
+same as everywhere. And because the choice was invisible, the action
+announces itself ("posted: chain SPY ×38") — skipping the picker must never
+mean not knowing what was posted.
+
 **Requirement DX-7 — one codepath.** Human gesture → `data:action` IPC →
 page adapter → `/api/notepad`. Agent → `get_data`/`post_data` tools → the
 same routes. The wheel's main process caches only the entry summaries
@@ -222,6 +229,16 @@ Elements declare themselves the way the chart already does
 (`data-wheel-context` + data attributes), and the wheel greys Get where no
 declaration is under the cursor. Grey-state computation happens at wheel
 open, from the spawn-time snapshot.
+
+**Requirement DX-10b — the wheel is an intent classification engine.** The
+button is an axis of intent, not a shortcut: **left is the deliberate
+variant, right is the quick variant of the same tool**. Post: left opens the
+picker, right applies the most recent compatible entry. Tab tool with data
+held: right opens the payload's source. The grammar is fixed so users can
+predict right-click on tools they have never right-clicked — one rule, not
+per-tool trivia — and future tools declare both intents the same way.
+Plumbing consequence: the wheel's act channel carries **which button**
+completed the gesture, which it does not today.
 
 **Requirement DX-10.** New tools land at the three documented registration
 points (catalog entry, page handler, backend validation) as a `DATA_TOOLS`
