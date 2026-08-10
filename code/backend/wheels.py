@@ -53,7 +53,10 @@ DOC_KEY = "gesture_wheels"
 # leaving a hole in the wheel instead of a working button.
 # A stored doc with an older version is regenerated from defaults — honest
 # data loss, taken deliberately over silently mixing old and new.
-DOC_VERSION = 5
+# v6: the DATA tools (Get data / Post data, docs/DATA_EXCHANGE.md) join the
+# main wheel. New segment type 'data' — a sibling of 'chart', not a chart
+# tool, because grabbing works on chains, forms and heatmaps too.
+DOC_VERSION = 6
 
 MAX_WHEELS = 16
 MAX_SEGMENTS = 12
@@ -81,7 +84,12 @@ CHART_TOOLS = ("pointer", "trend", "hline", "vline", "circle",
                "ind:vol", "ind:sma20", "ind:sma50", "ind:ema20", "ind:rsi14",
                "settings", "normalize", "vis:draw", "vis:ind", "isolate",
                *[f"tf:{t}" for t in TIMEFRAMES])
-SEG_TYPES = ("wheel", "nav", "tool", "ticker", "link", "chart",
+#: The Get/Post primitive (docs/DATA_EXCHANGE.md). A SIBLING of CHART_TOOLS,
+#: not a member: these tools fire wherever an enrolled element sits under the
+#: spawn — chains, forms, heatmaps — so gating them on "is a chart" would grey
+#: them exactly where they matter most.
+DATA_TOOLS = ("data:get", "data:post")
+SEG_TYPES = ("wheel", "nav", "tool", "ticker", "link", "chart", "data",
              "placeholder", "empty")
 MAX_LINK_ADDRESS = 300
 MAX_LINK_ICON = 128 * 1024  # matches favorites.MAX_ICON_CHARS
@@ -119,6 +127,8 @@ def default_doc() -> dict[str, Any]:
                     {"type": "nav", "route": "charts", "label": "Charts"},      # SW
                     {"type": "wheel", "wheel": "favorites", "label": "Favorites"},  # W
                     {"type": "nav", "route": "settings", "label": "Settings"},  # NW
+                    {"type": "data", "tool": "data:get", "label": "Get data"},
+                    {"type": "data", "tool": "data:post", "label": "Post data"},
                 ],
             },
             {
@@ -296,6 +306,11 @@ def validate(doc: Any) -> dict[str, Any]:
                 tool = seg.get("tool")
                 if tool not in CHART_TOOLS:
                     _fail(f"wheel {wid} segment #{i + 1}: unknown chart tool {tool!r}")
+                clean["tool"] = tool
+            elif stype == "data":
+                tool = seg.get("tool")
+                if tool not in DATA_TOOLS:
+                    _fail(f"wheel {wid} segment #{i + 1}: unknown data tool {tool!r}")
                 clean["tool"] = tool
             elif stype == "ticker":
                 ticker = seg.get("ticker")

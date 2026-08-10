@@ -14,7 +14,7 @@ import {
 export interface WheelSegment {
   type:
     | 'wheel' | 'nav' | 'tool' | 'ticker' | 'chart' | 'placeholder' | 'empty'
-    | 'tab' | 'page' | 'link'
+    | 'tab' | 'page' | 'link' | 'data'
   label: string
   wheel?: string
   route?: string
@@ -127,7 +127,7 @@ export function WheelFace({
   mode: 'pending' | 'hold' | 'click' | 'preview'
   scale?: number
   animate?: boolean
-  onSegment?: (index: number) => void
+  onSegment?: (index: number, button: 'left' | 'right') => void
   onLock?: () => void
 }) {
   const n = Math.max(wheel.segments.length, 1)
@@ -169,12 +169,21 @@ export function WheelFace({
             data-seg={i}
             style={animate ? { animationDelay: `${i * 18}ms` } : undefined}
             onMouseDown={(e) => {
-              // Segment clicks act on mousedown-left in click mode; stop the
-              // root's close-on-outside-click from also firing.
-              if (e.button === 0 && onSegment && !seg.disabled) {
+              // Segment clicks act on mousedown in click mode; stop the
+              // root's close-on-outside-click from also firing. The BUTTON is
+              // the wheel's intent axis (docs/DATA_EXCHANGE.md DX-10b): left
+              // is the deliberate variant, right the quick one — one grammar
+              // for every tool, so tools with a single behaviour ignore it.
+              if ((e.button === 0 || e.button === 2) && onSegment && !seg.disabled) {
                 e.stopPropagation()
-                onSegment(i)
+                onSegment(i, e.button === 2 ? 'right' : 'left')
               }
+            }}
+            onContextMenu={(e) => {
+              // The right-click already acted on mousedown; the context menu
+              // must not also open over the wheel.
+              e.preventDefault()
+              e.stopPropagation()
             }}
           >
             <path className="wf-sector" d={sectorPath(i, n)} />

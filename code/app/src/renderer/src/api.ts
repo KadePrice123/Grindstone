@@ -48,7 +48,7 @@ declare global {
       onQuotes: (cb: (quotes: unknown) => void) => () => void
       onDespawn: (cb: () => void) => () => void
       ready: () => void
-      act: (index: number) => void
+      act: (index: number, button?: 'left' | 'right') => void
       lockToggle: () => void
       close: () => void
       move: (x: number, y: number) => void

@@ -226,7 +226,7 @@ export function WheelOverlay() {
             hover={hover}
             mode={state.mode}
             animate
-            onSegment={(i) => state.mode === 'click' && window.grindstoneWheel.act(i)}
+            onSegment={(i, button) => state.mode === 'click' && window.grindstoneWheel.act(i, button)}
             onLock={() => window.grindstoneWheel.lockToggle()}
           />
         </div>

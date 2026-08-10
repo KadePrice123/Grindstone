@@ -1222,13 +1222,28 @@ def _gesture_wheels():
     assert set(wheels.BUILTIN_IDS) <= set(ids), "a default wheel is missing"
     main = next(w for w in doc["wheels"] if w["id"] == "main")
     segs = main["segments"]
-    assert len(segs) == 8, "the main wheel is 8 segments: 4 corners + 4 cardinal"
+    # v6: 10 segments — the 8-point compass PLUS the Get/Post data pair, per
+    # Kade's instruction ("add a tool to the main tool wheel called get
+    # data"). The compass positions are untouched; the data tools append.
+    assert len(segs) == 10, \
+        "the main wheel is the 8-point compass plus Get data / Post data"
     # N=AI wheel, E=tabs wheel, S=search tool, W=Favorites wheel (v4: the
     # hand-typed tickers wheel became the dynamic Favorites wheel)
     assert segs[0] == {"type": "wheel", "wheel": "ai", "label": "AI"}, segs[0]
     assert segs[2]["type"] == "wheel" and segs[2]["wheel"] == "tabs", segs[2]
     assert segs[4]["type"] == "tool" and segs[4]["tool"] == "search", segs[4]
     assert segs[6]["type"] == "wheel" and segs[6]["wheel"] == "favorites", segs[6]
+    assert segs[8] == {"type": "data", "tool": "data:get", "label": "Get data"}, segs[8]
+    assert segs[9] == {"type": "data", "tool": "data:post", "label": "Post data"}, segs[9]
+    # And the vocabulary holds: 'data' validates, an unknown data tool fails.
+    try:
+        wheels.validate({**wheels.default_doc(), "wheels": [{
+            "id": "x", "name": "X", "symbol": "", "builtin": False,
+            "segments": [{"type": "data", "tool": "data:evil"},
+                         {"type": "empty"}]}]})
+        raise AssertionError("an unknown data tool validated")
+    except ValueError:
+        pass
     # between them: home, news, Charts, settings (v2: the SPY slot became the
     # multi-chart page, per Kade's 2026-08-02 spec change)
     others = {s.get("route") or s.get("ticker") for s in (segs[1], segs[3], segs[5], segs[7])}

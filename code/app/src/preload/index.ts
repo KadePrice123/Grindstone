@@ -105,6 +105,17 @@ const grindstone = {
     ipcRenderer.on('chart:action', listener)
     return () => ipcRenderer.removeListener('chart:action', listener)
   },
+  /** Get/Post data actions (docs/DATA_EXCHANGE.md). Unlike chart actions,
+   *  these carry the SPAWN COORDINATES — the page resolves which enrolled
+   *  element sat under the right-click — and the INTENT (left = deliberate,
+   *  right = quick). */
+  onDataAction: (
+    cb: (a: { tool: string; intent: 'primary' | 'quick'; spawn: { x: number; y: number } }) => void
+  ): (() => void) => {
+    const h = (_e: unknown, a: { tool: string; intent: 'primary' | 'quick'; spawn: { x: number; y: number } }): void => cb(a)
+    ipcRenderer.on('data:action', h)
+    return () => ipcRenderer.removeListener('data:action', h)
+  },
 }
 
 /** The gesture-wheel overlay's own surface (mode=wheel only). */
@@ -142,7 +153,8 @@ const grindstoneWheel = {
   /** Mount handshake: the first spawn can beat the overlay's listeners, so
    *  main re-sends the live session when the page says it is ready. */
   ready: (): void => ipcRenderer.send('wheelui:ready'),
-  act: (index: number): void => ipcRenderer.send('wheelui:act', index),
+  act: (index: number, button: 'left' | 'right' = 'left'): void =>
+    ipcRenderer.send('wheelui:act', index, button),
   lockToggle: (): void => ipcRenderer.send('wheelui:lock'),
   close: (): void => ipcRenderer.send('wheelui:close'),
   move: (x: number, y: number): void => ipcRenderer.send('wheelui:move', x, y),

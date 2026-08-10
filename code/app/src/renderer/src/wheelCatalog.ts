@@ -35,6 +35,13 @@ export const CATEGORIES = [
 ] as const
 
 export const CATALOG: CatalogEntry[] = [
+  // ---- Data (docs/DATA_EXCHANGE.md) --------------------------------------
+  { id: 'data:get', category: 'Tools', label: 'Get data',
+    keywords: 'grab copy data notepad exchange',
+    segment: { type: 'data', tool: 'data:get', label: 'Get data' } },
+  { id: 'data:post', category: 'Tools', label: 'Post data',
+    keywords: 'paste apply data notepad exchange',
+    segment: { type: 'data', tool: 'data:post', label: 'Post data' } },
   // ---- Navigation ---------------------------------------------------------
   { id: 'nav:idle', category: 'Navigation', label: 'Home',
     keywords: 'home start landing', segment: { type: 'nav', route: 'idle', label: 'Home' } },

@@ -41,7 +41,7 @@ const EDGE_MARGIN = 12
 interface Segment {
   type:
     | 'wheel' | 'nav' | 'tool' | 'ticker' | 'chart' | 'placeholder' | 'empty'
-    | 'tab' | 'page' | 'link'
+    | 'tab' | 'page' | 'link' | 'data'
   label: string
   // one of, depending on type:
   wheel?: string
@@ -713,8 +713,16 @@ export class WheelManager {
   }
 
   // ---------------------------------------------------------------- actions
-  /** Act on a segment. Returns 'stay' if the wheel remains open. */
-  private act(index: number | null): 'stay' | 'close' {
+  /** Act on a segment. Returns 'stay' if the wheel remains open.
+   *
+   *  `intent` is the wheel's third classification axis (spawn context =
+   *  WHERE, segment = WHAT, button = HOW): 'primary' is the deliberate
+   *  variant, 'quick' the immediate one. A hold-release is a right-button
+   *  gesture and therefore 'quick'; in click mode the button chooses. Tools
+   *  with one behaviour ignore it — the axis costs nothing until a tool
+   *  declares both. */
+  private act(index: number | null,
+              intent: 'primary' | 'quick' = 'primary'): 'stay' | 'close' {
     const s = this.session
     if (!s) return 'close'
     const seg = index !== null ? s.segments[index] : undefined
@@ -745,6 +753,9 @@ export class WheelManager {
       case 'chart':
         this.sendChartAction(seg)
         return 'close'
+      case 'data':
+        this.sendDataAction(seg, intent)
+        return 'close'
       default:
         return 'close'
     }
@@ -765,6 +776,28 @@ export class WheelManager {
     wc.send('chart:action', seg.ticker
       ? { tool: seg.tool, symbol: seg.ticker }
       : { tool: seg.tool })
+  }
+
+  /** Deliver a data segment to the view the wheel was spawned over — the
+   *  same origin discipline as sendChartAction — plus the two things chart
+   *  actions deliberately drop, because Get/Post need them:
+   *
+   *  - the SPAWN COORDINATES, so the page can resolve which enrolled element
+   *    sat under the right-click (chart actions act on selection instead);
+   *  - the INTENT, so Post can distinguish the picker (primary) from
+   *    quick-post-most-recent-compatible (quick).
+   */
+  private sendDataAction(seg: Segment, intent: 'primary' | 'quick'): void {
+    const s = this.session
+    if (!s || !seg.tool || s.originTabId === null || s.originWcId === null) return
+    if (!this.tabs.allTabs().some((t) => t.id === s.originTabId)) return
+    const wc = webContents.fromId(s.originWcId)
+    if (!wc || wc.isDestroyed()) return
+    wc.send('data:action', {
+      tool: seg.tool,
+      intent,
+      spawn: { x: s.start.x, y: s.start.y },
+    })
   }
 
   private async toggleLock(): Promise<void> {
@@ -867,7 +900,10 @@ export class WheelManager {
           const index = segmentAt(s.center.x, s.center.y,
                                   s.lastPointer.x, s.lastPointer.y,
                                   s.segments.length)
-          const result = this.act(index)
+          // A hold-release IS a right-button gesture: the flick maps to
+          // the quick intent by the one grammar (left deliberate, right
+          // quick). The deliberate variant lives in click mode's left click.
+          const result = this.act(index, 'quick')
           if (result === 'stay') {
             // Spec: after a wheel-nav during a hold, enter left-click mode —
             // the freshly opened wheel must not vanish under the cursor.
@@ -925,7 +961,7 @@ export class WheelManager {
       this.fetchQuotes(s.segments, s.doc.config)
       if (s.mode === 'click') this.overlay?.webContents.focus()
     })
-    ipcMain.on('wheelui:act', (e, index: number) => {
+    ipcMain.on('wheelui:act', (e, index: number, button?: string) => {
       if (this.overlay?.webContents.id !== e.sender.id) return
       // Launcher mode: the index picks a page tile, not a wheel segment.
       if (this.launcherSession) {
@@ -933,7 +969,11 @@ export class WheelManager {
         return
       }
       if (!this.session || this.session.mode !== 'click') return
-      if (this.act(typeof index === 'number' ? index : null) === 'close') this.despawn()
+      // The button is the intent axis: left = deliberate, right = quick.
+      // Untrusted input from the overlay — anything not exactly 'right'
+      // is primary, so a garbled value degrades to the safe variant.
+      const intent = button === 'right' ? 'quick' : 'primary'
+      if (this.act(typeof index === 'number' ? index : null, intent) === 'close') this.despawn()
     })
     ipcMain.on('wheelui:lock', (e) => {
       if (this.overlay?.webContents.id !== e.sender.id) return
