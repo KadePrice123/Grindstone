@@ -5,7 +5,7 @@
  * feeds the data-draw-* testability attrs and the floating DrawEditor.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { applyToChart, buildChartDocPayload, buildDrawingPayload, grab, announce, listPad, mostRecentCompatible } from '../datapad'
+import { applyToChart, buildChartDocPayload, buildContractPayload, buildDrawingPayload, contractByOcc, grab, announce, listPad, mostRecentCompatible, occAt } from '../datapad'
 import { api, ApiError, SymbolSummary } from '../api'
 import { makeChartStore } from '../chartStore'
 import {
@@ -366,10 +366,21 @@ export function SymbolPage({
           doc, page: 'symbol',
           address: `${symbol.toLowerCase()}.gs`, symbol, timeframe,
         }
-        // DX-8 resolution order: the element under the right-click, then the
-        // engine's selection, then the whole chart. A hit or a selection
-        // grabs the CONNECTED COMPONENT — Kade's rule: a line constrained to
-        // other entities brings the full chain of objects.
+        // DX-8 resolution order: a chain ROW under the click (most specific),
+        // then a drawing, then the engine's selection, then the whole chart.
+        // A drawing hit grabs the CONNECTED COMPONENT — Kade's rule: a line
+        // constrained to other entities brings the full chain of objects.
+        const occ = occAt(spawn)
+        const row = occ ? contractByOcc(occ) : null
+        if (row) {
+          grab(buildContractPayload({
+            contract: row, page: 'symbol',
+            address: `${symbol.toLowerCase()}.gs`, symbol,
+          }))
+            .then((e) => announce(`grabbed: ${e.label}`))
+            .catch((err) => announce(`get data failed: ${err instanceof Error ? err.message : err}`))
+          return
+        }
         const rootId = engine.drawingAt(spawn.x, spawn.y)
           ?? engine.getState().selected[0]
           ?? null

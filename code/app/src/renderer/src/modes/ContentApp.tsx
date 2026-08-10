@@ -55,6 +55,23 @@ function meta(route: Route): { title: string; icon: string } {
 export function ContentApp({ initial }: { initial: Route }) {
   const [stack, setStack] = useState<Route[]>([initial])
   const [locked, setLocked] = useState(false)
+  // The datapad's announce surface (DX-6): quick actions skip every picker,
+  // so this line of text is what keeps them legible — "posted: chain SPY
+  // ×38" instead of silence. One listener in the shell, every page shares it.
+  const [notice, setNotice] = useState<string | null>(null)
+  useEffect(() => {
+    let timer = 0
+    const h = (e: Event) => {
+      setNotice(String((e as CustomEvent).detail ?? ''))
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => setNotice(null), 4000)
+    }
+    window.addEventListener('datapad:announce', h)
+    return () => {
+      window.removeEventListener('datapad:announce', h)
+      window.clearTimeout(timer)
+    }
+  }, [])
   const route = stack[stack.length - 1]
   const stackRef = useRef(stack)
   stackRef.current = stack
@@ -138,6 +155,9 @@ export function ContentApp({ initial }: { initial: Route }) {
     <>
       {body}
       <UserChip onNavigate={navigate} onLocked={() => setLocked(true)} />
+      {notice ? (
+        <div className="datapad-notice" data-datapad-notice>{notice}</div>
+      ) : null}
     </>
   )
 }

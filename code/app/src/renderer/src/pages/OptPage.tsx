@@ -30,7 +30,7 @@ import {
   legWindow, resolveLegDoc, type Drawing, type OptionLeg,
 } from '../components/ChartDraw'
 import { OptHeatmap } from '../components/OptHeatmap'
-import { buildChainPayload, buildContractPayload, grab, announce } from '../datapad'
+import { buildChainPayload, buildContractPayload, grab, announce, occAt } from '../datapad'
 import { HistoryPanel, TermPanel, type TermPoint } from '../components/OptCharts'
 import { annualise, capitalFor, midOf, tradingDaysTo, dteBetween, type GridContract } from '../optgrid'
 import { analyse, fmtExtreme, fmtNet, returnOnRisk, type PayoffLeg } from '../payoff'
@@ -432,11 +432,16 @@ export function OptPage({
   // interface declares 9, and building from it would drop four greeks that
   // are already on the wire.
   useEffect(() => {
-    const off = window.grindstone.onDataAction(({ tool }) => {
+    const off = window.grindstone.onDataAction(({ tool, spawn }) => {
       if (tool !== 'data:get') return
       const envelope = Object.values(byLeg).find((r) => r && r.available) || null
       const rows = envelope?.contracts ?? []
-      const picked = sel ? rows.find((c) => c.occ_symbol === sel.occ) : undefined
+      // The CELL under the right-click wins over the page's selection: the
+      // spawn names what the user pointed at, the selection only what they
+      // last touched (DX-8).
+      const occHit = occAt(spawn)
+      const picked = (occHit ? rows.find((c) => c.occ_symbol === occHit) : undefined)
+        ?? (sel ? rows.find((c) => c.occ_symbol === sel.occ) : undefined)
       const address = `opt.gs?s=${symbol}`
       const payload = picked
         ? buildContractPayload({

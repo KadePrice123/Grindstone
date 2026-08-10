@@ -154,6 +154,37 @@ export function buildDrawingPayload(args: {
   }
 }
 
+// -------------------------------------------------------- the contract index
+/** occ symbol -> the BACKEND row, indexed by whichever component fetched it.
+ *
+ *  Rows live in component state (ChainPanel per leg, OptPage per leg), so a
+ *  page-level get handler cannot reach them when the spawn lands on a row.
+ *  Stamping 13 fields of JSON onto every <tr> would make the DOM the carrier
+ *  at ~100KB per panel; an in-module index costs one Map and nothing renders.
+ *  Fetches overwrite by occ, so the index holds the freshest row seen. */
+const contractIndex = new Map<string, Record<string, unknown>>()
+
+export function indexContracts(rows: Array<{ occ_symbol?: string }>): void {
+  for (const r of rows) {
+    if (typeof r.occ_symbol === 'string') {
+      contractIndex.set(r.occ_symbol, r as Record<string, unknown>)
+    }
+  }
+}
+
+export function contractByOcc(occ: string): Record<string, unknown> | null {
+  return contractIndex.get(occ) ?? null
+}
+
+/** The occ symbol under a spawn point, or null: the DOM hit half of DX-8.
+ *  Elements declare themselves with data-occ (heatmap cells, chain rows);
+ *  this resolves the declaration, and contractByOcc resolves the data. */
+export function occAt(spawn: { x: number; y: number }): string | null {
+  const el = document.elementFromPoint(spawn.x, spawn.y)
+  const hit = el?.closest('[data-occ]')
+  return hit?.getAttribute('data-occ') ?? null
+}
+
 // ------------------------------------------------------------- compatibility
 /** What each TARGET class accepts (DX-2: declared on the target, appears on
  *  the source). This map is the renderer's authority; main mirrors it for

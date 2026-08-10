@@ -130,6 +130,96 @@ try {
   }).then(r => JSON.stringify(r).slice(0, 120))`)
   console.log('seed:', put)
 
+  // SHOT_PAGE=datapad: THE AUTOSAVE TRIPWIRE. Drives the REAL wheel through
+  // the same wheelEvt channel real input uses -- main's state machine, the
+  // overlay renderer and the backend wheels doc all take part -- then asserts
+  // the posted leg reaches the store AND STAYS. If a post path ever bypasses
+  // the live engine, the engine's own 400ms autosave reverts it and this goes
+  // red; that failure shipped once (the Opt-page pick deletion: success
+  // reported, data gone, no error anywhere).
+  if (process.env.SHOT_PAGE === 'datapad') {
+    const seed = await home.eval(`window.grindstone.request('POST','/api/notepad',{
+      payload:{v:1,kind:'contract',
+        data:{occ_symbol:'SPY260918P00755000',expiration:'2026-09-18',strike:755,
+              right:'P',bid:38.1,ask:38.9,iv:0.19,delta:-0.39},
+        provenance:{workspace:'user',capturedAt:new Date().toISOString(),
+                    page:'e2e',address:'spy.gs'}},
+      label:'e2e 755P'}).then((r)=>r.status)`)
+    console.log('notepad seed:', seed)
+
+    await home.eval(`window.grindstone.openTab('symbol:SPY')`)
+    const spy = await waitFor(async () => {
+      const ts = await targets()
+      for (const t of ts.filter((x) => x.url.includes('mode=content'))) {
+        const c = await connect(t)
+        if (await c.eval(`!!document.querySelector('[data-wheel-context="chart"]')`)) return c
+      }
+      return null
+    }, 'the symbol page chart', 30000)
+    await sleep(2500)
+
+    const legsOf = `window.grindstone.request('GET','/api/chart-objects?key='+encodeURIComponent('SPY|1Day'))
+      .then((r)=>{const d=(r.body&&(r.body.doc??r.body))||{};return JSON.stringify((d.legs??[]).map((l)=>l.strike))})`
+    const before = JSON.parse(await spy.eval(legsOf))
+    console.log('legs before:', JSON.stringify(before))
+
+    // Spawn the wheel the way a right-click does: down, idle, up with no
+    // travel -> click mode. Away from the chart so the MAIN wheel spawns.
+    const sendWheel = (kind, x, y) =>
+      spy.eval(`(window.grindstone.wheelEvt(${JSON.stringify(kind)}, ${x}, ${y}), 'ok')`)
+    await sendWheel('down', 900, 300)
+    await sleep(350)
+    await sendWheel('up', 900, 300)
+
+    const wheelT = await waitFor(async () =>
+      (await targets()).find((t) => t.url.includes('mode=wheel')), 'the wheel overlay', 15000)
+    const wheelUi = await connect(wheelT)
+    const face = await waitFor(async () => {
+      const raw = await wheelUi.eval(`JSON.stringify({
+        segs: document.querySelectorAll('.wf-seg').length,
+        id: document.querySelector('.wheel-face')?.dataset.wheel ?? null,
+        mode: document.querySelector('.wheel-face')?.dataset.mode ?? null,
+        labels: [...document.querySelectorAll('.wf-seg')].map((t)=>t.textContent.trim())
+      })`)
+      const st = JSON.parse(raw)
+      return st.mode === 'click' ? st : null
+    }, 'the wheel in click mode', 10000)
+    console.log('wheel:', JSON.stringify(face))
+
+    const postIdx = face.labels.findIndex((t) => /post/i.test(t))
+    console.log('post segment index:', postIdx)
+    if (postIdx < 0) throw new Error('the main wheel has no Post segment')
+
+    // RIGHT-click the Post segment: the quick variant, which posts the most
+    // recent compatible entry with no picker (DX-6 / DX-10b).
+    await wheelUi.eval(`(document.querySelector('[data-seg="${postIdx}"]')
+      .dispatchEvent(new MouseEvent('mousedown', {bubbles:true, button:2})), 'ok')`)
+
+    await sleep(700)
+    const notice = await spy.eval(
+      `document.querySelector('[data-datapad-notice]')?.textContent ?? ''`)
+    console.log('announce:', JSON.stringify(notice))
+
+    // The engine's own save is debounced 400ms; poll, then re-check after a
+    // further beat. A direct-PUT post would be reverted in that window.
+    let seen = null
+    for (let i = 0; i < 12 && !seen; i++) {
+      await sleep(400)
+      const now = JSON.parse(await spy.eval(legsOf))
+      if (now.length > before.length) seen = now
+    }
+    console.log('legs after:', JSON.stringify(seen))
+    await sleep(1500)
+    const still = JSON.parse(await spy.eval(legsOf))
+    const survived = seen !== null && still.length >= seen.length
+    console.log('TRIPWIRE:', JSON.stringify({
+      posted: seen !== null, survived, announce: notice,
+      before: before.length, after: still.length,
+    }))
+    await shot(spy, 'datapad-post.png')
+    process.exit(seen !== null && survived ? 0 : 1)
+  }
+
   // SHOT_PAGE=data screenshots the Data and Settings pages instead of the Opt
   // page. Same boot, same scratch profile — a second harness would duplicate
   // ninety lines of auth just to open a different tab.

@@ -16,6 +16,7 @@
  *    never a fabricated mid. Truncation says 'showing N of M', never trims
  *    silently.
  */
+import { indexContracts } from '../datapad'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { ResolvedLeg } from './ChartDraw'
@@ -131,7 +132,7 @@ function LegRows({
   }
 
   return (
-    <div className={`cp-leg${hidden ? ' hidden' : ''}`}>
+    <div className={`cp-leg${hidden ? ' hidden' : ''}`} data-wheel-context="chain">
       {head}
       {res.truncated ? (
         <div className="dim subtle">showing {res.contracts.length} of {res.total} — narrow the window</div>
@@ -156,6 +157,7 @@ function LegRows({
           {res.contracts.map((c) => (
             <tr
               key={c.occ_symbol}
+              data-occ={c.occ_symbol}
               className={leg.pick === c.occ_symbol ? 'on' : undefined}
               onClick={() => onPick?.(leg.id, c as GridContract)}
             >
@@ -221,6 +223,9 @@ export function ChainPanel({
               `&right=${leg.right}`
           )
           if (mine !== seq.current) return // superseded — drop, never paint stale
+          // Feed the shared contract index so a page-level Get can resolve
+          // a data-occ hit into the full backend row without scraping the DOM.
+          if (r?.contracts?.length) indexContracts(r.contracts)
           setByLeg((cur) => ({ ...cur, [leg.id]: r }))
           setMeta({ source: r.source, reason: r.available ? undefined : r.reason })
         } catch (e) {
