@@ -14,6 +14,7 @@
  *  chart, the default wheel everywhere else. */
 function contextAt(target: EventTarget | null): {
   context: string
+  occ?: string
   symbols?: string[]
   indicators?: string[]
   hidden?: string[]
@@ -28,6 +29,12 @@ function contextAt(target: EventTarget | null): {
     v ? v.split(',').map((s) => s.trim()).filter(Boolean) : []
   return {
     context: host.dataset.wheelContext ?? '',
+    // The OCC under the cursor, when an enrolled element declared one. This
+    // is what lets a CLASS predict: a contract cell knows its natural
+    // destination is the Opt page, so the tab tool can go straight there with
+    // no Get data at all (docs/DATA_EXCHANGE.md DX-13). Read from the closest
+    // declaring element, so a row inside a chain panel beats the panel.
+    occ: target.closest<HTMLElement>('[data-occ]')?.dataset.occ || undefined,
     symbols: list(host.dataset.chartSymbols),
     indicators: list(host.dataset.chartIndicators),
     hidden: list(host.dataset.chartHidden),

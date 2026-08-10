@@ -1431,3 +1431,14 @@ html.wheel-mode #root {
 }
 .np-table td { padding: 3px 8px 3px 0; white-space: nowrap; }
 .np-table td.em { color: var(--text); font-weight: 600; }
+
+/* The predicted right-click destination (docs/DATA_EXCHANGE.md DX-14).
+   Quiet by design: the segment's own label stays the headline, and this
+   says only what the SHORTCUT would do. */
+.wf-hint {
+  fill: var(--accent);
+  font-size: 8.5px;
+  text-anchor: middle;
+  opacity: 0.85;
+  pointer-events: none;
+}

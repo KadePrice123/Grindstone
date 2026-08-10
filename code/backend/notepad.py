@@ -216,10 +216,16 @@ def list_entries(db: sqlite3.Connection, user_id: int) -> list[dict[str, Any]]:
 
 
 def summaries(db: sqlite3.Connection, user_id: int) -> list[dict[str, Any]]:
-    """What the post wheel is built from: id, kind, label — never payloads.
-    Wheel segments are deliberately payload-free."""
+    """What the post wheel is built from: id, kind, label and the entry's
+    own address — never payloads. Wheel segments are deliberately
+    payload-free; an address is not a payload, it is the route the wheel
+    needs to act, and serving it here is what keeps ONE label rule. The
+    predictive hint read the raw list once and showed 'source' for an entry
+    the picker beside it called '755P 09-18' — one entry, two names, in the
+    same wheel."""
     return [{"id": e["id"], "kind": e["payload"]["kind"],
-             "label": e["label"] or _default_label(e["payload"])}
+             "label": e["label"] or _default_label(e["payload"]),
+             "address": e["payload"]["provenance"].get("address", "")}
             for e in list_entries(db, user_id)]
 
 

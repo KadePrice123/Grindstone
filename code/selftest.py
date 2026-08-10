@@ -1694,7 +1694,12 @@ def _chart_selection():
 
     # -- the lock outranks chart context ------------------------------------
     wheel = (CODE / "app/src/main/wheel.ts").read_text(encoding="utf-8")
-    assert "usableOverChart" in wheel, "the lock/chart-context precedence fix is gone"
+    # The rule outlived its name: DX-15 generalised the hardcoded chart branch
+    # into class_wheels, so the guard is usableOverClass and the chart is
+    # simply the class it is called with. The PROPERTY is unchanged — a locked
+    # wheel that cannot act on the class under the spawn must yield to the
+    # wheel bound to that class.
+    assert "usableOverClass" in wheel, "the lock/class-context precedence fix is gone"
     assert "Context BEATS the locked default" not in wheel, \
         "the old precedence is back: a locked chart-draw wheel gets replaced " \
         "by the chart hub on the chart it is being used to draw on"
@@ -3229,10 +3234,16 @@ def _notepad():
             f"interfaces carry 9 of the backend's 13 fields, and the payload "
             f"must be the backend's envelope")
 
-    # --- summaries are payload-free (wheel segments must stay payload-free)
+    # --- summaries are payload-free (wheel segments must stay payload-free).
+    # The address is the exception that proves the rule: it is the ROUTE the
+    # wheel needs in order to act, not data from inside the entry, and
+    # serving it here is what keeps the predictive hint and the picker
+    # reading ONE label rule instead of two.
     for s_ in np.summaries(db, 1):
-        assert set(s_) == {"id", "kind", "label"}, s_
+        assert set(s_) == {"id", "kind", "label", "address"}, s_
         assert s_["label"], "an entry with no label gets a derived one"
+        assert not isinstance(s_["address"], dict), \
+            "a summary must never carry structured payload data"
     lbl = {s_["id"]: s_["label"] for s_ in np.summaries(db, 1)}
     assert lbl[ids["chain"]] == "chain SPY ×1"
     assert lbl[ids["contract"]] == "761P 09-18"
@@ -3458,6 +3469,200 @@ def _data_exchange():
         assert "announce(" in page, (
             f"{name} does not announce its result — a grab that silently "
             f"vanished is indistinguishable from one that worked")
+
+
+@check("predictive quick intent: the priority holds and layouts never move")
+def _predict_intent():
+    """DX-13/14. What you clicked changes what a tool ASSUMES you meant, but
+    never where it sits.
+
+    The priority (held data > class > universal quick > primary) runs HERE,
+    under node, against the real table — a source scan can confirm the
+    branches exist but not that they are consulted in that ORDER, and the
+    order is the whole guarantee. Reordering them is the bug this catches."""
+    app_dir = ROOT / "code" / "app"
+    exe = _node_exe()
+    if exe is None:
+        raise Skipped("no usable node runtime — the prediction order cannot be run")
+
+    probe = r"""
+import { predictIntent, predictingClasses } from './src/main/predictCore.ts'
+const out = []
+const ok = (name, cond, detail) => out.push({ name, cond: !!cond, detail: String(detail) })
+
+const TAB = 'wheel:tabs'
+const chain = { context: 'chain', symbols: ['SPY'], occ: 'SPY260116C00500000' }
+const pad = { label: 'SPY chain', address: 'spy.gs' }
+
+// 1. HELD DATA WINS — even standing over a class that predicts something else.
+const both = predictIntent(TAB, chain, pad)
+ok('held data outranks the class prediction',
+   both && both.arg === 'spy.gs', both && both.arg)
+
+// 2. THE CLASS PREDICTION, once nothing is held.
+const byClass = predictIntent(TAB, chain, null)
+ok('a contract cell predicts the Opt page for its symbol',
+   byClass && byClass.arg.startsWith('opt.gs?s=SPY'), byClass && byClass.arg)
+ok('the occ travels so the page can open on THAT contract',
+   byClass && byClass.arg.includes('occ=SPY260116C00500000'), byClass && byClass.arg)
+
+// THE ADDRESS VOCABULARY. tabs.openAddress drops anything without a .gs
+// head SILENTLY: a route-shaped prediction shows a hint and then does
+// nothing at all, which is worse than predicting nothing.
+for (const [name, p] of [['held', both], ['class', byClass]]) {
+  ok(name + ' prediction is a .gs ADDRESS, not a route',
+     p && /^[a-z0-9.]+\.gs(\?|$)/i.test(p.arg), p && p.arg)
+}
+
+// 3/4. No class, nothing held -> no prediction at all: quick is primary.
+ok('an unenrolled class predicts nothing',
+   predictIntent(TAB, { context: 'news', symbols: ['SPY'] }, null) === null, 'null')
+ok('a null ctx predicts nothing', predictIntent(TAB, null, null) === null, 'null')
+ok('an unknown tool predicts nothing even holding data',
+   predictIntent('nav:news', chain, pad) === null, 'null')
+
+// The class needs a symbol to name a destination; without one it must
+// decline rather than route to opt.gs?s= and land on a blank workstation.
+ok('a chain with no symbol declines',
+   predictIntent(TAB, { context: 'chain' }, null) === null, 'null')
+
+// PURITY: the same inputs answer the same way. The face is drawn from one
+// snapshot and the release acts on it later; a prediction that drifted
+// between those two moments would fire something the user never saw.
+const a = predictIntent(TAB, chain, null), b = predictIntent(TAB, chain, null)
+ok('prediction is pure', JSON.stringify(a) === JSON.stringify(b), JSON.stringify(a))
+
+// Every declared class is one the wheel can actually be over.
+ok('the tab tool predicts for chain and heatmap',
+   predictingClasses(TAB).join(',') === 'chain,heatmap', predictingClasses(TAB).join(','))
+
+console.log(JSON.stringify(out))
+"""
+    probe_path = app_dir / ".selftest-predict.mjs"
+    try:
+        probe_path.write_text(probe, encoding="utf-8")
+        r = subprocess.run([exe, str(probe_path)], cwd=app_dir,
+                           capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, f"predict probe crashed:\n{(r.stderr or r.stdout)[:1500]}"
+        results = json.loads(r.stdout.strip().splitlines()[-1])
+    finally:
+        probe_path.unlink(missing_ok=True)
+    bad = [x for x in results if not x["cond"]]
+    assert not bad, "the prediction priority is wrong:\n" + "\n".join(
+        f"  - {x['name']} (got {x['detail']})" for x in bad)
+    assert len(results) >= 10, f"the probe lost assertions: only {len(results)} ran"
+
+    core = (app_dir / "src" / "main" / "predictCore.ts").read_text(encoding="utf-8")
+    assert "import " not in core.replace("export interface", ""), (
+        "predictCore.ts grew an import — the probe runs it under plain node, "
+        "which cannot resolve Vite-style imports, so it must stay "
+        "dependency-free")
+
+    wheel = (app_dir / "src" / "main" / "wheel.ts").read_text(encoding="utf-8")
+
+    # --- QUICK ONLY. The prediction is a shortcut layered on top of the
+    # tool; if it fired on a plain left-click it would REPLACE behaviour the
+    # user has already learned, which is the one thing DX-13 forbids.
+    act = member_body(wheel, "private act(")
+    fire = act[act.index("hintKind"):]
+    assert "intent === 'quick'" in act[:act.index("hintKind")], (
+        "the prediction no longer fires only on quick intent — a left-click "
+        "would silently do something other than the tool's own job")
+    assert "openAddress" in fire[:200], "the prediction fires nothing"
+
+    # --- LAYOUTS NEVER RESTRUCTURE (Kade's rule, and the reason the main
+    # wheel is pinned at 8 elsewhere). predictFor may only ADD hint fields:
+    # if it can change type/wheel/route/label, context silently rearranges
+    # the compass and every muscle memory the wheel has built is void.
+    pf = member_body(wheel, "private predictFor(")
+    spread = pf[pf.index("return p ?"):]
+    for banned in ("type:", "wheel:", "route:", "label:", "tool:"):
+        assert banned not in spread, (
+            f"predictFor rewrites {banned!r} — a prediction may only add a "
+            f"hint to the segment already at that angle, never move it")
+    assert "hint:" in spread and "hintArg:" in spread
+
+    # --- THE HINT IS VISIBLE (DX-14): a predicted action the user cannot see
+    # before releasing is a misclick generator.
+    face = (app_dir / "src" / "renderer" / "src" / "components" / "WheelFace.tsx"
+            ).read_text(encoding="utf-8")
+    # The CONDITIONAL, not just the name: `{false ? (` left "seg.hint" in
+    # the file and sailed past an in-check. What is asserted has to be that
+    # the hint's own truthiness is what gates its rendering.
+    assert re.search(r"\{seg\.hint \?", face), (
+        "the wheel face no longer renders the prediction on seg.hint — the "
+        "user would release into an action they were never shown")
+    styles = (app_dir / "src" / "renderer" / "src" / "styles.css").read_text(encoding="utf-8")
+    assert ".wf-hint" in styles, (
+        "the hint class is not in the GLOBAL stylesheet — it would render "
+        "unstyled, the exact failure the notepad buttons already shipped")
+
+    # --- the hint is TRANSIENT. wheels.py stores user layouts; a hint that
+    # reached the store would freeze one moment's context into the saved
+    # wheel and resurface it over unrelated elements forever.
+    wheels_py = (CODE / "backend" / "wheels.py").read_text(encoding="utf-8")
+    assert "hint" not in wheels_py, (
+        "wheels.py knows about 'hint' — predictions are computed per spawn "
+        "and must never be persisted into a stored layout")
+
+
+@check("class wheels: opt-in bindings, and the chart is just the first one")
+def _class_wheels():
+    """DX-15. The chart's binding was a hardcoded branch in wheel.ts. Making
+    it config is only worth doing if the mechanism is REAL — a feature whose
+    only user is a default nobody can change has never been exercised. So the
+    default is asserted to be exactly the old behaviour, and rebinding is
+    asserted to work and to refuse nonsense."""
+    sys.path.insert(0, str(CODE))
+    from backend import wheels as W
+
+    doc = W.default_doc()
+    cw = doc["config"]["class_wheels"]
+    assert cw == {"chart": "chart"}, (
+        f"the default bindings changed to {cw!r} — shipping any other class "
+        f"bound by default moves a wheel the user never asked to move")
+    assert W.validate(doc)["config"]["class_wheels"] == cw, "a round trip lost it"
+
+    # A REAL binding, not just the default: bind another class to a builtin.
+    d2 = W.default_doc()
+    d2["config"]["class_wheels"] = {"chart": "chart", "chain": "favorites"}
+    assert W.validate(d2)["config"]["class_wheels"]["chain"] == "favorites",         "class_wheels cannot actually bind anything but the chart"
+
+    # And it refuses what would strand the user. A binding to a wheel that
+    # does not exist is the dangerous one: spawn would find no wheel and the
+    # right-click would do nothing at all.
+    for label, bad in (
+        ("a wheel that does not exist", {"chart": "nope"}),
+        ("a class name that is not one", {"CHART": "chart"}),
+        ("not an object at all", ["chart"]),
+        ("more bindings than the cap", {f"c{i}": "chart"
+                                        for i in range(W.MAX_CLASS_WHEELS + 1)}),
+    ):
+        d3 = W.default_doc()
+        d3["config"]["class_wheels"] = bad
+        try:
+            W.validate(d3)
+            raise AssertionError(f"class_wheels accepted {label}")
+        except ValueError:
+            pass
+
+    # An older stored doc regenerates rather than mixing generations: a v6
+    # doc has no class_wheels, and a half-valid doc is the thing DOC_VERSION
+    # exists to prevent.
+    assert W.DOC_VERSION >= 7, (
+        "class_wheels was added without bumping DOC_VERSION — stored docs "
+        "would come back missing the key that spawn now reads")
+
+    # --- wheel.ts reads the BINDING, not a hardcoded class.
+    wheel = (CODE / "app/src/main/wheel.ts").read_text(encoding="utf-8")
+    spawn = member_body(wheel, "private async spawn(")
+    assert "class_wheels" in spawn, (
+        "spawn no longer consults the bindings — the chart branch is "
+        "hardcoded again and DX-15 is a config nobody reads")
+    assert "ctx?.context === 'chart'" not in spawn,         "the hardcoded chart comparison is back beside the general mechanism"
+    # The bound wheel is checked to EXIST. A doc is user data; spawning a
+    # wheel id that is not in the doc yields an empty face.
+    assert "doc.wheels.some(" in spawn,         "spawn trusts the binding without checking the wheel exists"
 
 
 @check("component grab: a constrained line brings its full chain of objects")

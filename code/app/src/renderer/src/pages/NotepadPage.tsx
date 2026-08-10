@@ -19,6 +19,14 @@ import { useCallback, useEffect, useState, type ReactElement } from 'react'
 import { api, ApiError } from '../api'
 import { DataIcon } from '../components/icons'
 import type { DataPayload, PadEntry } from '../datapad'
+import { asGs, gsRoute } from '../urls'
+
+/** The route the recorded provenance address opens, or null when the entry
+ *  predates addressing (older builds) and there is nowhere honest to go. */
+function sourceRoute(p: DataPayload['provenance']): string | null {
+  const gs = p.address ? asGs(p.address) : null
+  return gs ? gsRoute(gs) : null
+}
 
 function fmt(n: unknown, dp = 2): string {
   return typeof n === 'number' && Number.isFinite(n) ? n.toFixed(dp) : '—'
@@ -262,13 +270,16 @@ export function NotepadPage(): ReactElement {
               </span>
               {/* Provenance is ROUTABLE (DX-7d): the address the grab recorded
                   reopens its source, which is the whole point of tracking it. */}
-              {e.payload.provenance.address ? (
+              {/* The ADDRESS is what routes, not the symbol. Rebuilding a
+                  `symbol:` route from provenance.symbol greyed this button
+                  out for every source that isn't a ticker page — a grabbed
+                  backtest form records 'backtest.gs' and has no symbol. */}
+              {sourceRoute(e.payload.provenance) ? (
                 <button
                   className="btn-link"
                   onClick={() => window.grindstone.openTab(
-                    `symbol:${(e.payload.provenance.symbol ?? '').toUpperCase()}`
+                    sourceRoute(e.payload.provenance) as string
                   )}
-                  disabled={!e.payload.provenance.symbol}
                   title={e.payload.provenance.address}
                 >
                   open source

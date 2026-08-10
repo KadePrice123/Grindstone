@@ -28,6 +28,10 @@ export interface WheelSegment {
   icon?: string
   symbol?: string
   disabled?: boolean
+  /** What RIGHT-clicking will do, given what sat under the spawn
+   *  (docs/DATA_EXCHANGE.md DX-14). Shown on the face because a predicted
+   *  action the user cannot see before releasing is a misclick generator. */
+  hint?: string
 }
 
 export interface WheelRender {
@@ -237,6 +241,14 @@ export function WheelFace({
                 {seg.label}
               </text>
             )}
+            {seg.hint ? (
+              // The predicted RIGHT-click destination, under the label. It is
+              // deliberately quiet: the tool still does its normal thing on
+              // left-click, and this only announces the shortcut.
+              <text className="wf-hint" x={anchor.x} y={anchor.y + (g ? 24 : 16)}>
+                {seg.hint}
+              </text>
+            ) : null}
           </g>
         )
       })}

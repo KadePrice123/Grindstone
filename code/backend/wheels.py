@@ -10,7 +10,8 @@ Shape:
       "config": {
         "ticker_display": "percent" | "price",   # what ticker segments show
         "ticker_colors": bool,                   # tint by day direction
-        "locked": wheel-id | None                # user-locked default wheel
+        "locked": wheel-id | None,               # user-locked default wheel
+        "class_wheels": {class: wheel-id}        # DX-15: per-class bindings
       },
       "wheels": [
         {"id", "name", "symbol", "builtin"?, "dynamic"?, "segments": [...]}
@@ -37,6 +38,7 @@ apply unchanged), page/web favorites become link segments.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -56,7 +58,14 @@ DOC_KEY = "gesture_wheels"
 # v6: the DATA tools (Get data / Post data, docs/DATA_EXCHANGE.md) join the
 # main wheel. New segment type 'data' — a sibling of 'chart', not a chart
 # tool, because grabbing works on chains, forms and heatmaps too.
-DOC_VERSION = 6
+DOC_VERSION = 7
+
+# DX-15. Empty except the chart, whose binding was a hardcoded branch in
+# wheel.ts before this existed. Rebinding is the user's call; the default is
+# exactly the behaviour that shipped, so nobody's muscle memory moves.
+DEFAULT_CLASS_WHEELS: dict[str, str] = {"chart": "chart"}
+MAX_CLASS_WHEELS = 24
+_CLASS_RE = re.compile(r"[a-z][a-z0-9:_-]{0,23}")
 
 MAX_WHEELS = 16
 MAX_SEGMENTS = 12
@@ -111,7 +120,8 @@ BUILTIN_IDS = ("main", "ai", "tabs", "favorites",
 def default_doc() -> dict[str, Any]:
     return {
         "version": DOC_VERSION,
-        "config": {"ticker_display": "percent", "ticker_colors": True, "locked": None},
+        "config": {"ticker_display": "percent", "ticker_colors": True,
+                   "locked": None, "class_wheels": dict(DEFAULT_CLASS_WHEELS)},
         "wheels": [
             {
                 # Kade's specified layout: wheel-navs at N/E/W, search at S,
@@ -366,9 +376,33 @@ def validate(doc: Any) -> dict[str, Any]:
     if locked is not None and locked not in ids:
         _fail(f"locked wheel {locked!r} does not exist")
 
+    # DX-15: per-class wheel bindings. The chart's binding used to be a
+    # hardcoded special case in wheel.ts; it is now simply the first entry of
+    # the general mechanism, which is what makes the mechanism testable —
+    # a feature whose only user is a default nobody can change is a feature
+    # nobody has exercised.
+    raw_cw = config.get("class_wheels")
+    if raw_cw is None:
+        raw_cw = dict(DEFAULT_CLASS_WHEELS)
+    if not isinstance(raw_cw, dict):
+        _fail("class_wheels must be an object of class -> wheel id")
+    if len(raw_cw) > MAX_CLASS_WHEELS:
+        _fail(f"at most {MAX_CLASS_WHEELS} class bindings")
+    class_wheels: dict[str, str] = {}
+    for cls, wid in raw_cw.items():
+        # The class name is a trust boundary of its own: it arrives from a
+        # renderer's data-wheel-context attribute and is compared against
+        # ctx.context, which is sanitised the same way.
+        if not isinstance(cls, str) or not _CLASS_RE.fullmatch(cls):
+            _fail(f"class name {cls!r} is not a valid element class")
+        if not isinstance(wid, str) or wid not in ids:
+            _fail(f"class {cls!r} is bound to wheel {wid!r}, which does not exist")
+        class_wheels[cls] = wid
+
     return {
         "version": DOC_VERSION,
-        "config": {"ticker_display": display, "ticker_colors": colors, "locked": locked},
+        "config": {"ticker_display": display, "ticker_colors": colors,
+                   "locked": locked, "class_wheels": class_wheels},
         "wheels": out_wheels,
     }
 

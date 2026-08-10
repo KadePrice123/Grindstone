@@ -34,6 +34,7 @@ import { NAVBAR_H, TABBAR_H, TabManager, WheelTabInfo } from './tabs'
 // overlay report hover back over IPC, but the release event can beat the
 // last hover report across the process boundary — acting on a stale segment.
 import { WHEEL_RADIUS, segmentAt } from '../shared/wheelGeometry'
+import { predictIntent, type PadHint } from './predictCore'
 
 const CLICK_MOVE_THRESHOLD = 10 // px of travel that turns a click into a hold
 const EDGE_MARGIN = 12
@@ -55,6 +56,13 @@ interface Segment {
   symbol?: string // the target wheel's symbol, for wheel segments
   entryId?: string // data: a notepad entry id (picker segments; transient,
                    // never stored -- wheels.py never sees these)
+  /** What RIGHT-clicking this segment will do, given what sits under the
+   *  spawn (docs/DATA_EXCHANGE.md DX-13/14). Computed at spawn and shown on
+   *  the face: a predicted action the user cannot see before releasing is a
+   *  misclick generator. Transient like entryId; never stored. */
+  hint?: string
+  hintKind?: string   // 'address' | 'contract' — what the quick variant does
+  hintArg?: string    // the address or occ the prediction resolved
   disabled?: boolean
 }
 
@@ -67,7 +75,16 @@ interface WheelDef {
 }
 
 interface WheelDoc {
-  config: { ticker_display: 'percent' | 'price'; ticker_colors: boolean; locked: string | null }
+  config: {
+    ticker_display: 'percent' | 'price'
+    ticker_colors: boolean
+    locked: string | null
+    /** DX-15: element class -> wheel id. Ships as { chart: 'chart' }, the
+     *  binding this file used to hardcode. Optional in the type because a
+     *  doc from an older build has no such key — the backend regenerates on
+     *  version mismatch, but main must not crash in the window before it. */
+    class_wheels?: Record<string, string>
+  }
   wheels: WheelDef[]
 }
 
@@ -93,6 +110,9 @@ interface LauncherPage {
  *  preload sends no ctx at all — absence is the normal case, never an error. */
 interface WheelCtx {
   context: string
+  /** The OCC symbol under the spawn, when an enrolled element declared one
+   *  (chain rows, heatmap cells). Carries the class prediction's target. */
+  occ?: string
   symbols: string[]
   indicators: string[]
   hidden: string[]
@@ -123,8 +143,13 @@ function sanitizeCtx(raw: unknown): WheelCtx | null {
       : []
   const tf = r['timeframe']
   const iso = r['isolated']
+  const occ = r['occ']
   return {
     context: context.slice(0, 24),
+    // An OCC symbol is 15-21 chars. Capped and charset-checked like every
+    // other ctx field, because this value ends up inside an address the
+    // shell will open — sanitizeCtx is the trust boundary, not a formality.
+    occ: typeof occ === 'string' && /^[A-Z0-9.]{6,32}$/.test(occ) ? occ : undefined,
     symbols: arr(r['symbols']).map((s) => s.toUpperCase()),
     indicators: arr(r['indicators']),
     hidden: arr(r['hidden']).map((s) => s.toUpperCase()),
@@ -261,14 +286,16 @@ export class WheelManager {
   } {
     const def = doc.wheels.find((w) => w.id === wheelId) ?? doc.wheels[0]
     if (!def.dynamic) {
-      const segments = def.segments.map((s) => this.decorateChartState({
-        ...s,
-        disabled: s.type === 'placeholder' || s.type === 'empty',
-        symbol: s.type === 'wheel'
-          ? doc.wheels.find((w) => w.id === s.wheel)?.symbol
-          : undefined,
-        label: s.label || (s.type === 'ticker' ? (s.ticker ?? '') : s.label),
-      }, ctx))
+      const segments = def.segments.map((s) => this.predictFor(
+        this.decorateChartState({
+          ...s,
+          disabled: s.type === 'placeholder' || s.type === 'empty',
+          symbol: s.type === 'wheel'
+            ? doc.wheels.find((w) => w.id === s.wheel)?.symbol
+            : undefined,
+          label: s.label || (s.type === 'ticker' ? (s.ticker ?? '') : s.label),
+        }, ctx),
+        ctx))
       return { def, segments, pages: 1 }
     }
     if (def.dynamic === 'favorites') {
@@ -394,12 +421,15 @@ export class WheelManager {
    * unlock and respawn. So context still wins for wheels that have nothing to
    * say about a chart.
    */
-  private usableOverChart(doc: WheelDoc, id: string): boolean {
+  private usableOverClass(doc: WheelDoc, id: string, classWheel: string): boolean {
     const w = doc.wheels.find((x) => x.id === id)
     if (!w) return false
-    if (w.id === 'chart' || (w.dynamic ?? '').startsWith('chart-')) return true
+    // The bound wheel itself, and its own dynamic children, always qualify.
+    if (w.id === classWheel || (w.dynamic ?? '').startsWith(`${classWheel}-`)) return true
+    // Otherwise the locked wheel must offer a way BACK to the bound one —
+    // either by acting on that class directly or by naming it as a segment.
     return w.segments.some(
-      (s) => s.type === 'chart' || (s.type === 'wheel' && s.wheel === 'chart')
+      (s) => s.type === classWheel || (s.type === 'wheel' && s.wheel === classWheel)
     )
   }
 
@@ -539,15 +569,24 @@ export class WheelManager {
     // right-clicking the very chart you were drawing on silently swapped it
     // for the chart hub: the lock appeared to work everywhere EXCEPT the one
     // surface it exists for.
-    // The 'chart' wheel is a required builtin, but a doc is user data — check.
+    // The binding comes from config.class_wheels (DX-15), which ships with
+    // exactly one entry — chart -> chart, the behaviour that was hardcoded
+    // here before. A doc is user data, so the bound wheel is checked to
+    // exist rather than assumed.
     const locked = doc.config.locked
-    const overChart = ctx?.context === 'chart' && doc.wheels.some((w) => w.id === 'chart')
+    const bound = ctx?.context ? (doc.config.class_wheels?.[ctx.context] ?? null) : null
+    const classWheel = bound !== null && doc.wheels.some((w) => w.id === bound) ? bound : null
     const wheelId =
-      locked !== null && (!overChart || this.usableOverChart(doc, locked))
+      locked !== null && (classWheel === null || this.usableOverClass(doc, locked, classWheel))
         ? locked
-        : overChart
-          ? 'chart'
+        : classWheel !== null
+          ? classWheel
           : 'main'
+    // The pad snapshot the predictions are resolved from. Awaited BEFORE
+    // materialize, so the face the user sees and the action a release fires
+    // come from one snapshot — a live re-read mid-gesture is exactly the
+    // stale-hover race this wheel already refuses to have.
+    await this.refreshPadHint()
     const { def, segments } = this.materialize(doc, wheelId, 0, ctx, favorites)
     const center = this.clamp(winId, x, y)
 
@@ -729,6 +768,12 @@ export class WheelManager {
     if (!s) return 'close'
     const seg = index !== null ? s.segments[index] : undefined
     if (!seg || seg.disabled) return 'close'
+    // THE PREDICTION FIRES ON QUICK, and only on quick: left-click keeps
+    // every tool's declared behaviour, so nothing a user has learned changes.
+    if (intent === 'quick' && seg.hintKind === 'address' && seg.hintArg) {
+      this.tabs.openAddress(s.winId, seg.hintArg)
+      return 'close'
+    }
     switch (seg.type) {
       case 'wheel':
         this.switchWheel(seg.wheel ?? 'main')
@@ -808,6 +853,52 @@ export class WheelManager {
       spawn: { x: s.start.x, y: s.start.y },
       ...(seg.entryId ? { entryId: seg.entryId } : {}),
     })
+  }
+
+  /** Attach the predicted quick intent to a segment, if it has one.
+   *
+   *  The table lives in predictCore.ts (import-free, so the gate can run the
+   *  real priority order under node). This method's only job is to name the
+   *  tool the way the table is keyed and to copy the answer onto the segment
+   *  — the prediction itself is resolved ONCE at spawn from the frozen ctx,
+   *  so it cannot flicker to a different intent mid-gesture.
+   *
+   *  Nothing here changes the LAYOUT. A prediction only ever adds a hint to
+   *  the segment already at that angle. */
+  private predictFor(seg: Segment, ctx: WheelCtx | null): Segment {
+    const tool =
+      seg.type === 'wheel' ? `wheel:${seg.wheel}`
+      : seg.type === 'tool' ? `tool:${seg.tool}`
+      : seg.type === 'data' ? `data:${seg.tool}`
+      : seg.type === 'nav'  ? `nav:${seg.route}`
+      : ''
+    if (!tool) return seg
+    const p = predictIntent(tool, ctx, this.padHint)
+    return p ? { ...seg, hint: p.hint, hintKind: p.kind, hintArg: p.arg } : seg
+  }
+
+  /** The newest notepad entry that carries a routable address, refreshed
+   *  when the wheel spawns. Cached because prediction must be synchronous --
+   *  the face is drawn from the same snapshot the release acts on. */
+  private padHint: PadHint | null = null
+
+  private async refreshPadHint(): Promise<void> {
+    try {
+      // The PICKER's endpoint, deliberately: it applies the one default-label
+      // rule, so the hint and the picker segment for the same entry always
+      // read the same. It carries no payloads, only what a wheel needs.
+      const r = await mainRequest<Array<{ label: string; address?: string }>>(
+        'GET', '/api/notepad/summaries')
+      const rows = r.status === 200 && Array.isArray(r.body) ? r.body : []
+      // Newest first (notepad.py orders added_at DESC), and only entries whose
+      // provenance is actually routable — reconstructing an address from a
+      // symbol would drop every non-symbol source and produce a string
+      // openAddress silently refuses.
+      const hit = rows.find((e) => /\.gs(\?|$)/i.test(e.address ?? ''))
+      this.padHint = hit ? { label: hit.label, address: hit.address! } : null
+    } catch {
+      this.padHint = null
+    }
   }
 
   /** Main's mirror of the renderer's ACCEPTS registry, for greying picker

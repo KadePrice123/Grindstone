@@ -293,6 +293,65 @@ wheel"), default empty except the chart's existing binding, which becomes the
 first entry of the general mechanism instead of a hardcoded special case.
 Default behaviour is DX-13 only — tools sharpen, layouts hold still.
 
+### What shipped (DX-13, DX-14)
+
+`code/app/src/main/predictCore.ts` holds the table and `predictIntent()`. It
+is a table keyed by **(tool, class)** rather than an if-ladder that grows a
+branch per page, and it is **import-free and pure**, so the gate runs the real
+priority order under node instead of reading source and hoping. All four rungs
+exist as rungs, including the empty universal-quick row — a priority level
+that is only a comment cannot be tested.
+
+`wheel.ts` names the tool the way the table is keyed (`wheel:tabs`,
+`data:data:get`, …), resolves the prediction **once at spawn** from the frozen
+ctx, and copies it onto the segment as `hint` / `hintKind` / `hintArg`. It may
+add nothing else: the gate fails if `predictFor` can write `type`, `wheel`,
+`route`, `label` or `tool`, because that is layout restructuring wearing a
+prediction's clothes. The hint never reaches `wheels.py` — a stored layout
+would freeze one moment's context and resurface it forever.
+
+Two things the build corrected, both worth keeping written down:
+
+- **`tabs.openAddress` speaks `.gs` ADDRESSES, not routes**, and drops
+  anything else on the floor silently. The first cut predicted `opt:SPY` and
+  `symbol:SPY`: the face showed a hint and the release did nothing at all,
+  which is worse than predicting nothing. Both predictions are now `.gs`
+  addresses and the gate asserts the shape.
+- **The hint and the picker must use ONE label rule.** The hint first read the
+  raw `/api/notepad` list, whose `label` is blank unless the user set one, and
+  showed `→ source` for an entry the picker beside it called `755P 09-18` —
+  one entry, two names, in the same wheel. `/api/notepad/summaries` now also
+  serves the entry's `address` (a route is not a payload) and both read from
+  it.
+
+### What shipped (DX-15)
+
+`config.class_wheels` in the wheels document: element class -> wheel id,
+shipping as exactly `{"chart": "chart"}` — the branch `wheel.ts` used to
+hardcode, now the first entry of the general mechanism. `spawn()` reads the
+binding, checks the bound wheel actually exists (a doc is user data), and the
+lock guard generalised with it: `usableOverClass` replaces `usableOverChart`,
+same property — a locked wheel that cannot act on the class under the spawn
+yields to the wheel bound to that class.
+
+The backend refuses a binding to a wheel that does not exist (spawn would find
+nothing and the right-click would do nothing at all), a class name that is not
+one, a non-object, and more than `MAX_CLASS_WHEELS` bindings. `DOC_VERSION`
+went to 7, so stored v6 docs regenerate rather than coming back missing the
+key spawn now reads.
+
+No default beyond the chart. Binding a second class is the user's call — the
+gate asserts the default set is exactly the old behaviour, because shipping a
+binding nobody asked for moves a wheel out from under them.
+
+Verified by `python code/selftest.py` (the priority runs under node, and seven
+mutations of it were each confirmed red; six more for the bindings) and
+end-to-end in
+`e2e/optshot.mjs` — with an empty pad over a chain the face shows `→ SPY Opt`;
+seed one routable entry and the same spawn shows `→ e2e 755P`, the held-data
+rung outranking the class. `e2e/shots/wheel-hint.png` is the visual proof for
+DX-14, because a DOM node that exists can still be invisible.
+
 ---
 
 ## 5. Secrets — what Get must never serialize

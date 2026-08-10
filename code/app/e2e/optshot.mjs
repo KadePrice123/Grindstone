@@ -138,15 +138,6 @@ try {
   // red; that failure shipped once (the Opt-page pick deletion: success
   // reported, data gone, no error anywhere).
   if (process.env.SHOT_PAGE === 'datapad') {
-    const seed = await home.eval(`window.grindstone.request('POST','/api/notepad',{
-      payload:{v:1,kind:'contract',
-        data:{occ_symbol:'SPY260918P00755000',expiration:'2026-09-18',strike:755,
-              right:'P',bid:38.1,ask:38.9,iv:0.19,delta:-0.39},
-        provenance:{workspace:'user',capturedAt:new Date().toISOString(),
-                    page:'e2e',address:'spy.gs'}},
-      label:'e2e 755P'}).then((r)=>r.status)`)
-    console.log('notepad seed:', seed)
-
     await home.eval(`window.grindstone.openTab('symbol:SPY')`)
     const spy = await waitFor(async () => {
       const ts = await targets()
@@ -158,6 +149,83 @@ try {
     }, 'the symbol page chart', 30000)
     await sleep(2500)
 
+    // The pad SURVIVES between runs — the profile is scratch per suite, not
+    // per run — so the first version of this asserted an empty pad against 19
+    // leftover entries and read the held-data rung as the class one. Clear it
+    // rather than assume it.
+    const cleared = await spy.eval(`window.grindstone.request('GET','/api/notepad')
+      .then((r)=>Promise.all((r.body??[]).map((e)=>
+        window.grindstone.request('DELETE','/api/notepad/'+e.id))))
+      .then((xs)=>xs.length)`)
+    console.log('pad cleared:', cleared)
+
+    // ---------------------------------------------- PREDICTIVE QUICK INTENT
+    // The hint has to be VISIBLE (DX-14): a predicted action the user cannot
+    // see before releasing is a misclick generator, and a source scan cannot
+    // tell whether it reached the face. This spawns with a CHAIN context and
+    // reads the overlay's own DOM.
+    //
+    // Order matters: the pad is still EMPTY here, so what shows is the class
+    // prediction. The held-data rung is asserted after the seed below — the
+    // same two spawns, in the order that proves which one outranks.
+    const sendWheel = (kind, x, y, ctx) =>
+      spy.eval(`(window.grindstone.wheelEvt(${JSON.stringify(kind)}, ${x}, ${y}` +
+               (ctx ? `, ${JSON.stringify(ctx)}` : '') + `), 'ok')`)
+    let lastWheelUi = null
+    const hintsNow = async () => {
+      // DISMISS ANY OPEN WHEEL FIRST. A spawn while the overlay is up is not
+      // a spawn — main keeps the session and the face never re-materializes,
+      // so the second call read the FIRST call's face and the two rungs of
+      // the priority looked identical. run.mjs dismisses the same way.
+      const open = (await targets()).find((t) => t.url.includes('mode=wheel'))
+      if (open) {
+        const ui0 = await connect(open)
+        await ui0.eval(`(document.querySelector('.wheel-stage')
+          ?.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0})), 'ok')`)
+        await sleep(250)
+      }
+      await sendWheel('down', 900, 300,
+        { context: 'chain', symbols: ['SPY'], occ: 'SPY260918P00755000' })
+      await sleep(350)
+      await sendWheel('up', 900, 300)
+      const t = await waitFor(async () =>
+        (await targets()).find((x) => x.url.includes('mode=wheel')), 'the wheel overlay', 15000)
+      const ui = await connect(t)
+      lastWheelUi = ui
+      return await waitFor(async () => {
+        const raw = await ui.eval(`JSON.stringify({
+          mode: document.querySelector('.wheel-face')?.dataset.mode ?? null,
+          hints: [...document.querySelectorAll('.wf-hint')].map((h)=>h.textContent.trim()),
+        })`)
+        const st = JSON.parse(raw)
+        return st.mode === 'click' ? st : null
+      }, 'the wheel in click mode', 10000)
+    }
+    const classHint = await hintsNow()
+    console.log('PREDICT class:', JSON.stringify(classHint))
+
+    const seed = await home.eval(`window.grindstone.request('POST','/api/notepad',{
+      payload:{v:1,kind:'contract',
+        data:{occ_symbol:'SPY260918P00755000',expiration:'2026-09-18',strike:755,
+              right:'P',bid:38.1,ask:38.9,iv:0.19,delta:-0.39},
+        provenance:{workspace:'user',capturedAt:new Date().toISOString(),
+                    page:'e2e',address:'spy.gs'}},
+      label:'e2e 755P'}).then((r)=>r.status)`)
+    console.log('notepad seed:', seed)
+
+    // Same spawn, same chain context — but now something is held, so the
+    // held-data rung must take the face over the class prediction.
+    const heldHint = await hintsNow()
+    console.log('PREDICT held:', JSON.stringify(heldHint))
+    // The hint is a VISIBILITY promise (DX-14), and a DOM node that exists
+    // can still be invisible. The screenshot is the only thing that says so.
+    if (lastWheelUi) await shot(lastWheelUi, 'wheel-hint.png')
+    const predictOk =
+      classHint.hints.some((h) => h.includes('SPY Opt')) &&
+      heldHint.hints.some((h) => h.includes('e2e 755P')) &&
+      !heldHint.hints.some((h) => h.includes('SPY Opt'))
+    console.log('PREDICT:', JSON.stringify({ predictOk }))
+
     const legsOf = `window.grindstone.request('GET','/api/chart-objects?key='+encodeURIComponent('SPY|1Day'))
       .then((r)=>{const d=(r.body&&(r.body.doc??r.body))||{};return JSON.stringify((d.legs??[]).map((l)=>l.strike))})`
     const before = JSON.parse(await spy.eval(legsOf))
@@ -165,8 +233,6 @@ try {
 
     // Spawn the wheel the way a right-click does: down, idle, up with no
     // travel -> click mode. Away from the chart so the MAIN wheel spawns.
-    const sendWheel = (kind, x, y) =>
-      spy.eval(`(window.grindstone.wheelEvt(${JSON.stringify(kind)}, ${x}, ${y}), 'ok')`)
     await sendWheel('down', 900, 300)
     await sleep(350)
     await sendWheel('up', 900, 300)
@@ -257,7 +323,7 @@ try {
     console.log('NOTEPAD:', JSON.stringify(pad))
     await shot(padT, 'notepad.png')
     const padOk = pad.entries >= 4 && pad.chainCols === 12 && !pad.rawJson
-    process.exit(seen !== null && survived && padOk ? 0 : 1)
+    process.exit(seen !== null && survived && padOk && predictOk ? 0 : 1)
   }
 
   // SHOT_PAGE=data screenshots the Data and Settings pages instead of the Opt
