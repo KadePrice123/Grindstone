@@ -111,6 +111,30 @@ def available() -> bool:
     return sys.platform == "win32"
 
 
+def virtualized() -> bool:
+    """True when this interpreter's view of %LOCALAPPDATA% may be REDIRECTED.
+
+    The Microsoft Store build of Python carries package identity, and Windows
+    silently rewrites its %LOCALAPPDATA% access into
+    ``…\\Packages\\PythonSoftwareFoundation.Python.<v>\\LocalCache\\Local``.
+    Two processes running *the same* `sys.executable` can therefore see two
+    different directories, depending on how each was launched — measured on
+    this machine: the sidecar spawned by Electron wrote the real path, while
+    the same interpreter started from a shell saw an empty one and reported
+    'not enrolled' for a key that existed.
+
+    That is survivable for the app, which reads and writes through one process.
+    It is NOT survivable for a scheduled-task recorder, which is a different
+    process that must find a key some other process wrote — a coin flip on
+    whether it looks in the same place.
+
+    Shipping builds are PyInstaller, which has no package identity and no
+    redirection, so this is a development-configuration hazard. It is surfaced
+    rather than worked around because silently writing a credential to a path
+    that is not the one reported is exactly how an hour disappears."""
+    return "WindowsApps" in sys.base_prefix or "\\Packages\\" in sys.prefix
+
+
 def _protect(plaintext: bytes) -> bytes:
     out = _BLOB()
     ok = ctypes.windll.crypt32.CryptProtectData(
@@ -204,7 +228,8 @@ def status() -> dict[str, Any]:
     actually matters after a password reset."""
     p = key_path()
     if not p.is_file():
-        return {"enrolled": False, "readable": False, "platform_ok": available()}
+        return {"enrolled": False, "readable": False, "platform_ok": available(),
+                "virtualized": virtualized()}
     meta: dict[str, Any] = {}
     if meta_path().is_file():
         try:
@@ -212,7 +237,8 @@ def status() -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             meta = {}
     return {"enrolled": True, "readable": load() is not None,
-            "platform_ok": available(), "path": str(p), **meta}
+            "platform_ok": available(), "virtualized": virtualized(),
+            "path": str(p), **meta}
 
 
 def remove() -> bool:
