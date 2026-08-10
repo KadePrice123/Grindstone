@@ -3075,6 +3075,74 @@ def _unattended_recorder():
             f"recorder_main reaches the vault via {banned!r}"
 
 
+@check("autostart: refuses without a key, names its method, removes both on off")
+def _autostart():
+    """Turning unattended recording on and off.
+
+    The launcher carries GRINDSTONE_DATA_DIR EXPLICITLY because neither a
+    scheduled task nor a Startup entry inherits an environment — and a recorder
+    that starts without it opens a second, empty market.db the app never looks
+    at, a failure whose only symptom is data that is not there.
+
+    Two mechanisms exist because an unelevated `schtasks /create` is denied on
+    a locked-down machine (measured), and demanding administrator rights for a
+    data recorder is the wrong trade."""
+    import sys as _sys
+    sys.path.insert(0, str(CODE))
+    from backend import autostart, syskey
+
+    src = (CODE / "backend" / "autostart.py").read_text(encoding="utf-8")
+    code_only = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+
+    if _sys.platform != "win32":
+        assert not autostart.available()
+        assert autostart.status()["registered"] is False
+        return
+
+    # The launcher must pin the data directory, or the recorder writes to a
+    # store nobody reads.
+    assert "GRINDSTONE_DATA_DIR" in code_only, \
+        "the launcher no longer pins the data directory — a logon launch " \
+        "inherits no environment and would open a second, empty market.db"
+    # Elevation is never required: no runas, no /ru SYSTEM, no UAC prompt.
+    for banned in ("SYSTEM", "runas", "highest", "HIGHEST"):
+        assert banned not in code_only, \
+            f"autostart references {banned!r} — a LocalSystem or elevated task " \
+            f"cannot decrypt a user-scope DPAPI blob, so it would start " \
+            f"reliably and never find its key"
+
+    # --- refuses without a key. Save and restore the REAL enrolment: the gate
+    # must never cost the user their credential or their setting.
+    kp, mp = syskey.key_path(), syskey.meta_path()
+    saved = kp.read_bytes() if kp.is_file() else None
+    saved_meta = mp.read_bytes() if mp.is_file() else None
+    was = autostart.status()
+    try:
+        kp.unlink(missing_ok=True)
+        assert syskey.load() is None
+        try:
+            autostart.register()
+            raise AssertionError(
+                "autostart registered with NO readable key — it would start at "
+                "every logon and stop immediately, which looks like working")
+        except RuntimeError as e:
+            assert "key" in str(e).lower(), str(e)
+    finally:
+        if saved is not None:
+            kp.write_bytes(saved)
+        if saved_meta is not None:
+            mp.write_bytes(saved_meta)
+
+    # --- off removes BOTH mechanisms, not just the one believed active
+    if not was["registered"]:
+        autostart.unregister()
+        st = autostart.status()
+        assert st["registered"] is False and st["method"] == "", st
+        assert not autostart.startup_entry().is_file(), \
+            "the Startup entry survived 'off' — it would keep starting a " \
+            "recorder the user believes they turned off"
+
+
 def dt_date(s: str):
     import datetime as _dt
     return _dt.date.fromisoformat(s)

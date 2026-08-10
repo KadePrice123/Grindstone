@@ -69,6 +69,14 @@ interface Probe {
   safe_to_store_unattended: boolean
 }
 
+interface Autostart {
+  supported: boolean
+  registered: boolean
+  method: string
+  note?: string
+  reason?: string
+}
+
 function hhmm(sec: number): string {
   if (sec < 90) return `${Math.round(sec)}s`
   if (sec < 5400) return `${Math.round(sec / 60)} min`
@@ -102,6 +110,7 @@ export function DataPage() {
   const [skSecret, setSkSecret] = useState('')
   const [probe, setProbe] = useState<Probe | null>(null)
   const [skBusy, setSkBusy] = useState(false)
+  const [auto, setAuto] = useState<Autostart | null>(null)
 
   // Monotonic guard: the 20s tick racing a post-add refresh made a
   // just-added job vanish when the older response landed last.
@@ -147,10 +156,20 @@ export function DataPage() {
   const loadSk = useCallback(async () => {
     try {
       setSk(await api<SysKey>('GET', '/api/syskey'))
+      setAuto(await api<Autostart>('GET', '/api/datamgmt/autostart'))
     } catch {
       /* the page's error line owns real failures */
     }
   }, [])
+
+  const toggleAuto = async (on: boolean) => {
+    setError(null)
+    try {
+      setAuto(await api<Autostart>(on ? 'POST' : 'DELETE', '/api/datamgmt/autostart'))
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    }
+  }
   useEffect(() => {
     loadSk()
   }, [loadSk])
@@ -413,6 +432,26 @@ export function DataPage() {
               </span>
               <button className="btn" onClick={removeKey}>Remove</button>
             </div>
+
+            {sk.readable && auto?.supported ? (
+              <div className="acct-row">
+                <label className="opt-toggle">
+                  <input
+                    type="checkbox"
+                    checked={auto.registered}
+                    onChange={(e) => toggleAuto(e.target.checked)}
+                  />
+                  Record automatically
+                </label>
+                <span className="subtle">
+                  {auto.registered
+                    ? `on — ${auto.note}${auto.method === 'startup-folder'
+                        ? ' (via your Startup folder; a scheduled task needs administrator rights on this PC)'
+                        : ''}`
+                    : 'off — recording only runs while the app is open and signed in'}
+                </span>
+              </div>
+            ) : null}
           </>
         ) : null}
 

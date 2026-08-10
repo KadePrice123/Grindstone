@@ -31,6 +31,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import backtests as backtests_mod
 from . import datajobs as datajobs_mod
+from . import autostart as autostart_mod
 from . import keyprobe as keyprobe_mod
 from . import syskey as syskey_mod
 from . import chartobjects as chartobjects_mod
@@ -1094,6 +1095,21 @@ def create_app(state: State) -> FastAPI:
         """What would happen — stores nothing. Lets the UI show the verdict
         before asking the user to commit to it."""
         return keyprobe_mod.probe(body.key_id, body.secret_key)
+
+    @app.get("/api/datamgmt/autostart")
+    def autostart_status(s=Depends(current_session)) -> dict[str, Any]:
+        return autostart_mod.status()
+
+    @app.post("/api/datamgmt/autostart")
+    def autostart_on(s=Depends(current_session)) -> dict[str, Any]:
+        try:
+            return autostart_mod.register()
+        except RuntimeError as e:
+            raise HTTPException(422, str(e)) from None
+
+    @app.delete("/api/datamgmt/autostart")
+    def autostart_off(s=Depends(current_session)) -> dict[str, Any]:
+        return autostart_mod.unregister()
 
     @app.delete("/api/syskey")
     def syskey_remove(s=Depends(current_session)) -> dict[str, Any]:
