@@ -132,6 +132,34 @@ SPEC: dict[str, dict[str, Any]] = {
                 "touches your recorded data, which the recorder's own retention "
                 "governs.",
     },
+    # PROPORTIONAL MATCHING for the Opt page's history series. A flat ±3 days
+    # is a reasonable window on a 21-DTE trade and an absurdly tight one on a
+    # 300-DTE trade: long-dated expirations are quarterly, so a fixed window
+    # finds a match on a handful of days a year and the line comes out as a
+    # few points pretending to be a series. These scale the window with the
+    # tenor. Both are FLOORED by the flat tolerances, so short-dated matching
+    # is bit-for-bit what it was — only the long end loosens.
+    "hist_dte_pct": {
+        "group": "Charts",
+        "kind": "float", "default": 3.0, "min": 0.0, "max": 25.0, "step": 0.5,
+        "label": "History match: DTE grace (% of tenor)",
+        "help": "How far the history chart may stray from the contract's "
+                "days-to-expiry when it looks for a comparable day. 3% of a "
+                "300-DTE trade is ±9 days — fine, because a 291-day and a "
+                "300-day option are the same trade. Never tighter than ±3 "
+                "days, so short-dated matching is unaffected. 0 = flat ±3 "
+                "days everywhere (the old behaviour).",
+    },
+    "hist_strike_pct": {
+        "group": "Charts",
+        "kind": "float", "default": 0.0, "min": 0.0, "max": 10.0, "step": 0.25,
+        "label": "History match: strike grace (% of strike)",
+        "help": "Same idea for the strike, and OFF by default because it cuts "
+                "the other way: widening it pulls neighbouring strikes into a "
+                "series whose whole promise is 'the actual strike'. Useful "
+                "when the exact strike was not listed historically, or on a "
+                "wide strike grid. Never tighter than ±$1.",
+    },
     "backtest_options_db": {
         "group": "Backtesting",
         "kind": "path", "default": "",

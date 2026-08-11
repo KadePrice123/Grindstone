@@ -188,10 +188,41 @@ def archived_dates(underlying: str, start: str, end: str) -> list[str]:
         con.close()
 
 
+#: The flat tolerances, which are now FLOORS rather than the whole story.
+#: Keeping them as the minimum is what makes proportional matching safe to
+#: turn on: a 21-DTE trade at 3% would be ±0.6 days, which matches fewer days
+#: than the flat window did, so a setting meant to add data would have removed
+#: it. Below ~100 DTE the floor wins and behaviour is unchanged.
+MIN_DTE_TOL = 3
+MIN_STRIKE_TOL = 1.0
+
+
+def resolve_tolerances(dte: int, strike: float | None,
+                       dte_pct: float = 0.0, strike_pct: float = 0.0,
+                       dte_tol: int = MIN_DTE_TOL,
+                       strike_tol: float = MIN_STRIKE_TOL) -> tuple[int, float]:
+    """Turn the user's PERCENTAGE grace settings into absolute windows.
+
+    Proportional because tenor is the thing that varies: ±3 days is a third of
+    a 9-DTE trade and a hundredth of a 300-DTE one, and the archive's supply of
+    matches varies the same way (weeklies near the front, quarterlies far out).
+    A percentage says "same trade, near enough" once and means it at both ends.
+
+    Floored, never scaled down — see MIN_DTE_TOL. Returns the window actually
+    used so the caller can report it rather than implying the flat default.
+    """
+    d = max(int(dte_tol), int(round(dte * max(0.0, dte_pct) / 100.0)))
+    s = strike_tol
+    if strike is not None:
+        s = max(float(strike_tol), abs(strike) * max(0.0, strike_pct) / 100.0)
+    return d, s
+
+
 def series_history(underlying: str, right: str, dte: int,
                    delta: float | None = None, strike: float | None = None,
-                   dte_tol: int = 3, delta_tol: float = 0.08,
-                   strike_tol: float = 1.0) -> dict[str, Any]:
+                   dte_tol: int = MIN_DTE_TOL, delta_tol: float = 0.08,
+                   strike_tol: float = MIN_STRIKE_TOL,
+                   dte_pct: float = 0.0, strike_pct: float = 0.0) -> dict[str, Any]:
     """The CONSTANT-SHAPE series: what "a contract like this one" has cost,
     day by day, across the archive's recent window.
 
@@ -215,6 +246,11 @@ def series_history(underlying: str, right: str, dte: int,
         raise ValueError("dte out of range")
     if delta is None and strike is None:
         raise ValueError("need a delta or a strike to define the shape")
+    # The percentage settings widen the flat windows; everything below this
+    # line works in absolute terms, and `target` reports what was used.
+    dte_tol, strike_tol = resolve_tolerances(
+        dte, strike, dte_pct=dte_pct, strike_pct=strike_pct,
+        dte_tol=dte_tol, strike_tol=strike_tol)
     con = _open()
     if con is None:
         return _refuse(NO_DB_REASON)
@@ -249,22 +285,42 @@ def series_history(underlying: str, right: str, dte: int,
         return _refuse(f"no archived {underlying.upper()} {right} near {what}"
                        f" at {dte}+-{dte_tol} DTE")
 
-    best: dict[str, sqlite3.Row] = {}
+    # WHICH CANDIDATE WINS THE DAY, when several are inside the window.
+    #
+    # This was lexicographic — nearest DTE, then nearest |delta| — which was
+    # right while the window was a flat ±3 days: every candidate was the same
+    # trade and DTE was an almost-exact tie-break. A PROPORTIONAL window makes
+    # it actively wrong. At 300 DTE the window is ±9 days, and lexicographic
+    # ordering would take a 300-DTE contract at Δ.20 over a 299-DTE one at
+    # Δ.30 — throwing away the shape match to win one day of tenor that the
+    # grace setting has just declared unimportant.
+    #
+    # So both dimensions count, each SCALED BY ITS OWN TOLERANCE and summed.
+    # Dividing by the tolerance is what makes days and deltas comparable at
+    # all: "one tolerance away" costs the same on either axis whatever the
+    # units. Squared so a candidate that is close on both beats one that is
+    # perfect on one axis and at the edge of the other.
+    dscale = float(max(dte_tol, 1))
+    nscale = float(delta_tol if adelta is not None else strike_tol) or 1.0
 
-    def score(r: sqlite3.Row) -> tuple[float, float]:
+    def score(r: sqlite3.Row) -> float:
         d = (dt.date.fromisoformat(r["expiration"]) - dt.date.fromisoformat(r["date"])).days
         near = (abs(abs(r["delta"]) - adelta) if adelta is not None
                 else abs(r["strike"] - strike))
-        return (abs(d - dte), near)
+        return (abs(d - dte) / dscale) ** 2 + (near / nscale) ** 2
 
+    # Scored once per row rather than once per comparison — the wide windows
+    # this setting enables make the candidate list a lot longer.
+    best: dict[str, tuple[float, sqlite3.Row]] = {}
     for r in rows:
+        sc = score(r)
         cur = best.get(r["date"])
-        if cur is None or score(r) < score(cur):
-            best[r["date"]] = r
+        if cur is None or sc < cur[0]:
+            best[r["date"]] = (sc, r)
 
     out = []
     for date in sorted(best):
-        r = best[date]
+        r = best[date][1]
         bid, ask = r["bid"], r["ask"]
         two_sided = bid is not None and ask is not None and bid > 0 and ask >= bid
         d = (dt.date.fromisoformat(r["expiration"]) - dt.date.fromisoformat(date)).days
@@ -280,9 +336,13 @@ def series_history(underlying: str, right: str, dte: int,
     return {"available": True, "rows": out,
             "source": meta.get("source", "your archive"),
             "mode": "delta" if adelta is not None else "strike",
+            # The RESOLVED windows, not the requested ones — the caption quotes
+            # these, and a chart that says "±3 days" while matching ±9 is the
+            # kind of quiet lie this file exists to avoid.
             "target": {"delta": adelta, "strike": strike, "right": right,
                        "dte": dte, "dte_tol": dte_tol,
-                       "delta_tol": delta_tol, "strike_tol": strike_tol},
+                       "delta_tol": delta_tol, "strike_tol": strike_tol,
+                       "dte_pct": dte_pct, "strike_pct": strike_pct},
             "first": out[0]["date"], "last": out[-1]["date"]}
 
 

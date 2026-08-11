@@ -6188,6 +6188,57 @@ def _options_chain():
                     "a delta-less archived row must still answer a STRIKE "
                     f"question: {[r['date'] for r in sk2['rows']]}")
 
+                # -- PROPORTIONAL GRACE: the window scales with the tenor -----
+                # A flat +-3 days is a third of a 9-DTE trade and a hundredth
+                # of a 300-DTE one. The settings express the grace as a % of
+                # tenor; the flat tolerance stays as a FLOOR so turning the
+                # setting on can only ever add candidate days, never remove
+                # them. That floor is the whole safety argument, so pin it.
+                rt = opthist_mod.resolve_tolerances
+                assert rt(300, 100.0, dte_pct=3.0)[0] == 9, rt(300, 100.0, dte_pct=3.0)
+                assert rt(21, 100.0, dte_pct=3.0)[0] == 3, (
+                    "3% of 21 DTE is 0.6 days — the flat floor must win, or a "
+                    "setting meant to ADD data would have removed it")
+                assert rt(300, 100.0, dte_pct=0.0)[0] == 3, "0% must be the old behaviour"
+                assert rt(300, 200.0, strike_pct=2.0)[1] == 4.0, rt(300, 200.0, strike_pct=2.0)
+                assert rt(300, 20.0, strike_pct=2.0)[1] == 1.0, (
+                    "2% of a $20 strike is $0.40 — the $1 floor must win")
+                # -- CLOSEST ON BOTH AXES, not nearest-DTE-then-delta ---------
+                # Kade's rule: with several candidates in range, take the one
+                # closest to the actual delta/strike AND DTE. Lexicographic
+                # ordering fails this exactly when the window is wide — it
+                # would rather win one day of tenor than match the shape.
+                hdb3 = sqlite3.connect(Path(tmp) / "options_history.db")
+                hdb3.executemany(
+                    "INSERT OR REPLACE INTO hist_chain VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [
+                    # Target: 300 DTE, |delta| .30, window +-9 days.
+                    # Exact DTE (2027-02-25 is 300 days out) but the delta is
+                    # .07 off — INSIDE the +-0.08 delta window, which is what
+                    # makes this a real tie-break. An earlier version of this
+                    # fixture used .20, which the SQL delta filter dropped
+                    # before scoring ever ran, so the case tested nothing and
+                    # a lexicographic mutation survived it.
+                    ("SPY", "2026-05-01", "2027-02-25", 500.0, "P", 9.0, 9.2, None, .2, -.23, 1, 1),
+                    # ...vs one day off with the delta bang on. The second must
+                    # win: 1/9th of the DTE grace costs far less than 7 deltas.
+                    ("SPY", "2026-05-01", "2027-02-24", 520.0, "P", 8.0, 8.2, None, .2, -.30, 1, 1),
+                ])
+                hdb3.commit(); hdb3.close()
+                pick = opthist_mod.series_history("SPY", "P", 300, delta=-0.30,
+                                                  dte_pct=3.0)
+                day = next(r for r in pick["rows"] if r["date"] == "2026-05-01")
+                assert day["used_strike"] == 520.0 and abs(day["used_delta"]) == 0.30, (
+                    "a wide DTE window must not buy an exact tenor with a "
+                    f"wrecked delta match: {day}")
+                # The resolved window must REACH the query and be reported, not
+                # just computed: the caption quotes it, and a chart claiming
+                # ±3 days while matching ±9 is the lie this file exists to stop.
+                assert pick["target"]["dte_tol"] == 9, pick["target"]
+                assert pick["target"]["dte_pct"] == 3.0, pick["target"]
+                # ...and with the setting off, the old flat window is intact.
+                flat = opthist_mod.series_history("SPY", "P", 300, delta=-0.30)
+                assert flat["target"]["dte_tol"] == 3, flat["target"]
+
                 f = opthist_mod.fanchart("SPY", "2026-09-18", 560.0, "P")
                 assert f["available"] is True and len(f["path"]) == 3, f
                 assert f["bucket"]["median_delta"] == 0.3, f["bucket"]

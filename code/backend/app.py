@@ -868,13 +868,22 @@ def create_app(state: State) -> FastAPI:
         has."""
         if right.upper() not in ("C", "P"):
             raise HTTPException(422, "right must be C or P")
+        # The PROPORTIONAL grace comes from the user's settings, not the query
+        # string: it is a standing preference about what counts as the same
+        # trade, so every caller of this endpoint should inherit it rather than
+        # each surface remembering to ask. The flat tolerances stay as query
+        # params (and as floors) so a caller can still be explicit.
+        with state.db() as db:
+            prefs = settings_mod.get_all(db, s.user_id)
         try:
             return opthist_mod.series_history(
                 symbol, right.upper(), dte,
                 delta=delta, strike=strike,
                 dte_tol=max(0, min(30, dte_tol)),
                 delta_tol=max(0.01, min(0.25, delta_tol)),
-                strike_tol=max(0.0, min(50.0, strike_tol)))
+                strike_tol=max(0.0, min(50.0, strike_tol)),
+                dte_pct=float(prefs.get("hist_dte_pct", 0.0)),
+                strike_pct=float(prefs.get("hist_strike_pct", 0.0)))
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
 

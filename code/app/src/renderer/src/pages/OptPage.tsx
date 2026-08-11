@@ -79,7 +79,14 @@ interface SeriesResponse {
   source: string
   reason?: string
   mode?: 'delta' | 'strike'
-  target?: { delta?: number | null; strike?: number | null; dte: number }
+  /** What the series matched on. The tolerances here are the RESOLVED ones —
+   *  the flat window widened by the proportional grace setting — not what the
+   *  query string asked for. */
+  target?: {
+    delta?: number | null; strike?: number | null; dte: number
+    dte_tol?: number; strike_tol?: number
+    dte_pct?: number; strike_pct?: number
+  }
 }
 
 type Sel = { occ: string; strike: number; expiration: string; right: 'P' | 'C'; delta?: number | null }
@@ -186,6 +193,23 @@ export function OptPage({
   const [match, setMatch] = useState<HistMatch>('delta')
 
   const [tick, setTick] = useState(0)
+  // The history match window comes from SETTINGS, which are edited in a
+  // different tab — and every content tab is its own renderer process with its
+  // own module state, so there is no in-page event that could carry the
+  // change across. Refetching when this tab regains focus is the mechanism
+  // that actually exists: change the grace, come back, see the new window.
+  const [focusNonce, setFocusNonce] = useState(0)
+  useEffect(() => {
+    const bump = () => {
+      if (!document.hidden) setFocusNonce((n) => n + 1)
+    }
+    window.addEventListener('focus', bump)
+    document.addEventListener('visibilitychange', bump)
+    return () => {
+      window.removeEventListener('focus', bump)
+      document.removeEventListener('visibilitychange', bump)
+    }
+  }, [])
   const [term, setTerm] = useState<Contract[] | null>(null)
   const [series, setSeries] = useState<SeriesResponse | null>(null)
   const [bars, setBars] = useState<{ ts: string; close: number }[]>([])
@@ -392,7 +416,7 @@ export function OptPage({
       alive = false
     }
   }, [symbol, sel?.occ, sel?.strike, sel?.expiration, sel?.right, // eslint-disable-line react-hooks/exhaustive-deps
-      today, match, selDelta])
+      today, match, selDelta, focusNonce])
 
   // The underlying, for the history view's indicator only: past closes share
   // a timeline with the contract's past prices. (On the term structure the x
@@ -919,7 +943,15 @@ function seriesCaption(
   const used = series.rows.map((r) => r.used_dte)
   const lo = Math.min(...used)
   const hi = Math.max(...used)
-  const range = lo === hi ? `${lo} DTE exactly` : `${lo}–${hi} DTE (nearest listed each day)`
+  // The window the backend RESOLVED, which is the flat tolerance widened by
+  // the proportional grace setting. Naming it matters here more than usual:
+  // the whole point of the setting is that a 300-DTE match is looser than a
+  // 21-DTE one, and a reader comparing two charts needs to see which is which.
+  const tolNote = (series.target?.dte_pct ?? 0) > 0 && (series.target?.dte_tol ?? 0) > 3
+    ? ` · window ±${series.target?.dte_tol}d (${series.target?.dte_pct}% of tenor)`
+    : ''
+  const range = (lo === hi ? `${lo} DTE exactly` : `${lo}–${hi} DTE (nearest listed each day)`)
+    + tolNote
   const kind = sel.right === 'P' ? 'put' : 'call'
   // The verdict first, in words: a percentile is the answer to "is this a
   // good price", and it is worth more than any amount of axis-reading.
