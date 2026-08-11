@@ -3910,6 +3910,189 @@ def _coverage_backfill():
         "whole gap — a capped run would read as complete")
 
 
+@check("auto-record end to end: the toggle enrolls what you have, stars enroll what you add")
+def _autorecord_routes():
+    """DS-17, through the real HTTP routes.
+
+    Two paths have to work and they are easy to get half-right:
+
+    1. **Starring while it is on** enrolls the new symbol. Obvious, and it
+       was wired first.
+    2. **Turning it on** enrolls the favourites you ALREADY have. This is the
+       one that gets missed, and missing it is invisible in the worst way:
+       the user flips the toggle, watches nothing happen to the twelve
+       symbols they have starred for months, and concludes the feature is
+       broken. A setting that silently applies only to future actions is a
+       setting the user believes is running when it is not.
+
+    Run through TestClient rather than against the modules, because the
+    ordering here lives in the ROUTE — read the old value, write the new one,
+    compare — and a module-level test would pass with the route wired
+    backwards."""
+    import os
+    import tempfile
+    from fastapi.testclient import TestClient
+    sys.path.insert(0, str(CODE))
+    from backend.app import State, create_app
+
+    with tempfile.TemporaryDirectory() as td:
+        old_env = os.environ.get("GRINDSTONE_DATA_DIR")
+        os.environ["GRINDSTONE_DATA_DIR"] = td
+        try:
+            state = State("boot", db_path=Path(td) / "app.db",
+                          market_path=Path(td) / "market.db")
+            c = TestClient(create_app(state), base_url="http://127.0.0.1",
+                           headers={"X-App-Token": "boot"})
+            r = c.post("/api/auth/setup",
+                       json={"username": "ar", "password": "fixture-pw-123"})
+            c.headers["Authorization"] = f"Bearer {r.json()['token']}"
+
+            def jobs_for(sym: str) -> list[dict[str, Any]]:
+                return [j for j in c.get("/api/datamgmt/jobs").json()
+                        if j["symbol"] == sym]
+
+            # The universe is empty in a fixture, so nothing is recordable
+            # yet. That is itself the DS-18 case and it must come back with a
+            # REASON rather than silence.
+            c.post("/api/favorites",
+                   json={"kind": "symbol", "key": "SPY", "label": "SPY"})
+            assert jobs_for("SPY") == [], "auto-record ran while the setting was off"
+
+            # Teach the universe about SPY and QQQ so they become recordable.
+            con = state.market()
+            try:
+                with con:
+                    con.executemany(
+                        "INSERT OR REPLACE INTO assets"
+                        " (symbol, name, exchange, asset_class, tradable)"
+                        " VALUES (?,?,?,?,1)",
+                        [("SPY", "SPDR S&P 500", "ARCA", "us_equity"),
+                         ("QQQ", "Invesco QQQ", "NASDAQ", "us_equity"),
+                         ("SPX", "S&P 500 Index", "INDEX", "index")])
+            finally:
+                con.close()
+            # The universe is an in-memory index built by load(); inserting
+            # rows behind it changes nothing until it is rebuilt. This is the
+            # real app's behaviour too — a symbol is recordable only after a
+            # universe sync, which is exactly what DS-18's "not in the synced
+            # universe yet" reason is about.
+            con = state.market()
+            try:
+                state.universe.load(con)
+            finally:
+                con.close()
+
+            # A second favourite and an unrecordable one, both starred BEFORE
+            # the toggle is turned on — these are what the flip must pick up.
+            c.post("/api/favorites",
+                   json={"kind": "symbol", "key": "QQQ", "label": "QQQ"})
+            c.post("/api/favorites",
+                   json={"kind": "symbol", "key": "SPX", "label": "SPX"})
+            # A page favourite must be ignored entirely: there is no symbol
+            # to record. The key is a .gs ADDRESS — favorites.validate_new
+            # refuses a bare page name, and the first version of this fixture
+            # used one, so the POST 422'd, the favourite never existed and
+            # the assertion below could never have failed. A setup step that
+            # silently does nothing is indistinguishable from a passing test.
+            r_page = c.post("/api/favorites",
+                            json={"kind": "page", "key": "backtest.gs",
+                                  "label": "Backtest"})
+            assert r_page.status_code == 200, (
+                f"the page-favourite fixture did not take: {r_page.text}")
+            assert jobs_for("QQQ") == [], "auto-record ran before being enabled"
+
+            # ---- THE FLIP: off -> on enrolls what is already starred.
+            r = c.put("/api/settings", json={"autorecord_favorites": True})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert "autorecord" in body, (
+                "turning the setting on reported nothing — the existing "
+                "favourites were never enrolled, and the user sees a toggle "
+                "that appears to do nothing at all")
+            started = set(body["autorecord"]["started"])
+            assert {"SPY", "QQQ"} <= started, (
+                f"the flip did not enroll the already-starred symbols: {started}")
+            assert jobs_for("SPY") and jobs_for("QQQ"), \
+                "the flip reported success but created no recording jobs"
+
+            # STARRED, BUT NOT RECORDABLE, AND WHY (DS-18) — reported, not
+            # silently dropped and not fatal to the rest of the sync.
+            skipped = {x["symbol"]: x["reason"] for x in body["autorecord"]["skipped"]}
+            # A PAGE favourite is not a symbol and must not appear at all —
+            # not started, and not reported as skipped either. Letting it
+            # through produces "BACKTEST is not in the synced universe" in a
+            # list of the user's tickers, which reads as a real problem with
+            # a symbol they never starred.
+            assert not any(k.startswith("BACKTEST") for k in skipped)                 and not any(k.startswith("BACKTEST") for k in started), (
+                f"a page favourite was treated as a symbol: started={started} "
+                f"skipped={sorted(skipped)}")
+            assert "SPX" in skipped and skipped["SPX"], \
+                f"an index was skipped with no reason given: {skipped}"
+            assert "SPX" in skipped["SPX"], "the reason must name the symbol"
+            assert jobs_for("SPX") == [], "an index was enrolled for recording"
+
+            # ---- A NEW STAR, while it is on, enrolls itself.
+            con = state.market()
+            try:
+                with con:
+                    con.execute(
+                        "INSERT OR REPLACE INTO assets (symbol, name, exchange,"
+                        " asset_class, tradable) VALUES ('IWM','iShares R2K','ARCA',"
+                        "'us_equity',1)")
+                state.universe.load(con)
+            finally:
+                con.close()
+            r = c.post("/api/favorites",
+                       json={"kind": "symbol", "key": "IWM", "label": "IWM"})
+            assert r.status_code == 200, r.text
+            assert r.json().get("autorecord", {}).get("recording") is True, r.json()
+            assert jobs_for("IWM"), "starring while enabled created no job"
+
+            # ---- SAVING SETTINGS AGAIN IS NOT A RE-SYNC. Re-running would
+            # quietly re-enable jobs the user had paused in the Data page,
+            # overruling a deliberate choice from an unrelated save.
+            paused = jobs_for("SPY")[0]
+            c.patch(f"/api/datamgmt/jobs/{paused['id']}", json={"enabled": False})
+            r2 = c.put("/api/settings", json={"autorecord_favorites": True})
+            assert "autorecord" not in r2.json(), \
+                "an ON -> ON save re-ran the sync"
+            still_off = [j for j in jobs_for("SPY") if j["id"] == paused["id"]][0]
+            assert not still_off["enabled"], (
+                "saving an unrelated setting re-enabled a job the user had "
+                "deliberately paused")
+
+            # ---- UN-STARRING STOPS IT AND KEEPS THE DATA.
+            favs = c.get("/api/favorites").json()["favorites"]
+            iwm = next(f for f in favs if f.get("key") == "IWM")
+            con = state.market()
+            try:
+                with con:
+                    con.execute(
+                        "INSERT INTO rec_bars (symbol, timeframe, ts, open, high,"
+                        " low, close, volume)"
+                        " VALUES ('IWM','1Day','2026-01-02',1,1,1,1,1)")
+            finally:
+                con.close()
+            r = c.delete(f"/api/favorites/{iwm['id']}")
+            assert r.status_code == 200 and r.json()["autorecord"]["kept_data"] is True
+            assert all(not j["enabled"] for j in jobs_for("IWM")), \
+                "un-starring left the recording running"
+            con = state.market()
+            try:
+                kept = con.execute("SELECT COUNT(*) FROM rec_bars WHERE symbol='IWM'"
+                                   ).fetchone()[0]
+            finally:
+                con.close()
+            assert kept == 1, (
+                "un-starring DELETED recorded data through the route — chain "
+                "history cannot be re-fetched once the provider window moves")
+        finally:
+            if old_env is None:
+                os.environ.pop("GRINDSTONE_DATA_DIR", None)
+            else:
+                os.environ["GRINDSTONE_DATA_DIR"] = old_env
+
+
 @check("addresses: ONE translation, and every page round-trips through it")
 def _address_translation():
     """A .gs address must mean the same thing wherever it is opened.

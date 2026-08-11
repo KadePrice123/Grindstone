@@ -365,6 +365,15 @@ windows have already moved past it. A symbol that cannot be recorded stays
 starred and reports why (DS-18) rather than failing silently or refusing the
 star.
 
+**Turning the setting on enrolls the favourites you already have.** The
+`PUT /api/settings` handler reads the OLD value before writing the new one
+and runs `sync_all` on the off→on edge only. Applying to future stars alone
+would be invisible in the worst way: the user flips the toggle, watches
+nothing happen to the twelve symbols they have starred for months, and
+concludes the feature is broken. The edge matters too — re-running on every
+save would re-enable jobs they had deliberately paused in the Data page,
+overruling that choice from an unrelated setting change.
+
 Three settings, both toggles OFF by default: `autorecord_favorites`,
 `backfill_enabled`, `backfill_years`. The Data page gained a Coverage &
 backfill panel, which states `truncated` explicitly — a run capped at

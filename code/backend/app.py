@@ -585,12 +585,44 @@ def create_app(state: State) -> FastAPI:
 
     @app.put("/api/settings")
     def settings_put(body: dict[str, Any], s=Depends(current_session)) -> dict[str, Any]:
+        # The BEFORE value, read inside the same handler: turning auto-record
+        # on has to enroll the favourites you ALREADY have, not only the ones
+        # you star afterwards. A setting that silently applies to future
+        # actions only is a setting the user believes is running when it is
+        # not — they flip it, see nothing happen, and reasonably conclude it
+        # is broken.
         try:
             with state.db() as db:
+                was_on = bool(settings_mod.get_all(db, s.user_id)
+                              .get(autorecord_mod.SETTING, False))
                 values = settings_mod.put(db, s.user_id, body)
+                now_on = bool(values.get(autorecord_mod.SETTING, False))
+                favs = favorites_mod.list_(db, s.user_id) if now_on and not was_on else []
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
-        return {"values": values}
+
+        out: dict[str, Any] = {"values": values}
+        # OFF -> ON only. Re-running this on every settings save would be
+        # wasted work, and re-enabling jobs the user had deliberately paused
+        # in the Data page would quietly overrule them.
+        if now_on and not was_on:
+            symbols = [str(f.get("key", "")) for f in favs
+                       if f.get("kind") == "symbol"]
+
+            def classify(sym: str) -> tuple[str | None, bool]:
+                entry = state.universe.exact(sym)
+                return (entry or {}).get("asset_class"), entry is not None
+
+            con = state.market()
+            try:
+                out["autorecord"] = autorecord_mod.sync_all(
+                    con, s.user_id, symbols, classify, True)
+            finally:
+                con.close()
+            LOG.info("autorecord enabled: %d started, %d skipped",
+                     len(out["autorecord"]["started"]),
+                     len(out["autorecord"]["skipped"]))
+        return out
 
     # ------------------------------------------------------------ favorites
     @app.get("/api/pages")
