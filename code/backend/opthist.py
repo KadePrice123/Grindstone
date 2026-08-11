@@ -1,4 +1,4 @@
-﻿"""Archived option-chain history â€” the data behind the Opt page's history side.
+"""Archived option-chain history — the data behind the Opt page's history side.
 
 Reads ``<data>/options_history.db``, which ``tools/loadhist.py`` builds from
 the workspace vault (daily EOD chains; SPY back to 2010). This is the ONLY
@@ -6,7 +6,7 @@ source of an option's price/spread through time: Alpaca sells no historical
 option quotes on any plan (RESEARCH.md, verified 2026-08-06), so when this
 database is absent the honest answer is a named reason, never an empty chart.
 
-Read-only throughout â€” the sqlite URI carries mode=ro, so no code path here
+Read-only throughout — the sqlite URI carries mode=ro, so no code path here
 can create, grow or lock the database the loader owns. Pure stdlib.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 
 from .db import data_dir
 
-NO_DB_REASON = ("no archived chain history is loaded â€” the live feed cannot "
+NO_DB_REASON = ("no archived chain history is loaded — the live feed cannot "
                 "provide it (Alpaca sells no historical option quotes), so "
                 "history comes from your own archive once it is imported")
 
@@ -59,7 +59,7 @@ def history(underlying: str, expiration: str, strike: float,
 
     The rows carry both the calendar date and the DTE at that date, because the
     two views chart different x-axes: price history runs on the date, the fan
-    chart runs on days-to-expiry. Spread is None on any day with no real bid â€”
+    chart runs on days-to-expiry. Spread is None on any day with no real bid —
     a one-sided market has no spread, and the chart draws that as a gap.
     """
     con = _open()
@@ -78,7 +78,7 @@ def history(underlying: str, expiration: str, strike: float,
         con.close()
     if not rows:
         return _refuse(f"no archived rows for {underlying.upper()} {strike:g}"
-                       f" {right} {expiration} â€” the archive's recent window may"
+                       f" {right} {expiration} — the archive's recent window may"
                        " not reach this contract")
     out = []
     for r in rows:
@@ -122,7 +122,7 @@ def append_day(underlying: str, date: str,
     """Add one session's chain to the archive THE OPT PAGE READS.
 
     This exists because the chain backfill was writing somewhere else. It
-    stored into `data/backtest_data/<SYM>.db` â€” the backtest engine's store â€”
+    stored into `data/backtest_data/<SYM>.db` — the backtest engine's store —
     while the Opt page reads `data/options_history.db`. Both are real
     databases, both were being written correctly, and the page showed
     nothing new, because filling one has never had any effect on the other.
@@ -138,7 +138,7 @@ def append_day(underlying: str, date: str,
         # TWO SHAPES REACH THIS. The live Alpaca collector hands over dicts;
         # chainimport.parse_text hands over ChainRow dataclasses. Assuming
         # dicts crashed the entire chain backfill on every tick with
-        # `'ChainRow' object has no attribute 'get'` â€” and because the
+        # `'ChainRow' object has no attribute 'get'` — and because the
         # recorder loop catches and logs, it kept running while silently
         # never archiving a thing.
         def field(c: Any, name: str) -> Any:
@@ -195,15 +195,15 @@ def series_history(underlying: str, right: str, dte: int,
     """The CONSTANT-SHAPE series: what "a contract like this one" has cost,
     day by day, across the archive's recent window.
 
-    "Like this one" is |DELTA| + DTE when a delta is known â€” Kade's call, and
+    "Like this one" is |DELTA| + DTE when a delta is known — Kade's call, and
     the industry's: a fixed strike drifts through moneyness as the underlying
     moves, so its series mostly re-plots the underlying (a 765P was $75 when
-    SPY sat at 690 â€” that number is moneyness, not richness). Constant delta
+    SPY sat at 690 — that number is moneyness, not richness). Constant delta
     holds the trade's RISK SHAPE fixed, which is the apples-to-apples line.
     Strike matching remains the fallback for contracts whose delta the feed
     omitted (0DTE intraday, dead wings).
 
-    Per day, one best match: nearest DTE, then nearest |delta| (or strike) â€”
+    Per day, one best match: nearest DTE, then nearest |delta| (or strike) —
     and each point CARRIES what it actually used, so a day matched at D.27
     instead of D.30 says so rather than pretending the series is constant.
     """
@@ -292,7 +292,7 @@ def fanchart(underlying: str, expiration: str, strike: float,
     the archive-wide spread percentiles of SIMILAR contracts at each DTE.
 
     Similar means the same |delta| bucket, chosen from the MEDIAN |delta| of the
-    contract's own archived life â€” a contract drifts across deltas as the
+    contract's own archived life — a contract drifts across deltas as the
     underlying moves, and the median is the band it actually lived in. The band
     says how contracts like this one have historically been priced at each
     point of their life; the path says how this one actually was.
@@ -308,7 +308,7 @@ def fanchart(underlying: str, expiration: str, strike: float,
     med = deltas[len(deltas) // 2]
 
     con = _open()
-    if con is None:  # raced away since history() â€” treat as absent
+    if con is None:  # raced away since history() — treat as absent
         return _refuse(NO_DB_REASON) | {"band": [], "path": []}
     try:
         meta = _meta(con)
