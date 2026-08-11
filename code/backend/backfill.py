@@ -100,6 +100,10 @@ def plan(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
     return chunks[:max_chunks]
 
 
+def _iso_start(chunk: "Chunk") -> str:
+    return chunk.start.isoformat()
+
+
 def _chunk(provider: str, kind: str, symbol: str, timeframe: str,
            days: list[dt.date]) -> Chunk:
     return Chunk(provider, kind, symbol, timeframe, days[0], days[-1],
@@ -156,6 +160,37 @@ def run_one(con: sqlite3.Connection, chunk: Chunk,
                 "note": str(e)[:200]}
 
     got = {str(r.get("ts", ""))[:10] for r in rows}
+
+    # A WHOLLY EMPTY CHUNK IS NOT A MONTH OF HOLIDAYS.
+    #
+    # This shipped wrong and cost 1,818 permanent write-offs. A holiday is one
+    # day missing from a chunk that otherwise returned data; a chunk that
+    # returns NOTHING is the provider not carrying that period at all —
+    # Alpaca's IEX feed has no history before roughly 2020, so every request
+    # for 2016-2019 came back empty and, from an "authoritative" provider,
+    # was recorded as `absent`. Absent is permanent, so 2.3 years of SPY,
+    # SPXL and USO were written off as though the market had been shut, and
+    # no later run — or better feed — could ever repair it.
+    #
+    # Provider-agnostic on purpose: no hardcoded horizon date to go stale.
+    # The shape of the answer carries the meaning.
+    # ...unless we already hold data OLDER than this window. If the feed has
+    # reached further back than this chunk before, it plainly carries the
+    # period, and an empty answer here is about the market after all. Without
+    # this the rule swallowed real holidays: a chunk that happens to contain
+    # one day, and that day a holiday, is empty by both readings.
+    if rows == [] and not cov.has_older(con, chunk.provider, chunk.kind,
+                                        chunk.symbol, chunk.timeframe,
+                                        _iso_start(chunk)):
+        for d in chunk.days:
+            cov.mark(con, chunk.provider, chunk.kind, chunk.symbol,
+                     chunk.timeframe, d, "unknown",
+                     detail="whole window empty — the provider does not carry "
+                            "this period, which is not a claim about the market")
+        return {"chunk": chunk.as_dict(), "rows": 0, "state": "empty-window",
+                "note": note or "the provider returned nothing for the whole window",
+                "have": 0, "absent": 0, "unknown": len(chunk.days)}
+
     counts = {"have": 0, "absent": 0, "unknown": 0}
     for d in chunk.days:
         if d in got:

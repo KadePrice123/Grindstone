@@ -4117,7 +4117,15 @@ def _backfill_runs():
     class FakeClient:
         """Every weekday in range except one 'holiday', so the run has to
         settle both a have and an absent."""
-        holiday = (today - _dt.timedelta(days=10)).isoformat()
+        # A GUARANTEED WEEKDAY. A fixed offset is date-fragile: `today - 10`
+        # was a Friday when this was written and a Saturday the next morning,
+        # and a weekend is never planned at all — so the "holiday" had no
+        # coverage row and the assertion failed for a reason that had nothing
+        # to do with the code.
+        holiday = next(
+            (today - _dt.timedelta(days=n)).isoformat()
+            for n in range(10, 20)
+            if (today - _dt.timedelta(days=n)).weekday() < 5)
         calls = 0
 
         def __init__(self, *_a):
@@ -4247,6 +4255,61 @@ def _backfill_runs():
                     "a finished backfill keeps calling the provider — it never "
                     "converges and burns the rate limit forever")
                 assert calls_at_rest <= spent
+
+                # --- A PROVIDER'S HISTORY HORIZON IS NOT A HOLIDAY.
+                # This shipped wrong and cost 1,818 permanent write-offs:
+                # Alpaca's IEX feed has no bars before roughly 2020, every
+                # request for 2016-2019 came back empty, and an empty answer
+                # from an "authoritative" provider was recorded as `absent` —
+                # which is permanent. 2.3 years of SPY, SPXL and USO were
+                # written off as though the market had been shut.
+                #
+                # A wholly empty window with NO older data in hand is the
+                # provider not carrying the period. Retryable, so a better
+                # feed can still fill it.
+                # Recent data in hand, reaching BACKWARDS past the feed's
+                # start — the real shape of the overnight failure. Without a
+                # newer `have` the has_older test is trivially false and the
+                # branch would be taken for the wrong reason.
+                cov.mark(con, "alpaca-iex", "bars", "OLD", "1Day",
+                         (today - _dt.timedelta(days=30)).isoformat(), "have", rows=1)
+                far = _dt.date(2011, 1, 3), _dt.date(2011, 1, 21)
+                p_far = bf_mod.plan(con, "alpaca-iex", "bars", "OLD", "1Day", *far)
+                assert p_far, "the fixture planned nothing"
+                res = bf_mod.run_one(con, p_far[0], lambda *_a: [])
+                states = {cov.state_of(con, "alpaca-iex", "bars", "OLD", "1Day", d)
+                          for d in p_far[0].days}
+                assert "absent" not in states, (
+                    f"an empty window before the provider's history began was "
+                    f"written off as absent ({states}) — permanent, and no "
+                    f"better feed could ever repair it")
+                assert res["state"] == "empty-window", res
+
+                # But a genuine holiday is still absence — including when it
+                # is ALONE in its own chunk, which is what a re-plan produces
+                # once everything around it has settled. That lone chunk
+                # returns nothing, so it looks exactly like a horizon; only
+                # the older data in hand tells them apart. Re-opened here
+                # deliberately, because on the first pass the holiday rides
+                # inside a chunk that DID return data and the branch is never
+                # reached at all.
+                assert cov.state_of(con, "alpaca-iex", "bars", "SPY", "1Day",
+                                    FakeClient.holiday) == "absent"
+                con.execute("DELETE FROM data_cover WHERE symbol='SPY' AND period=?",
+                            (FakeClient.holiday,))
+                con.commit()
+                lone = bf_mod.plan(con, "alpaca-iex", "bars", "SPY", "1Day",
+                                   *rec_mod._backfill_window(
+                                       "1", _dt.datetime.now(_dt.timezone.utc)))
+                assert lone and len(lone[0].days) == 1,                     f"the re-plan did not isolate the holiday: {lone[0].as_dict() if lone else None}"
+                bf_mod.run_one(con, lone[0], lambda *_a: [])
+                st_lone = cov.state_of(con, "alpaca-iex", "bars", "SPY", "1Day",
+                                       FakeClient.holiday)
+                assert st_lone == "absent", (
+                    f"a lone holiday chunk settled as {st_lone!r} — with older "
+                    f"data plainly in hand it is a holiday, not the edge of "
+                    f"the provider's history, and leaving it retryable means "
+                    f"asking about it forever)")
 
                 # --- A PROVIDER OUTAGE stays retryable, and stores nothing.
                 # Re-open a day the run actually SETTLED, rather than a date

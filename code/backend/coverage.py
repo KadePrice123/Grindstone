@@ -142,6 +142,24 @@ def may_claim_absent(con: sqlite3.Connection, provider: str, kind: str,
     return row is not None
 
 
+def has_older(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
+              timeframe: str, before: str) -> bool:
+    """Do we already hold data OLDER than this period, from this provider?
+
+    The question that separates "the provider's history stops here" from "the
+    market was shut". If the feed has already reached further back than the
+    window in hand, it plainly carries the period and an empty answer is
+    about the market. If it has not, an empty answer is the horizon — and
+    recording that as `absent` writes the data off permanently, which is
+    exactly what happened to 2016-2019 on Alpaca's IEX feed.
+    """
+    row = con.execute(
+        "SELECT 1 FROM data_cover WHERE provider=? AND kind=? AND symbol=?"
+        " AND timeframe=? AND state='have' AND period < ? LIMIT 1",
+        (provider, kind, symbol.upper(), timeframe, before)).fetchone()
+    return row is not None
+
+
 def state_of(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
              timeframe: str, period: str) -> str:
     r = con.execute(
