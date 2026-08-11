@@ -92,6 +92,12 @@ type Sel = { occ: string; strike: number; expiration: string; right: 'P' | 'C'; 
  *  'usd'    — the premium itself. What you hand over. */
 type HistUnit = 'pct' | 'annual' | 'usd'
 
+/** What the history series holds fixed as it walks back through the archive.
+ *
+ *  'delta'  — the equivalent trade: constant risk shape, strike walks.
+ *  'strike' — the actual strike: constant level, moneyness walks. */
+type HistMatch = 'delta' | 'strike'
+
 /** One point's annualised yield as a PERCENT — the heatmap cell's own number,
  *  from the heatmap's own function. The x100 is display only; every decision
  *  about the convention lives in optgrid. */
@@ -174,6 +180,10 @@ export function OptPage({
   // unit here, computed by the heatmap's own function. See annualFor below.
   const [unit, setUnit] = useState<HistUnit>('pct')
   const asPct = unit !== 'usd' // percent-formatted axis: both 'pct' and 'annual'
+  // WHAT THE SERIES HOLDS FIXED — see the fetch effect, where the two questions
+  // are spelled out. Both the mid line and its rolling average follow this,
+  // because they are the same series read two ways.
+  const [match, setMatch] = useState<HistMatch>('delta')
 
   const [tick, setTick] = useState(0)
   const [term, setTerm] = useState<Contract[] | null>(null)
@@ -324,6 +334,20 @@ export function OptPage({
   }, [symbol, sel?.strike, sel?.right, sel?.expiration, today, // eslint-disable-line react-hooks/exhaustive-deps
       JSON.stringify(visible.map(({ r }) => r.window?.expTo ?? r.expiration))])
 
+  // The selected contract's delta — from the clicked cell, or from the live
+  // rows once they land. Hoisted out of the fetch effect because the MATCH
+  // control also needs it: "Δ equivalent trade" has to be able to say when
+  // there is no delta to hold fixed, rather than quietly matching on strike
+  // and letting the caption be the only place that admits it.
+  const selDelta = useMemo(() => {
+    if (!sel) return null
+    const d = sel.delta ??
+      Object.values(byLeg)
+        .flatMap((r) => r?.contracts ?? [])
+        .find((c) => c.occ_symbol === sel.occ)?.delta ?? null
+    return typeof d === 'number' && Math.abs(d) > 0.005 ? d : null
+  }, [sel, byLeg])
+
   // ---- HISTORY: the TRADE'S history, not one contract's -------------------
   // The series holds the trade's SHAPE fixed — this strike, ~this DTE — and
   // walks it back a year through the archive. One contract's own life only
@@ -337,17 +361,23 @@ export function OptPage({
     }
     let alive = true
     const dte = Math.max(1, dteBetween(today, sel.expiration) ?? 1)
-    // DELTA-FIRST, per Kade: a fixed strike drifts through moneyness as the
-    // underlying moves, so its year of history mostly re-plots the underlying.
-    // Constant |delta| holds the trade's risk shape fixed. The delta comes
-    // from the clicked cell, or from the live rows once they land; strike is
-    // the honest fallback when the feed omitted the greek.
-    const liveDelta = sel.delta ??
-      Object.values(byLeg)
-        .flatMap((r) => r?.contracts ?? [])
-        .find((c) => c.occ_symbol === sel.occ)?.delta ?? null
-    const shape = typeof liveDelta === 'number' && Math.abs(liveDelta) > 0.005
-      ? `delta=${liveDelta.toFixed(4)}&delta_tol=0.08`
+    // WHICH THING IS HELD FIXED — the two questions this chart can answer, and
+    // they are genuinely different, not two views of one series:
+    //
+    //   delta  — the EQUIVALENT TRADE. Constant |delta| holds the risk shape
+    //            fixed, so the strike walks with the market (100-130 on this
+    //            SPXL series) and the line is comparable to itself over a year.
+    //   strike — THE ACTUAL STRIKE. What a ~220-DTE 130 put cost, whatever it
+    //            was worth in moneyness terms that day. Drifts with the
+    //            underlying by construction, which is the point: it shows the
+    //            level you would actually have been trading at.
+    //
+    // Delta is the default because a fixed strike's year mostly re-plots the
+    // underlying. Strike is not a fallback here — it is a question — but it
+    // IS still the fallback when the feed omitted the greek, and the caption
+    // reports whichever mode the backend actually answered in.
+    const shape = match === 'delta' && selDelta !== null
+      ? `delta=${selDelta.toFixed(4)}&delta_tol=0.08`
       : `strike=${sel.strike.toFixed(4)}&strike_tol=1`
     api<SeriesResponse>(
       'GET',
@@ -361,8 +391,8 @@ export function OptPage({
     return () => {
       alive = false
     }
-  }, [symbol, sel?.occ, sel?.strike, sel?.expiration, sel?.right, sel?.delta, // eslint-disable-line react-hooks/exhaustive-deps
-      today, Object.keys(byLeg).length])
+  }, [symbol, sel?.occ, sel?.strike, sel?.expiration, sel?.right, // eslint-disable-line react-hooks/exhaustive-deps
+      today, match, selDelta])
 
   // The underlying, for the history view's indicator only: past closes share
   // a timeline with the contract's past prices. (On the term structure the x
@@ -580,6 +610,10 @@ export function OptPage({
             <div className="opt-card" data-under-points={underSeries.length}
               data-series-points={series?.rows?.length ?? 0}
               data-unit={unit}
+              // What was ASKED for, and what the backend actually ANSWERED
+              // with. Two attributes because they can legitimately differ.
+              data-match={match}
+              data-match-got={series?.mode ?? ''}
               data-peak={Math.max(0, ...plotted.map((r) => r.value ?? 0)).toFixed(3)}>
               <div className="opt-card-head">
                 <span className="cp-views">
@@ -595,6 +629,29 @@ export function OptPage({
                 <h2>{selLabel ?? 'pick a contract on the right'}</h2>
                 {tab === 'history' ? (
                   <>
+                    <label className="opt-toggle">
+                      match
+                      <select
+                        className="seg-select opt-match"
+                        value={match}
+                        onChange={(e) => setMatch(e.target.value as HistMatch)}
+                        title={selDelta === null
+                          ? 'no delta known for this contract — the series can only'
+                            + ' match on strike'
+                          : 'delta: the equivalent trade, strike walks · '
+                            + 'strike: the actual strike, moneyness walks'}
+                      >
+                        {/* Named as the QUESTION, not the mechanism: the point
+                            of the toggle is which comparison you get. Delta is
+                            offered even with none known, but says so — silently
+                            dropping to strike is how the two panels came to
+                            disagree in the first place. */}
+                        <option value="delta">
+                          Δ equivalent trade{selDelta === null ? ' (no Δ — n/a)' : ''}
+                        </option>
+                        <option value="strike">$ actual strike</option>
+                      </select>
+                    </label>
                     <label className="opt-toggle">
                       unit
                       <select
@@ -691,7 +748,7 @@ export function OptPage({
                     {showUnder && barsErr ? (
                       <span className="loss">{symbol} price history unavailable: {barsErr} · </span>
                     ) : null}
-                    {series?.available && sel ? seriesCaption(series, sel, symbol, today, hist, liveShown, unit) : null}
+                    {series?.available && sel ? seriesCaption(series, sel, symbol, today, hist, liveShown, unit, match) : null}
                   </div>
                 </>
               )}
@@ -845,7 +902,10 @@ function seriesCaption(
   series: SeriesResponse, sel: Sel, symbol: string, today: string,
   hist: { median: number | null; p25: number | null; p75: number | null; pct: number | null; n: number },
   liveMid: number | null,
-  unit: HistUnit
+  unit: HistUnit,
+  /** What the user ASKED to hold fixed — which is not always what the backend
+   *  could answer with. When they diverge the caption must say so. */
+  match: HistMatch
 ): string {
   // The caption quotes the same numbers the axis does, in the same unit — and
   // NAMES it, because "0.9937%" and "2.2%" are the same trade and the only
@@ -875,6 +935,14 @@ function seriesCaption(
     ? 'premium ÷ strike, scaled to a year over SESSIONS — the heatmap cell’s ' +
       'own unit, so the two panels can be read against each other · '
     : ''
+  // ASKED FOR DELTA, GOT STRIKE. The control offers the delta match whether or
+  // not a delta is known, because hiding the option would leave the reader
+  // wondering where it went — but then this is the only place that can admit
+  // the answer is a different question from the one asked.
+  const fellBack = match === 'delta' && series.mode !== 'delta'
+    ? 'asked for the Δ-matched trade, but this contract carries no delta in ' +
+      'the feed, so this is the STRIKE match instead · '
+    : ''
   if (series.mode === 'delta' && series.target?.delta != null) {
     // The strike WALKS with the market in this mode — that is the whole point,
     // and the caption owns it so nobody reads the line as one contract.
@@ -888,12 +956,19 @@ function seriesCaption(
       `contract · ${symbol} BLUE on the left axis`
     )
   }
+  // THE ACTUAL STRIKE. The "(no delta known, so the strike stands in)" note
+  // that used to live here was true when this was only a fallback; it is a
+  // chosen question now, and `fellBack` says the other thing when it applies.
+  const strikes = series.rows.map((r) => r.used_strike)
+  const drift = Math.max(...strikes) - Math.min(...strikes)
   return (
-    verdict + unitNote +
+    verdict + unitNote + fellBack +
     `what a ~${dte}-DTE ${symbol} ${sel.strike.toFixed(0)} ${kind} has cost, ` +
-    `day by day over the last year · matched at ${range}, strike ±$1 (no delta ` +
-    `known for this contract, so the strike stands in) · each node is one ` +
-    `archived contract · ${symbol} BLUE on the left axis`
+    `day by day over the last year — THE STRIKE held fixed` +
+    (drift > 0.01 ? ` (±$1, so it ranged ${Math.min(...strikes).toFixed(0)}–` +
+      `${Math.max(...strikes).toFixed(0)})` : '') +
+    `, so its moneyness walks as ${symbol} moves · matched at ${range} · ` +
+    `each node is one archived contract · ${symbol} BLUE on the left axis`
   )
 }
 

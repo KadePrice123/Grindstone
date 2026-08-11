@@ -6162,6 +6162,32 @@ def _options_chain():
                     except ValueError:
                         pass
 
+                # -- THE TWO MATCH MODES ARE TWO QUESTIONS -------------------
+                # The Opt page can hold the DELTA fixed (the equivalent trade,
+                # strike walks) or the STRIKE fixed (the actual level,
+                # moneyness walks). They must not collapse into each other:
+                # over the same days the delta match walks its strike and the
+                # strike match does not, which is the whole reason both exist.
+                sd = opthist_mod.series_history("SPY", "P", 21, delta=-0.30)
+                sk = opthist_mod.series_history("SPY", "P", 21, strike=600.0,
+                                                strike_tol=1.0)
+                assert sd["mode"] == "delta" and sk["mode"] == "strike", (sd["mode"], sk["mode"])
+                walked = {r["used_strike"] for r in sd["rows"]}
+                held = {r["used_strike"] for r in sk["rows"]}
+                assert len(walked) > 1, (
+                    "the delta match must let the strike walk — it is the "
+                    f"whole point of holding the shape fixed: {walked}")
+                assert held == {600.0}, (
+                    f"the strike match must hold its strike: {held}")
+                # And the strike match must NOT be silently delta-filtered: the
+                # delta-less row is legitimate here (it was excluded from the
+                # delta series above), so a strike question can answer with it.
+                sk2 = opthist_mod.series_history("SPY", "P", 21, strike=592.0,
+                                                 strike_tol=1.0)
+                assert "2026-07-06" in {r["date"] for r in sk2["rows"]}, (
+                    "a delta-less archived row must still answer a STRIKE "
+                    f"question: {[r['date'] for r in sk2['rows']]}")
+
                 f = opthist_mod.fanchart("SPY", "2026-09-18", 560.0, "P")
                 assert f["available"] is True and len(f["path"]) == 3, f
                 assert f["bucket"]["median_delta"] == 0.3, f["bucket"]

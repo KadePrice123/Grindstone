@@ -627,6 +627,61 @@ try {
   }))
   await shot(opt, 'opt-history-annual.png')
 
+  // ---- THE MATCH TOGGLE: two questions, not two views of one series -------
+  // Delta-matched lets the strike walk; strike-matched holds it. If the toggle
+  // were cosmetic the two would plot identically, so compare the actual series.
+  await setUnit('pct')
+  await sleep(1500)
+  const setMatch = (v) => opt.eval(`(() => {
+    const s = document.querySelector('.opt-match')
+    if (!s) return 'no-select'
+    s.value = ${JSON.stringify(v)}
+    s.dispatchEvent(new Event('change', { bubbles: true }))
+    return s.value
+  })()`)
+  const matchState = () => opt.eval(`(() => {
+    const c = document.querySelector('.opt-card')
+    return JSON.stringify({
+      asked: c?.getAttribute('data-match'),
+      got: c?.getAttribute('data-match-got'),
+      n: c?.getAttribute('data-series-points'),
+      peak: c?.getAttribute('data-peak'),
+      // The caption names which thing is held fixed — read it back rather
+      // than trusting that the request carried the right query param.
+      says_walks: (document.querySelector('.opt-note')?.textContent ?? '')
+        .includes('whatever the strike'),
+      says_held: (document.querySelector('.opt-note')?.textContent ?? '')
+        .includes('THE STRIKE held fixed'),
+    })
+  })()`)
+  await setMatch('delta')
+  await sleep(2500)
+  const byDelta = await matchState()
+  await setMatch('strike')
+  await sleep(2500)
+  const byStrike = await matchState()
+  console.log('MATCH delta :', byDelta)
+  console.log('MATCH strike:', byStrike)
+  // WHAT THIS HARNESS CAN PROVE, AND WHAT IT CANNOT. With no market keys there
+  // is no live chain, so the selected contract carries no delta and the delta
+  // match has nothing to hold fixed. That makes the DIVERGENCE path the thing
+  // under test here: the page must ask for delta, receive strike, and SAY SO —
+  // silently answering a different question is the failure mode. That the two
+  // modes plot differently when a delta IS known is pinned in the offline gate
+  // (_options_chain: the delta match walks its strike, the strike match holds).
+  const d = JSON.parse(byDelta), s = JSON.parse(byStrike)
+  console.log('MATCH PROOF:', JSON.stringify({
+    delta_unavailable_here: d.asked === 'delta' && d.got === 'strike',
+    divergence_is_announced: (await opt.eval(
+      `(document.querySelector('.opt-note')?.textContent ?? '')
+         .includes('carries no delta in the feed')`)) === false, // strike mode: no note
+    strike_mode_is_clean: s.asked === 'strike' && s.got === 'strike',
+    both_name_what_is_held: d.says_held && s.says_held,
+  }))
+  await shot(opt, 'opt-history-strike.png')
+  await setMatch('delta')
+  await sleep(2000)
+
   // AND THE SAME SERIES IN DOLLARS, so the two units can be compared side by
   // side: the percent view should flatten drift the dollar view shows.
   await opt.eval(`(() => {
