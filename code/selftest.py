@@ -6148,6 +6148,19 @@ def _options_chain():
                     raise AssertionError("series without delta or strike must refuse")
                 except ValueError:
                     pass
+                # A LEAPS tenor is a real question and must ANSWER — with data
+                # or an honest refusal — never a raw "dte out of range". The
+                # cap was 400 and a listed USO put at 402 DTE blanked the
+                # whole history panel with a 422.
+                sr500 = opthist_mod.series_history("SPY", "P", 500, delta=-0.30)
+                assert sr500["available"] is False and "no archived" in sr500["reason"], sr500
+                # while nonsense stays refused at both ends
+                for bad_dte in (0, -5, 5000):
+                    try:
+                        opthist_mod.series_history("SPY", "P", bad_dte, delta=-0.30)
+                        raise AssertionError(f"dte={bad_dte} must refuse")
+                    except ValueError:
+                        pass
 
                 f = opthist_mod.fanchart("SPY", "2026-09-18", 560.0, "P")
                 assert f["available"] is True and len(f["path"]) == 3, f

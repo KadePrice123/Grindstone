@@ -207,7 +207,11 @@ def series_history(underlying: str, right: str, dte: int,
     and each point CARRIES what it actually used, so a day matched at D.27
     instead of D.30 says so rather than pretending the series is constant.
     """
-    if dte <= 0 or dte > 400:
+    # The ceiling is a sanity guard against nonsense input, NOT a policy on
+    # tenor: it was 400 and a USO put at 402 DTE (a perfectly listed LEAPS)
+    # blanked the whole history panel with a raw 422. Listed options run to
+    # ~5 years; past that the number is a typo, not a trade.
+    if dte <= 0 or dte > 2000:
         raise ValueError("dte out of range")
     if delta is None and strike is None:
         raise ValueError("need a delta or a strike to define the shape")

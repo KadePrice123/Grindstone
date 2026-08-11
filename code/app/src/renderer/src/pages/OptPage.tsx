@@ -267,8 +267,19 @@ export function OptPage({
       return
     }
     let alive = true
-    const end = new Date(Date.parse(today + 'T00:00:00Z') + 365 * 86400_000)
+    // A year is only the FLOOR. The heatmap charts whatever the leg windows
+    // reach — a leg dragged to a 2027 LEAPS put its columns 402 days out —
+    // and a term structure that stops at 365 silently drops those same
+    // expirations from the Future view. Cover the furthest thing on screen.
+    // (ISO date strings compare correctly as strings.)
+    let end = new Date(Date.parse(today + 'T00:00:00Z') + 365 * 86400_000)
       .toISOString().slice(0, 10)
+    if (sel.expiration > end) end = sel.expiration
+    for (const { leg, r } of visible) {
+      const far = r.window?.expTo ??
+        legWindow(r.expiration, r.strike, leg.dteTol, leg.strikeTol)?.expTo
+      if (far && far > end) end = far
+    }
     api<ChainResponse>(
       'GET',
       `/api/symbols/${encodeURIComponent(symbol)}/options` +
@@ -281,7 +292,10 @@ export function OptPage({
     return () => {
       alive = false
     }
-  }, [symbol, sel?.strike, sel?.right, today]) // eslint-disable-line react-hooks/exhaustive-deps
+    // The window keys on the furthest expiration too: dragging a leg deeper
+    // into the future must widen the term structure, not wait for a reload.
+  }, [symbol, sel?.strike, sel?.right, sel?.expiration, today, // eslint-disable-line react-hooks/exhaustive-deps
+      JSON.stringify(visible.map(({ r }) => r.window?.expTo ?? r.expiration))])
 
   // ---- HISTORY: the TRADE'S history, not one contract's -------------------
   // The series holds the trade's SHAPE fixed — this strike, ~this DTE — and
