@@ -3745,6 +3745,171 @@ def _chain_without_key():
     assert re.search(r'LOG\.\w+\([^)]*reason', body, re.S),         "the log line no longer carries the REASON, which is the whole point"
 
 
+@check("coverage + backfill: absent is permanent, failure is not, un-star keeps data")
+def _coverage_backfill():
+    """DS-15/16/17/18.
+
+    The whole design rests on one distinction: `absent` is a claim about the
+    WORLD (a holiday, a pre-listing date) and must suppress retries forever;
+    `failed` and `unknown` are claims about US and must not. Collapse them
+    and the backfill either re-requests every market holiday until the end of
+    time, or writes a five-minute outage down as "the market was closed" and
+    never looks again. Both failure modes are silent, which is why this runs
+    the real thing against a real database instead of reading the source."""
+    import datetime as _dt
+    import tempfile
+    sys.path.insert(0, str(CODE))
+    from backend import autorecord as ar, backfill as bf, coverage as cov
+    from backend import settings as settings_mod
+    from backend.marketdb import connect_market
+
+    with tempfile.TemporaryDirectory() as td:
+        con = connect_market(Path(td) / "market.db")
+        try:
+            start, end = _dt.date(2026, 1, 1), _dt.date(2026, 1, 16)
+            everything = len(cov.trading_days(start, end))
+            assert len(bf.plan(con, "alpaca-iex", "bars", "SPY", "1Day",
+                               start, end)) >= 1, "an empty database has no gaps"
+
+            cov.mark(con, "alpaca-iex", "bars", "SPY", "1Day", "2026-01-02", "have", rows=1)
+            cov.mark(con, "alpaca-iex", "bars", "SPY", "1Day", "2026-01-05", "absent")
+            cov.mark(con, "alpaca-iex", "bars", "SPY", "1Day", "2026-01-06", "failed")
+            todo = cov.gaps(con, "alpaca-iex", "bars", "SPY", "1Day", start, end)
+
+            assert "2026-01-02" not in todo, "a day we HAVE is being re-fetched"
+            assert "2026-01-05" not in todo, (
+                "an ABSENT day is being re-fetched — a market holiday would be "
+                "requested forever, every run, for as long as the app exists")
+            assert "2026-01-06" in todo, (
+                "a FAILED day is not retried — a five-minute provider outage "
+                "would be recorded as though the market had been shut")
+            assert len(todo) == everything - 2, todo
+
+            # NON-AUTHORITATIVE PROVIDERS CANNOT CLAIM ABSENCE (DS-4). An
+            # empty list from a provider that simply does not carry a name is
+            # indistinguishable from a true holiday, and letting it write
+            # `absent` would permanently blacklist data another source has.
+            cov.mark(con, "onclick", "bars", "SPY", "1Day", "2026-01-07", "absent")
+            got = cov.state_of(con, "onclick", "bars", "SPY", "1Day", "2026-01-07")
+            assert got != "absent", (
+                "a non-authoritative provider claimed ABSENT — its empty "
+                f"response would permanently suppress retries, got {got!r}")
+
+            # --- RESUMABLE, and free: the plan IS recomputed from coverage.
+            fresh = (_dt.date(2026, 2, 2), _dt.date(2026, 2, 27))
+            plan = bf.plan(con, "alpaca-iex", "bars", "QQQ", "1Day", *fresh)
+            holiday = "2026-02-16"
+
+            def fetch(_sym, _tf, s_, e_):
+                out, d = [], s_
+                while d <= e_:
+                    if d.weekday() < 5 and d.isoformat() != holiday:
+                        out.append({"ts": d.isoformat()})
+                    d += _dt.timedelta(days=1)
+                return out
+
+            bf.run(con, plan, fetch, pace_s=0)
+            assert bf.remaining(con, "alpaca-iex", "bars", "QQQ", "1Day", *fresh) == 0, \
+                "a completed backfill still reports work left"
+            assert cov.state_of(con, "alpaca-iex", "bars", "QQQ", "1Day", holiday) \
+                == "absent", "the holiday was not settled, so it will be re-asked"
+            assert bf.plan(con, "alpaca-iex", "bars", "QQQ", "1Day", *fresh) == [], \
+                "re-planning a finished range produced work — not resumable"
+
+            # --- AN OUTAGE STAYS RETRYABLE.
+            out_range = (_dt.date(2026, 3, 2), _dt.date(2026, 3, 6))
+            p2 = bf.plan(con, "alpaca-iex", "bars", "IWM", "1Day", *out_range)
+
+            def boom(*_a):
+                raise RuntimeError("502 from upstream")
+
+            r = bf.run_one(con, p2[0], boom)
+            assert r["state"] == "failed" and "502" in r["note"], r
+            assert bf.plan(con, "alpaca-iex", "bars", "IWM", "1Day", *out_range), \
+                "an outage was recorded as settled — those days are lost forever"
+
+            # --- THE ONCLICK WINDOW IS RECOMPUTED AT EXECUTION (DS-16). Its
+            # window moves one day per day, so a plan built weeks ago holds
+            # items that have fallen outside it. Executing them must report
+            # the clamp, not silently fetch nothing and call it success.
+            today = _dt.date(2026, 8, 10)
+            stale = (_dt.date(2026, 1, 5), _dt.date(2026, 1, 9))
+            p3 = bf.plan(con, "onclick", "bars", "SPY", "1Day", *stale)
+            r3 = bf.run_one(con, p3[0], lambda *_a: [{"ts": "2026-01-05"}], today=today)
+            assert r3["state"] == "skipped" and r3["note"], (
+                "a stale OnclickMedia chunk ran anyway — the window is being "
+                "computed at PLAN time, so the request was outside it")
+            assert cov.state_of(con, "onclick", "bars", "SPY", "1Day", "2026-01-05") \
+                != "absent", ("a provider that could not answer marked the day "
+                              "ABSENT — that is a permanent claim it did not earn")
+
+            # ---- DS-17/18: auto-record favourites -----------------------
+            assert settings_mod.SPEC[ar.SETTING]["default"] is False, \
+                "auto-record must be OFF by default — it spends API budget"
+            assert settings_mod.SPEC["backfill_enabled"]["default"] is False
+
+            # STARRED BUT NOT RECORDABLE, AND WHY. The legal domains differ:
+            # favourites take any symbol, validate_job refuses these.
+            for cls in ("index", "future"):
+                ok, why = ar.recordability("SPX", cls, True)
+                assert not ok and why, f"{cls} must be refused WITH a reason"
+                assert "SPX" in why, f"the reason must name the symbol: {why!r}"
+            ok, why = ar.recordability("BTCUSD", "crypto", True)
+            assert not ok and "crypto" in why.lower(), why
+            ok, why = ar.recordability("NEWCO", None, False)
+            assert not ok and "universe" in why.lower(), why
+            ok, why = ar.recordability("SPY", "us_equity", True)
+            assert ok and why == "", f"a plain equity must be recordable: {why!r}"
+
+            # An unrecordable star does NOT raise and does NOT create jobs —
+            # the favourite itself succeeded and must not be undone.
+            r = ar.on_favorite_added(con, 1, "SPX", "index", True, True)
+            assert r["recording"] is False and r["reason"] and r["jobs"] == []
+
+            r = ar.on_favorite_added(con, 1, "SPY", "us_equity", True, True)
+            assert r["recording"] and len(r["jobs"]) == len(ar.PLAN), r
+            n = con.execute("SELECT COUNT(*) FROM record_jobs WHERE symbol='SPY'"
+                            ).fetchone()[0]
+            # Starring twice must not duplicate the jobs.
+            ar.on_favorite_added(con, 1, "SPY", "us_equity", True, True)
+            assert con.execute("SELECT COUNT(*) FROM record_jobs WHERE symbol='SPY'"
+                               ).fetchone()[0] == n, "re-starring duplicated jobs"
+
+            # --- UN-STARRING STOPS THE JOB AND KEEPS THE DATA (DS-17).
+            con.execute("INSERT INTO rec_bars (symbol, timeframe, ts, open, high,"
+                        " low, close, volume) VALUES ('SPY','1Day','2026-01-02',1,1,1,1,1)")
+            stop = ar.on_favorite_removed(con, 1, "SPY", True)
+            assert stop["stopped"] and stop["kept_data"] is True
+            live = con.execute("SELECT COUNT(*) FROM record_jobs WHERE symbol='SPY'"
+                               " AND enabled=1").fetchone()[0]
+            assert live == 0, "un-starring left the recording running"
+            kept = con.execute("SELECT COUNT(*) FROM rec_bars WHERE symbol='SPY'"
+                               ).fetchone()[0]
+            assert kept == 1, (
+                "un-starring DELETED recorded data — chain history cannot be "
+                "re-fetched once a provider's window moves past it, so this "
+                "is unrecoverable and must never happen as a side effect")
+            # The job rows survive too, so re-starring resumes rather than
+            # starting a second copy.
+            again = ar.on_favorite_added(con, 1, "SPY", "us_equity", True, True)
+            assert all(j["action"] == "resumed" for j in again["jobs"]), again
+
+            # The setting OFF is a true no-op, not a quieter version.
+            off = ar.on_favorite_added(con, 1, "TSLA", "us_equity", True, False)
+            assert off["recording"] is False and off["jobs"] == []
+            assert con.execute("SELECT COUNT(*) FROM record_jobs WHERE symbol='TSLA'"
+                               ).fetchone()[0] == 0
+        finally:
+            con.close()
+
+    # --- NO SILENT CAPS. A run bounded by MAX_CHUNKS must be able to say so,
+    # or a partial backfill reads as a finished one.
+    app_src = (CODE / "backend" / "app.py").read_text(encoding="utf-8")
+    assert "truncated" in app_src and "remaining_days" in app_src, (
+        "the backfill endpoint no longer reports whether the plan covers the "
+        "whole gap — a capped run would read as complete")
+
+
 @check("addresses: ONE translation, and every page round-trips through it")
 def _address_translation():
     """A .gs address must mean the same thing wherever it is opened.

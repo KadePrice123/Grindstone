@@ -123,6 +123,35 @@ CREATE TABLE IF NOT EXISTS chain_cover (
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (underlying, exp_from, exp_to, strike_lo, strike_hi, right)
 ) WITHOUT ROWID;
+-- COVERAGE (DS-15): what we have, what is genuinely not there, and what we
+-- simply have not asked for yet. Without the have/absent distinction a
+-- backfill either re-requests a market holiday forever or writes an API
+-- outage down as "the market was closed".
+--
+--   have    a row exists for this period
+--   absent  an AUTHORITATIVE provider positively says there is nothing here
+--           (a weekend, a holiday, before listing) -- suppresses retries
+--   failed  the request errored -- retryable
+--   unknown never asked -- retryable
+--
+-- `period` is a plain ISO date for daily and intraday work; a coarser kind
+-- can use any sortable string. Keyed by PROVIDER too, because "Alpaca has no
+-- 2019 for this name" says nothing about OnclickMedia.
+CREATE TABLE IF NOT EXISTS data_cover (
+    provider   TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    symbol     TEXT NOT NULL,
+    timeframe  TEXT NOT NULL DEFAULT '',
+    period     TEXT NOT NULL,
+    state      TEXT NOT NULL CHECK (state IN ('have','absent','failed','unknown')),
+    rows       INTEGER NOT NULL DEFAULT 0,
+    checked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    detail     TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (provider, kind, symbol, timeframe, period)
+);
+CREATE INDEX IF NOT EXISTS ix_cover_gap
+    ON data_cover (kind, symbol, timeframe, state, period);
+
 CREATE TABLE IF NOT EXISTS backtest_runs (
     id           INTEGER PRIMARY KEY,
     user_id      INTEGER NOT NULL,
@@ -207,7 +236,7 @@ def market_path() -> Path:
     return data_dir() / "market.db"
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Additive migrations, applied in order for databases created before the
 # current SCHEMA_VERSION. Keep them idempotent-safe: the guard is
@@ -223,6 +252,10 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     # three tables to every existing install.
     # 3: backtest_runs — a new table, created by the _SCHEMA executescript
     # that runs on any version mismatch; no ALTERs needed.
+    # 5: data_cover — likewise a new table, delivered by the executescript.
+    # Listed here only so the version history reads as a history; the bump
+    # itself is what makes an existing market.db receive it. (chain_cover was
+    # added without a bump once and never reached a single install.)
 }
 
 

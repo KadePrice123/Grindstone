@@ -29,7 +29,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from . import autorecord as autorecord_mod
+from . import backfill as backfill_mod
 from . import backtests as backtests_mod
+from . import coverage as coverage_mod
 from . import datajobs as datajobs_mod
 from . import autostart as autostart_mod
 from . import notepad as notepad_mod
@@ -272,6 +275,20 @@ class PullIn(BaseModel):
 
 
 # ------------------------------------------------------------------ factory
+def _backfill_range(years: str) -> tuple[dt.date, dt.date]:
+    """How far back to try. 'max' is 2016 because that is where Alpaca's free
+    equity history begins — claiming to reach further would just manufacture
+    a decade of `failed` periods that can never become `have`."""
+    end = dt.date.today()
+    if years == "max":
+        return dt.date(2016, 1, 1), end
+    try:
+        n = int(years)
+    except ValueError:
+        n = 2
+    return end - dt.timedelta(days=365 * max(1, n)), end
+
+
 def create_app(state: State) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
@@ -606,15 +623,55 @@ def create_app(state: State) -> FastAPI:
                                         body.get("key"), body.get("label"), icon)
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
-        return {"favorite": fav}
+
+        # AUTO-RECORD (DS-17). Deliberately AFTER the favourite is committed
+        # and deliberately non-fatal: the star is the thing the user asked
+        # for and it succeeded. A symbol that cannot be recorded comes back
+        # with a reason attached — "starred, but not recordable, and why"
+        # (DS-18) — rather than a silent no-op or a refused favourite.
+        rec: dict[str, Any] = {"recording": False, "reason": "", "jobs": []}
+        if fav.get("kind") == "symbol":
+            with state.db() as db:
+                on = bool(settings_mod.get_all(db, s.user_id)
+                          .get(autorecord_mod.SETTING, False))
+            if on:
+                sym = str(fav.get("key", "")).upper()
+                entry = state.universe.exact(sym)
+                con = state.market()
+                try:
+                    rec = autorecord_mod.on_favorite_added(
+                        con, s.user_id, sym,
+                        (entry or {}).get("asset_class"), entry is not None, True)
+                finally:
+                    con.close()
+        return {"favorite": fav, "autorecord": rec}
 
     @app.delete("/api/favorites/{fav_id}")
     def favorites_delete(fav_id: int, s=Depends(current_session)) -> dict[str, Any]:
+        # Read the row BEFORE deleting it: afterwards there is no symbol left
+        # to stop recording, and the job would keep running for a favourite
+        # that no longer exists.
         with state.db() as db:
+            doomed = next((f for f in favorites_mod.list_(db, s.user_id)
+                           if f["id"] == fav_id), None)
             removed = favorites_mod.remove(db, s.user_id, fav_id)
+            on = bool(settings_mod.get_all(db, s.user_id)
+                      .get(autorecord_mod.SETTING, False))
         if not removed:
             raise HTTPException(404, "no such favorite")
-        return {"ok": True}
+
+        # Un-star STOPS recording and KEEPS the data (DS-17). Deleting months
+        # of chain history as a side effect of un-starring a shortcut would
+        # be unrecoverable — the provider windows have moved past it.
+        stop: dict[str, Any] = {"stopped": [], "kept_data": True}
+        if on and doomed and doomed.get("kind") == "symbol":
+            con = state.market()
+            try:
+                stop = autorecord_mod.on_favorite_removed(
+                    con, s.user_id, str(doomed.get("key", "")), True)
+            finally:
+                con.close()
+        return {"ok": True, "autorecord": stop}
 
     # -------------------------------------------------------- chart objects
     @app.get("/api/chart-objects")
@@ -1150,6 +1207,65 @@ def create_app(state: State) -> FastAPI:
         """What would happen — stores nothing. Lets the UI show the verdict
         before asking the user to commit to it."""
         return keyprobe_mod.probe(body.key_id, body.secret_key)
+
+    @app.get("/api/datamgmt/coverage")
+    def coverage_report(symbol: str = "", kind: str = "bars",
+                        timeframe: str = "1Day",
+                        s=Depends(current_session)) -> dict[str, Any]:
+        """What we have, what is genuinely absent, and how much is left.
+
+        Reports `remaining` from COVERAGE, not from a truncated plan: a run
+        capped at MAX_CHUNKS still has to state the real size of the job, or
+        the progress a user sees is a number that means nothing."""
+        sym = symbol.upper().strip()
+        if not sym:
+            raise HTTPException(422, "symbol required")
+        con = state.market()
+        try:
+            with state.db() as db:
+                years = settings_mod.get_all(db, s.user_id).get("backfill_years", "2")
+            start, end = _backfill_range(str(years))
+            out = coverage_mod.summary(con, kind, sym, timeframe)
+            out["window"] = {"start": start.isoformat(), "end": end.isoformat()}
+            out["remaining"] = backfill_mod.remaining(
+                con, "alpaca-iex", kind, sym, timeframe, start, end)
+            return out
+        finally:
+            con.close()
+
+    @app.get("/api/datamgmt/backfill")
+    def backfill_plan(symbol: str = "", kind: str = "bars",
+                      timeframe: str = "1Day",
+                      s=Depends(current_session)) -> dict[str, Any]:
+        """The work list, WITHOUT running it. A backfill that cannot be
+        inspected before it spends the API budget is one the user has to
+        trust blindly."""
+        sym = symbol.upper().strip()
+        if not sym:
+            raise HTTPException(422, "symbol required")
+        con = state.market()
+        try:
+            with state.db() as db:
+                cfg = settings_mod.get_all(db, s.user_id)
+            start, end = _backfill_range(str(cfg.get("backfill_years", "2")))
+            chunks = backfill_mod.plan(con, "alpaca-iex", kind, sym, timeframe,
+                                       start, end)
+            total = backfill_mod.remaining(con, "alpaca-iex", kind, sym,
+                                           timeframe, start, end)
+            planned_days = sum(len(c.days) for c in chunks)
+            return {
+                "enabled": bool(cfg.get("backfill_enabled", False)),
+                "symbol": sym, "kind": kind, "timeframe": timeframe,
+                "chunks": [c.as_dict() for c in chunks],
+                "planned_days": planned_days,
+                "remaining_days": total,
+                # NO SILENT CAPS. If one run cannot cover the whole gap, the
+                # UI must be able to say so rather than showing a plan that
+                # looks complete.
+                "truncated": planned_days < total,
+            }
+        finally:
+            con.close()
 
     @app.get("/api/datamgmt/autostart")
     def autostart_status(s=Depends(current_session)) -> dict[str, Any]:

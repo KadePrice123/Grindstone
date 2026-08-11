@@ -336,6 +336,50 @@ silently or refusing the favourite.
 
 ---
 
+## 8b. What shipped (DS-15, DS-16, DS-17, DS-18)
+
+`backend/coverage.py` — the `data_cover` table (market.db schema 5) and the
+claim-per-period model. The load-bearing line is between `absent` and
+everything else: `absent` is a provider asserting a fact about the WORLD and
+suppresses retries forever, while `failed` and `unknown` are facts about *us*
+and do not. Collapse them and the backfill either re-requests every market
+holiday until the end of time, or writes a five-minute outage down as "the
+market was closed" and never looks again. Both failures are silent.
+
+Only a provider AUTHORITATIVE for a kind may claim `absent`; anyone else's
+empty response is downgraded to `unknown`, because "I don't carry this name"
+and "the market was shut" are the same empty list on the wire. `mark()` is the
+single enforcement point — a mutation removing the backfill's own check was
+correctly *not* caught, because the downgrade in `mark()` still held.
+
+`backend/backfill.py` — plan, run, resume. Resumption is free: the plan is
+recomputed from coverage on every call, so there is no cursor to corrupt and
+no queue to go stale. **The OnclickMedia window is recomputed at EXECUTION
+time**, never at plan time; a chunk that has fallen outside it is reported as
+skipped and marked `unknown` (retryable), not silently fetched-as-nothing.
+
+`backend/autorecord.py` — starring a symbol records it; un-starring **stops
+the job and keeps the data**. Deleting months of chain history as a side
+effect of un-starring a shortcut would be unrecoverable, since the provider
+windows have already moved past it. A symbol that cannot be recorded stays
+starred and reports why (DS-18) rather than failing silently or refusing the
+star.
+
+Three settings, both toggles OFF by default: `autorecord_favorites`,
+`backfill_enabled`, `backfill_years`. The Data page gained a Coverage &
+backfill panel, which states `truncated` explicitly — a run capped at
+`MAX_CHUNKS` must not read as a finished one.
+
+Verified by `python code/selftest.py` (one check, run against a real database
+rather than a source scan, because every failure mode here is silent) and
+**11 mutations each confirmed red** — including "absent is retryable",
+"failed is settled", "un-starring deletes the data", and "auto-record ships
+on by default". One mutation exposed a real defect in the code under test:
+`RETRYABLE` was a constant that documented the policy without driving it, so
+editing it changed nothing. `gaps()` now derives its query from it.
+
+---
+
 ## 9. Verification
 
 Each requirement lands with a gate check in `selftest.py`'s idiom, and none of

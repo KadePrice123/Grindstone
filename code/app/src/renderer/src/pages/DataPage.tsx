@@ -83,8 +83,51 @@ function hhmm(sec: number): string {
   return `${(sec / 3600).toFixed(1)} hours`
 }
 
+interface CoverageReport {
+  have: number
+  absent: number
+  failed: number
+  first?: string | null
+  last?: string | null
+  remaining: number
+  window?: { start: string; end: string }
+}
+
+interface BackfillPlan {
+  enabled: boolean
+  chunks: Array<{ start: string; end: string; days: number }>
+  planned_days: number
+  remaining_days: number
+  truncated: boolean
+}
+
 export function DataPage() {
   const [jobs, setJobs] = useState<RecordJob[] | null>(null)
+  const [covSym, setCovSym] = useState('')
+  const [cov, setCov] = useState<CoverageReport | null>(null)
+  const [plan, setPlan] = useState<BackfillPlan | null>(null)
+  const [covErr, setCovErr] = useState<string | null>(null)
+
+  // Coverage and the plan are fetched TOGETHER: the summary says what is on
+  // disk, the plan says what the next run would actually do about it, and
+  // showing one without the other invites "why is it still missing?".
+  const loadCoverage = async (): Promise<void> => {
+    const sym = covSym.trim().toUpperCase()
+    if (!sym) return
+    setCovErr(null)
+    try {
+      const q = `symbol=${encodeURIComponent(sym)}&kind=bars&timeframe=1Day`
+      const [c, pl] = await Promise.all([
+        api<CoverageReport>('GET', `/api/datamgmt/coverage?${q}`),
+        api<BackfillPlan>('GET', `/api/datamgmt/backfill?${q}`),
+      ])
+      setCov(c)
+      setPlan(pl)
+    } catch (e) {
+      setCov(null); setPlan(null)
+      setCovErr(e instanceof ApiError ? e.message : String(e))
+    }
+  }
   const [usage, setUsage] = useState<DataUsage | null>(null)
   const [form, setForm] = useState({ ...EMPTY })
   const [error, setError] = useState<string | null>(null)
@@ -293,6 +336,52 @@ export function DataPage() {
         <DataIcon />
         <h1>Data management</h1>
         {usage ? <span className="dim">store: {bytes(usage.db_bytes)}</span> : null}
+      </div>
+
+      <div className="card">
+        <h2>Coverage &amp; backfill</h2>
+        <div className="subtle" style={{ marginBottom: 10 }}>
+          What is actually on disk for a symbol, and how much history is still
+          missing. A day the provider positively reports as empty — a holiday,
+          or a date before the symbol listed — is recorded as such and never
+          asked for again; a day that <em>failed</em> stays on the list.
+        </div>
+        <div className="row" style={{ gap: 8, marginBottom: 10 }}>
+          <input
+            className="field" placeholder="Symbol (e.g. SPY)" value={covSym}
+            onChange={(e) => setCovSym(e.target.value.toUpperCase())}
+            style={{ maxWidth: 160 }}
+          />
+          <button className="btn" onClick={() => void loadCoverage()}
+                  disabled={!covSym.trim()}>Check coverage</button>
+        </div>
+        {covErr ? <div className="test-result bad">{covErr}</div> : null}
+        {cov ? (
+          <div className="np-rows">
+            <div className="np-row"><span className="dim">have</span>
+              <span>{cov.have} day(s){cov.first ? ` · ${cov.first} → ${cov.last}` : ''}</span></div>
+            <div className="np-row"><span className="dim">reported empty</span>
+              <span>{cov.absent} day(s) — holidays and pre-listing dates</span></div>
+            <div className="np-row"><span className="dim">failed</span>
+              <span>{cov.failed} day(s) — these are retried</span></div>
+            <div className="np-row"><span className="dim">still missing</span>
+              <span>
+                {cov.remaining} day(s) in {cov.window?.start} → {cov.window?.end}
+              </span></div>
+            {plan ? (
+              <div className="np-row"><span className="dim">next run would fetch</span>
+                <span>
+                  {plan.planned_days} day(s) in {plan.chunks.length} request(s)
+                  {/* NO SILENT CAPS: a run that cannot cover the whole gap
+                      must say so, or a partial backfill reads as finished. */}
+                  {plan.truncated
+                    ? ` — capped; ${plan.remaining_days - plan.planned_days} more after that`
+                    : ''}
+                  {plan.enabled ? '' : ' (backfill is off in Settings)'}
+                </span></div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div className="card">

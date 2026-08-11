@@ -62,6 +62,39 @@ SPEC: dict[str, dict[str, Any]] = {
                 "source has for the ticker; a number caps it (faster on "
                 "intraday timeframes).",
     },
+    "autorecord_favorites": {
+        "group": "Data",
+        "kind": "bool", "default": False,
+        "label": "Record my favourite symbols automatically",
+        "help": "Starring a symbol starts recording its daily bars and option "
+                "chains; un-starring STOPS the recording but never deletes "
+                "what was already recorded — chain history cannot be "
+                "re-fetched once the provider's window moves past it. Some "
+                "symbols cannot be recorded at all (indices and futures have "
+                "no connected source yet); those stay starred and say why. "
+                "Off by default because it spends API budget without asking.",
+    },
+    "backfill_enabled": {
+        "group": "Data",
+        "kind": "bool", "default": False,
+        "label": "Fill in missing history in the background",
+        "help": "Works through the days coverage says are missing for the "
+                "symbols you record, oldest first, paced so it never starves "
+                "the charts you are looking at. Resumable: it recomputes what "
+                "is left every run, so stopping it costs nothing. A day the "
+                "provider positively reports as empty is recorded as such and "
+                "never asked for again.",
+    },
+    "backfill_years": {
+        "group": "Data",
+        "kind": "choice", "default": "2",
+        "choices": ["1", "2", "5", "10", "max"],
+        "label": "How far back to fill",
+        "help": "How much history the backfill tries to reach. Alpaca's free "
+                "tier serves 2016 onward for equities; OnclickMedia's window "
+                "is a rolling 180 days, so anything older simply is not "
+                "obtainable from it and is reported rather than retried.",
+    },
     "options_cache_minutes": {
         "group": "Data",
         "kind": "float", "default": 15.0, "min": 0.0, "max": 1440.0, "step": 5.0,
