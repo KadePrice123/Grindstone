@@ -136,9 +136,10 @@ export function HistoryPanel({
   /** Today's LIVE quote, in the SAME unit as `rows` — the level every
    *  historical point is read against. */
   refPrice?: number | null
-  /** Percent-of-strike rather than dollars. Formats the axis, the average and
-   *  the today line from one place, so the scale can never disagree with the
-   *  numbers printed on it. */
+  /** Percent rather than dollars — of strike, or annualised; the page has
+   *  already done that division, and both format identically here. Drives the
+   *  axis, the average and the today line from one place, so the scale can
+   *  never disagree with the numbers printed on it. */
   pct?: boolean
   height?: number
 }) {

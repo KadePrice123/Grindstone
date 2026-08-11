@@ -32,7 +32,10 @@ import {
 import { OptHeatmap } from '../components/OptHeatmap'
 import { buildChainPayload, buildContractPayload, grab, announce, occAt } from '../datapad'
 import { HistoryPanel, TermPanel, type TermPoint } from '../components/OptCharts'
-import { annualise, capitalFor, midOf, tradingDaysTo, dteBetween, type GridContract } from '../optgrid'
+import {
+  annualise, annualYieldOn, capitalFor, midOf, tradingDaysTo, dteBetween,
+  type GridContract,
+} from '../optgrid'
 import { analyse, fmtExtreme, fmtNet, returnOnRisk, type PayoffLeg } from '../payoff'
 
 interface Contract {
@@ -80,6 +83,22 @@ interface SeriesResponse {
 }
 
 type Sel = { occ: string; strike: number; expiration: string; right: 'P' | 'C'; delta?: number | null }
+
+/** The history chart's display unit.
+ *
+ *  'pct'    — premium / strike, raw. What the trade costs.
+ *  'annual' — that same ratio scaled to a year over SESSIONS, which is
+ *             exactly what a heatmap cell shows. What the trade yields.
+ *  'usd'    — the premium itself. What you hand over. */
+type HistUnit = 'pct' | 'annual' | 'usd'
+
+/** One point's annualised yield as a PERCENT — the heatmap cell's own number,
+ *  from the heatmap's own function. The x100 is display only; every decision
+ *  about the convention lives in optgrid. */
+function annualPct(mid: number, strike: number, from: string, dte: number): number | null {
+  const r = annualYieldOn(mid, strike, from, dte)
+  return r === null ? null : r * 100
+}
 
 /** A FRACTION as a percent — for IV and other 0-1 ratios. Not to be confused
  *  with the history tab's `asPct` unit flag, which was briefly named `pct`
@@ -146,7 +165,15 @@ export function OptPage({
   // matched at removes it, and puts this chart in the same unit as the
   // heatmap's credit/strike. Dollars stay one click away: they are what you
   // actually pay, and over a few weeks the strike barely moves.
-  const [asPct, setAsPct] = useState(true)
+  //
+  // ANNUALISED is the third, and it exists because the two panels were being
+  // read against each other and did not agree: the heatmap cell for an 80P at
+  // 157 DTE said 2.2% while this chart said 0.9937%, and both were right —
+  // the heatmap annualises (x252/sessions) and this chart did not. Rather
+  // than make the reader do the x2.23 in their head, offer the heatmap's own
+  // unit here, computed by the heatmap's own function. See annualFor below.
+  const [unit, setUnit] = useState<HistUnit>('pct')
+  const asPct = unit !== 'usd' // percent-formatted axis: both 'pct' and 'annual'
 
   const [tick, setTick] = useState(0)
   const [term, setTerm] = useState<Contract[] | null>(null)
@@ -396,16 +423,25 @@ export function OptPage({
   const plotted = useMemo(
     () => (series?.rows ?? []).map((r) => ({
       date: r.date,
-      value: r.mid === null || !r.used_strike ? null : asPct ? (r.mid / r.used_strike) * 100 : r.mid,
+      value: r.mid === null || !r.used_strike ? null
+        : unit === 'usd' ? r.mid
+        // Annualising uses THAT DAY's own tenor: the series holds the shape
+        // fixed at ~157 DTE, but "nearest listed" lands on 154-158, and a
+        // day matched at 154 earns its premium over four fewer days.
+        : unit === 'annual' ? annualPct(r.mid, r.used_strike, r.date, r.used_dte)
+        : (r.mid / r.used_strike) * 100,
     })),
-    [series, asPct]
+    [series, unit]
   )
 
   // Today's quote in that SAME unit. Comparing a live percent against a
   // historical dollar would be a category error wearing a percentile's clothes.
   const liveShown = liveMid === null || !sel || !sel.strike
     ? liveMid
-    : asPct ? (liveMid / sel.strike) * 100 : liveMid
+    : unit === 'usd' ? liveMid
+    : unit === 'annual'
+      ? annualPct(liveMid, sel.strike, today, dteBetween(today, sel.expiration) ?? 0)
+      : (liveMid / sel.strike) * 100
 
   // WHAT NORMAL LOOKS LIKE. The percentiles of this shape's own year, and
   // where today's quote falls inside them — the whole "is this a good price"
@@ -543,7 +579,7 @@ export function OptPage({
           <div className="opt-main">
             <div className="opt-card" data-under-points={underSeries.length}
               data-series-points={series?.rows?.length ?? 0}
-              data-unit={asPct ? 'pct' : 'usd'}
+              data-unit={unit}
               data-peak={Math.max(0, ...plotted.map((r) => r.value ?? 0)).toFixed(3)}>
               <div className="opt-card-head">
                 <span className="cp-views">
@@ -563,10 +599,11 @@ export function OptPage({
                       unit
                       <select
                         className="seg-select opt-unit"
-                        value={asPct ? 'pct' : 'usd'}
-                        onChange={(e) => setAsPct(e.target.value === 'pct')}
+                        value={unit}
+                        onChange={(e) => setUnit(e.target.value as HistUnit)}
                       >
                         <option value="pct">% of strike</option>
+                        <option value="annual">% /yr (annualised)</option>
                         <option value="usd">$</option>
                       </select>
                     </label>
@@ -632,6 +669,7 @@ export function OptPage({
                       // the tail while every API answer looked complete.
                       data-series-last={plotted.length ? plotted[plotted.length - 1].date : ''}
                       data-series-n={plotted.length}
+                      data-series-live={liveShown === null ? '' : liveShown.toFixed(4)}
                     >
                     <HistoryPanel
                       rows={plotted}
@@ -653,7 +691,7 @@ export function OptPage({
                     {showUnder && barsErr ? (
                       <span className="loss">{symbol} price history unavailable: {barsErr} · </span>
                     ) : null}
-                    {series?.available && sel ? seriesCaption(series, sel, symbol, today, hist, liveShown, asPct) : null}
+                    {series?.available && sel ? seriesCaption(series, sel, symbol, today, hist, liveShown, unit) : null}
                   </div>
                 </>
               )}
@@ -807,13 +845,16 @@ function seriesCaption(
   series: SeriesResponse, sel: Sel, symbol: string, today: string,
   hist: { median: number | null; p25: number | null; p75: number | null; pct: number | null; n: number },
   liveMid: number | null,
-  asPct: boolean
+  unit: HistUnit
 ): string {
-  // The caption quotes the same numbers the axis does, in the same unit.
-  const u = (v: number): string =>
-    asPct
-      ? `${v.toFixed(Math.abs(v) >= 10 ? 2 : Math.abs(v) >= 1 ? 3 : 4)}% of strike`
-      : v.toFixed(2)
+  // The caption quotes the same numbers the axis does, in the same unit — and
+  // NAMES it, because "0.9937%" and "2.2%" are the same trade and the only
+  // thing telling them apart is the suffix.
+  const u = (v: number): string => {
+    const d = v.toFixed(Math.abs(v) >= 10 ? 2 : Math.abs(v) >= 1 ? 3 : 4)
+    if (unit === 'usd') return v.toFixed(2)
+    return unit === 'annual' ? `${d}%/yr` : `${d}% of strike`
+  }
   const dte = dteBetween(today, sel.expiration) ?? 0
   const used = series.rows.map((r) => r.used_dte)
   const lo = Math.min(...used)
@@ -827,12 +868,19 @@ function seriesCaption(
     : `TODAY ${u(liveMid)} sits at the ${hist.pct}th percentile of the last ` +
       `year (normal ${u(hist.median)}, typical range ` +
       `${u(hist.p25 ?? 0)}–${u(hist.p75 ?? 0)}) · `
+  // Say where the annualised number comes from, once, ON the chart. This unit
+  // exists to be compared against a heatmap cell, and a reader who cannot see
+  // why 0.99% became 2.2% will distrust one panel or the other.
+  const unitNote = unit === 'annual'
+    ? 'premium ÷ strike, scaled to a year over SESSIONS — the heatmap cell’s ' +
+      'own unit, so the two panels can be read against each other · '
+    : ''
   if (series.mode === 'delta' && series.target?.delta != null) {
     // The strike WALKS with the market in this mode — that is the whole point,
     // and the caption owns it so nobody reads the line as one contract.
     const strikes = series.rows.map((r) => r.used_strike)
     return (
-      verdict +
+      verdict + unitNote +
       `what THE Δ${series.target.delta.toFixed(2)} ${kind} at ~${dte} DTE has cost, ` +
       `day by day over the last year — same risk shape, whatever the strike ` +
       `(it walked ${Math.min(...strikes).toFixed(0)}–${Math.max(...strikes).toFixed(0)} ` +
@@ -841,7 +889,7 @@ function seriesCaption(
     )
   }
   return (
-    verdict +
+    verdict + unitNote +
     `what a ~${dte}-DTE ${symbol} ${sel.strike.toFixed(0)} ${kind} has cost, ` +
     `day by day over the last year · matched at ${range}, strike ±$1 (no delta ` +
     `known for this contract, so the strike stands in) · each node is one ` +

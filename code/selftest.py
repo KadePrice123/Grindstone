@@ -6965,6 +6965,54 @@ ok('and prints as capped rather than as a number',
    og.fmtAnnual(og.ANNUAL_CAP) === '>10000%', og.fmtAnnual(og.ANNUAL_CAP))
 ok('no mid means no yield', og.annualYield(null, 56000, 30) === null, '')
 
+// ---- THE TWO PANELS MUST QUOTE ONE NUMBER --------------------------------
+// The heatmap annualises and the history chart did not, so the same USO 80P
+// read 2.2% on the right and 0.9937% on the left. Both were correct and the
+// pair was unreadable. The chart's annualised unit is only honest if it is
+// THE SAME FUNCTION, so pin them to each other on the real quote.
+{
+  const day = '2026-08-11', exp = '2027-01-15', K = 80, mid = 0.795
+  const sessions = og.tradingDaysTo(day, exp)
+  ok('the 157-day tenor is 113 sessions', sessions === 113, sessions)
+  // What a heatmap cell computes, straight from buildGrid.
+  const g1 = og.buildGrid(
+    [{ occ_symbol: 'USO270115P00080000', expiration: exp, strike: K, right: 'P',
+       bid: 0.75, ask: 0.84, delta: -0.04 }],
+    { today: day, side: 'short' })
+  const cell = g1.cells.get(og.cellKey(K, exp))
+  ok('the cell prices at the mid', Math.abs(cell.mid - mid) < 1e-9, cell.mid)
+  // What the history chart computes for that same contract quoted that day —
+  // fed the CELL'S OWN mid, because the claim under test is that one number
+  // reaches both panels, not that two float paths round alike. (They do not:
+  // the literal 0.795 and the computed (0.75+0.84)/2 differ by one ulp, and
+  // an === against the literal failed on exactly that.)
+  const chart = og.annualYieldOn(cell.mid, K, day, 157)
+  ok('chart and heatmap agree to the last bit',
+     chart === cell.annual, `${chart} vs ${cell.annual}`)
+  ok('and it is the heatmap cell Kade read', og.fmtAnnual(chart) === '2.2%',
+     og.fmtAnnual(chart))
+  // The RAW unit is the other number on screen, and the ratio between them is
+  // the scale the caption promises — not a coincidence of rounding.
+  const raw = cell.mid / K
+  ok('the raw unit is what the chart used to show alone',
+     Math.abs(raw * 100 - 0.99375) < 1e-9, raw * 100)
+  ok('and annualising is exactly 252/sessions of it',
+     Math.abs(chart - raw * (252 / sessions)) < 1e-12, chart)
+
+  // PER-POINT, NOT A CONSTANT. A delta-matched series matches 154-158 DTE, and
+  // a shorter-tenor day earns the same premium over fewer sessions — so it
+  // annualises HIGHER. If this were a display-only relabel the two would tie.
+  const short = og.annualYieldOn(cell.mid, K, day, 154)
+  ok('a shorter tenor at the same premium annualises higher',
+     short > chart, `${short} vs ${chart}`)
+  // A bad date refuses rather than inventing a tenor.
+  ok('an unparseable quote day has no yield',
+     og.annualYieldOn(mid, K, 'not-a-date', 157) === null, '')
+  ok('and a zero strike still has no capital base',
+     og.annualYieldOn(mid, 0, day, 157) === null, '')
+  ok('and no mid stays no yield', og.annualYieldOn(null, K, day, 157) === null, '')
+}
+
 // THE GRID.
 const today = '2026-08-06'
 const gc = (strike, expiration, right, bid, ask, delta) => ({

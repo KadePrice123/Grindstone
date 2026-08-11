@@ -588,6 +588,45 @@ try {
   console.log('UNDERLYING PROOF:', proof)
   await shot(opt, 'opt-history.png')
 
+  // ---- THE ANNUALISED UNIT, against the heatmap cell it must match --------
+  // This unit exists because the two panels disagreed on screen. Proving it in
+  // the REAL app means reading both surfaces at once: the chart's today line
+  // and the picked cell's own printed rate.
+  const setUnit = (v) => opt.eval(`(() => {
+    const s = document.querySelector('.opt-unit')
+    if (!s) return 'no-select'
+    s.value = ${JSON.stringify(v)}
+    s.dispatchEvent(new Event('change', { bubbles: true }))
+    return s.value
+  })()`)
+  const peakOf = () => opt.eval(
+    `document.querySelector('.opt-card')?.getAttribute('data-peak') ?? ''`)
+
+  // WHAT THIS HARNESS CAN AND CANNOT PROVE. The scratch profile carries no
+  // market keys, so there is no live chain: no today line and no heatmap cells.
+  // The exact chart-equals-cell equality is therefore pinned in the OFFLINE
+  // gate (_chart_legs, ===) where it can be checked to the last bit. What is
+  // proved HERE is the rendering half — the unit switches, the axis rescales
+  // per-point, and the caption names the unit it is drawing.
+  await setUnit('pct')
+  await sleep(2000)
+  const rawPeak = await peakOf()
+  await setUnit('annual')
+  await sleep(2500)
+  const annPeak = await peakOf()
+  console.log('ANNUAL PROOF:', JSON.stringify({
+    pct_peak: rawPeak,
+    annual_peak: annPeak,
+    // Annualising a ~38-DTE series scales by 252/~27 sessions, so the peak must
+    // climb by roughly an order of magnitude. Equality here would mean the unit
+    // relabelled the axis without touching the data.
+    scaled: !!rawPeak && !!annPeak && Number(annPeak) > Number(rawPeak) * 2,
+    unit: await opt.eval(`document.querySelector('.opt-card')?.getAttribute('data-unit')`),
+    names_its_unit: (await opt.eval(
+      `(document.querySelector('.opt-note')?.textContent ?? '').includes('scaled to a year')`)),
+  }))
+  await shot(opt, 'opt-history-annual.png')
+
   // AND THE SAME SERIES IN DOLLARS, so the two units can be compared side by
   // side: the percent view should flatten drift the dollar view shows.
   await opt.eval(`(() => {
