@@ -4327,6 +4327,170 @@ def _backfill_runs():
             f"{name} does not give the recorder a way to read the setting"
 
 
+@check("chain backfill: OnclickMedia earns absence, and an open session is refused")
+def _chain_backfill():
+    """Option history can only come from OnclickMedia — Alpaca sells no
+    historical chain snapshots at all — and that provider brings two hazards
+    that are invisible unless tested.
+
+    IT CANNOT TELL "the market was shut" FROM "I do not carry this ticker".
+    Both are an empty body, and it genuinely has never carried SPX, SPXW or
+    XSP. Blanket authority would let one empty response permanently blacklist
+    a date for a symbol it never had; no authority at all would re-ask every
+    holiday inside its 180-day window forever. So absence is EARNED: one day
+    it actually returned for THIS symbol proves it carries the symbol.
+
+    AN OPEN SESSION RETURNS A SHORTER HEADER with no greeks. Those rows must
+    never be absorbed — they would put greek-less records into a history
+    nothing can rebuild — and the day has to stay retryable so it is picked
+    up once it settles."""
+    import datetime as _dt
+    import tempfile
+    sys.path.insert(0, str(CODE))
+    from backend import coverage as cov, onclick, recorder as rec_mod
+    from backend import settings as settings_mod
+    from backend.marketdb import connect_market
+
+    assert settings_mod.SPEC["onclick_chain_backfill"]["default"] is False, \
+        "the third-party chain backfill must be OFF by default"
+
+    with tempfile.TemporaryDirectory() as td:
+        con = connect_market(Path(td) / "market.db")
+        try:
+            # --- ABSENCE IS EARNED, per symbol.
+            assert not cov.may_claim_absent(con, "onclick", "chain", "SPY"), \
+                "OnclickMedia claimed absence before ever answering — one empty "\
+                "response would blacklist a date for a ticker it never carried"
+            cov.mark(con, "onclick", "chain", "SPY", "", "2026-06-01", "have", rows=9)
+            assert cov.may_claim_absent(con, "onclick", "chain", "SPY"), \
+                "a provider that HAS answered for this symbol still cannot "\
+                "report a holiday, so every holiday is re-asked forever"
+            # Earned for SPY says nothing about XSP, which it has never carried.
+            assert not cov.may_claim_absent(con, "onclick", "chain", "XSP")
+
+            cov.mark(con, "onclick", "chain", "SPY", "", "2026-06-02", "absent")
+            cov.mark(con, "onclick", "chain", "XSP", "", "2026-06-02", "absent")
+            assert cov.state_of(con, "onclick", "chain", "SPY", "", "2026-06-02") \
+                == "absent", "an earned holiday did not stick, so it will be re-asked"
+            assert cov.state_of(con, "onclick", "chain", "XSP", "", "2026-06-02") \
+                != "absent", (
+                    "a ticker OnclickMedia does not carry was written off as "
+                    "genuinely empty — that date is now unreachable from any "
+                    "other source this app might later add")
+
+            # --- THE DAY LOOP maps each provider outcome onto the right state.
+            con.execute(
+                "INSERT INTO record_jobs (id, user_id, kind, symbol, timeframe,"
+                " interval_seconds, retention_days, enabled)"
+                " VALUES (1, 1, 'chain', 'QQQ', '', 900, 365, 1)")
+            con.commit()
+            r = rec_mod.Recorder(con, lambda _u: {"key_id": "k", "secret_key": "s"},
+                                 lambda _u: {"backfill_enabled": True,
+                                             "onclick_chain_backfill": True})
+            now = _dt.datetime.now(_dt.timezone.utc)
+            lo, hi = onclick.window(now.date())
+            day = cov.gaps(con, "onclick", "chain", "QQQ", "", lo, hi, limit=1)[0]
+
+            real_fetch, real_delay = onclick.fetch_day, onclick.MIN_DELAY
+            onclick.MIN_DELAY = 0.0  # the pacing is real; the test's patience is not
+            try:
+                # An OPEN SESSION must not be absorbed, and must stay retryable.
+                onclick.fetch_day = lambda _s, _d, **_k: onclick.MISMATCH
+                r._backfill_chains("QQQ", now)
+                st = cov.state_of(con, "onclick", "chain", "QQQ", "", day)
+                assert st == "failed", (
+                    f"a greek-less open session settled as {st!r} — those rows "
+                    f"would enter a history nothing can rebuild, and the day "
+                    f"would never be re-read once it closed")
+
+                # A TRANSIENT FAULT is retryable, never a hole.
+                def boom(_s, _d, **_k):
+                    raise RuntimeError("connection reset")
+
+                onclick.fetch_day = boom
+                r._backfill_chains("QQQ", now)
+                assert cov.state_of(con, "onclick", "chain", "QQQ", "", day) == "failed"
+
+                # OUTSIDE THE PLAN'S RANGE is the PROVIDER failing to answer,
+                # not a statement about the market — so it stays retryable.
+                #
+                # Tested AFTER the symbol has earned authority, deliberately.
+                # Before that, mark()'s downgrade would mask a wrong claim
+                # here and the test would pass on someone else's defence
+                # rather than on this branch being right.
+                cov.mark(con, "onclick", "chain", "QQQ", "", "2026-05-01",
+                         "have", rows=3)
+                assert cov.may_claim_absent(con, "onclick", "chain", "QQQ"),                     "the fixture failed to earn authority, so the case below "                    "would be proving nothing"
+
+                def denied(_s, _d, **_k):
+                    raise PermissionError("outside the free plan's data range")
+
+                onclick.fetch_day = denied
+                r._backfill_chains("QQQ", now)
+                st = cov.state_of(con, "onclick", "chain", "QQQ", "", day)
+                assert st != "absent", (
+                    f"a date the provider could not answer for was written off "
+                    f"as genuinely empty ({st!r}) — and with authority earned "
+                    f"that claim STICKS, so the date is unreachable forever")
+
+                # AN EMPTY DAY on a ticker it has never answered for must NOT
+                # be absent — it may simply not carry it. A DIFFERENT symbol,
+                # because QQQ has earned authority above and would (correctly)
+                # be allowed to report a holiday now.
+                con.execute(
+                    "INSERT INTO record_jobs (id, user_id, kind, symbol,"
+                    " timeframe, interval_seconds, retention_days, enabled)"
+                    " VALUES (2, 1, 'chain', 'XSP', '', 900, 365, 1)")
+                con.commit()
+                xsp_day = cov.gaps(con, "onclick", "chain", "XSP", "", lo, hi,
+                                   limit=1)[0]
+                onclick.fetch_day = lambda _s, _d, **_k: None
+                r._backfill_chains("XSP", now)
+                st = cov.state_of(con, "onclick", "chain", "XSP", "", xsp_day)
+                assert st != "absent", (
+                    f"an empty day was written off before the provider had ever "
+                    f"proved it carries XSP ({st!r}) — and it never has")
+            finally:
+                onclick.fetch_day, onclick.MIN_DELAY = real_fetch, real_delay
+
+            # --- OFF BY DEFAULT, through run_backfill: the chain pass needs
+            # BOTH switches, because it reaches a third party rather than the
+            # user's own broker key.
+            calls = {"n": 0}
+            orig = rec_mod.Recorder._backfill_chains
+            rec_mod.Recorder._backfill_chains = \
+                lambda self, sym, now_: calls.__setitem__("n", calls["n"] + 1) or 0
+            try:
+                off = rec_mod.Recorder(con, lambda _u: None,
+                                       lambda _u: {"backfill_enabled": True,
+                                                   "onclick_chain_backfill": False})
+                off.run_backfill()
+                assert calls["n"] == 0, \
+                    "the chain backfill ran with its own switch off"
+                on = rec_mod.Recorder(con, lambda _u: None,
+                                      lambda _u: {"backfill_enabled": True,
+                                                  "onclick_chain_backfill": True})
+                on.run_backfill()
+                # Once PER ENABLED CHAIN JOB, not exactly once: the fixture
+                # has two by this point, and pinning the count to 1 was
+                # asserting the fixture's shape rather than the behaviour.
+                assert calls["n"] >= 1, "the chain backfill did not run when enabled"
+            finally:
+                rec_mod.Recorder._backfill_chains = orig
+        finally:
+            con.close()
+
+    # --- THE WINDOW IS RECOMPUTED AT EXECUTION. It slides one day per day,
+    # so anything decided earlier is already stale by the time it runs.
+    src = (CODE / "backend" / "recorder.py").read_text(encoding="utf-8")
+    body = member_body(src, "    def _backfill_chains(")
+    assert "onclick.window(" in body, \
+        "the chain backfill no longer recomputes the provider's rolling window"
+    assert "MIN_DELAY" in body, (
+        "the chain backfill lost its pacing — the source is free and "
+        "unauthenticated, and hammering it is the fastest way to lose access")
+
+
 @check("addresses: ONE translation, and every page round-trips through it")
 def _address_translation():
     """A .gs address must mean the same thing wherever it is opened.

@@ -38,6 +38,24 @@ AUTHORITATIVE: dict[str, frozenset[str]] = {
     "chain": frozenset({"alpaca-iex", "alpaca-sip"}),
 }
 
+# Providers that can EARN authority for a kind by evidence, rather than being
+# granted it outright.
+#
+# OnclickMedia is the case. Its empty response means either "the market was
+# shut that day" or "I do not carry this ticker" — indistinguishable on a
+# single day, and it genuinely does not carry SPX, SPXW or XSP. Granting it
+# blanket authority would let one empty response permanently blacklist a date
+# for a symbol it simply never had. Refusing it any authority is the other
+# failure: every market holiday inside its 180-day window would be re-asked
+# forever, which is most of what a chain backfill would end up doing.
+#
+# The evidence that settles it is a day it DID return for this symbol. Once
+# it has answered once, a later empty day is a statement about the market
+# rather than about its catalogue.
+EARNS_AUTHORITY: dict[str, frozenset[str]] = {
+    "chain": frozenset({"onclick"}),
+}
+
 STATES = ("have", "absent", "failed", "unknown")
 # States a backfill should try again. `absent` is deliberately not here.
 RETRYABLE = ("failed", "unknown")
@@ -79,7 +97,8 @@ def mark(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
     succeeds must be able to overwrite an earlier `failed`."""
     if state not in STATES:
         raise ValueError(f"unknown coverage state {state!r}")
-    if state == "absent" and provider not in AUTHORITATIVE.get(kind, frozenset()):
+    if state == "absent" and not may_claim_absent(
+            con, provider, kind, symbol, timeframe):
         # Downgrade rather than raise. The caller is a collector in a loop and
         # an exception here would abandon the rest of the backfill over what
         # is really a provenance question — but the claim must not stand,
@@ -97,6 +116,30 @@ def mark(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
             "   state=excluded.state, rows=excluded.rows,"
             "   checked_at=excluded.checked_at, detail=excluded.detail",
             (provider, kind, symbol.upper(), timeframe, period, state, rows, detail))
+
+
+def may_claim_absent(con: sqlite3.Connection, provider: str, kind: str,
+                     symbol: str, timeframe: str = "") -> bool:
+    """Is this provider entitled to say "there is genuinely nothing here"?
+
+    Outright for a provider that is authoritative for the kind. Otherwise by
+    EVIDENCE, for the providers listed in EARNS_AUTHORITY: one day it has
+    already returned for this symbol proves it carries the symbol, and from
+    then on an empty day is a fact about the market rather than about its
+    catalogue.
+
+    Deliberately per (provider, kind, SYMBOL): OnclickMedia carrying SPY says
+    nothing about whether it carries XSP, and it does not.
+    """
+    if provider in AUTHORITATIVE.get(kind, frozenset()):
+        return True
+    if provider not in EARNS_AUTHORITY.get(kind, frozenset()):
+        return False
+    row = con.execute(
+        "SELECT 1 FROM data_cover WHERE provider=? AND kind=? AND symbol=?"
+        " AND timeframe=? AND state='have' LIMIT 1",
+        (provider, kind, symbol.upper(), timeframe)).fetchone()
+    return row is not None
 
 
 def state_of(con: sqlite3.Connection, provider: str, kind: str, symbol: str,

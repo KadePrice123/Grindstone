@@ -85,6 +85,21 @@ SPEC: dict[str, dict[str, Any]] = {
                 "provider positively reports as empty is recorded as such and "
                 "never asked for again.",
     },
+    "onclick_chain_backfill": {
+        "group": "Data",
+        "kind": "bool", "default": False,
+        "label": "Also fill in option history from OnclickMedia",
+        "help": "Alpaca sells no historical option snapshots at all, so past "
+                "chains can only come from OnclickMedia — a free, "
+                "unauthenticated source with a rolling ~180-day window. "
+                "Anything older than that is simply not obtainable and is "
+                "reported rather than retried. Paced at one request every few "
+                "seconds because the source is free; a symbol it does not "
+                "carry (it has never carried SPX, SPXW or XSP) is left "
+                "retryable rather than being written off. Separate from the "
+                "main backfill switch because it uses a third party rather "
+                "than your own broker key.",
+    },
     "backfill_years": {
         "group": "Data",
         "kind": "choice", "default": "2",

@@ -22,7 +22,7 @@ import sqlite3
 import threading
 from typing import Any, Callable
 
-from . import backfill, coverage, newsstore
+from . import backfill, btdata, chainimport, coverage, newsstore, onclick
 from .logs import LOG
 from .brokers.alpaca_data import AlpacaData
 from .brokers.base import BrokerError
@@ -37,6 +37,10 @@ BACKFILL_EVERY = dt.timedelta(minutes=5)
 # Chunks per symbol per cycle. Small on purpose — five symbols x 4 chunks x
 # ~1.5s is under a minute of API time per cycle.
 BACKFILL_CHUNKS_PER_CYCLE = 4
+# Chain days per symbol per cycle. Much smaller than the bars cap: each day
+# is its own request to a free, unauthenticated provider, paced at
+# onclick.MIN_DELAY (5s) between calls.
+CHAIN_DAYS_PER_CYCLE = 3
 
 TIMEFRAMES = {"1Min": 60, "5Min": 300, "15Min": 900, "1Hour": 3600, "1Day": 86400}
 CHAIN_INTERVALS = (60, 300, 900, 3600, 86400)
@@ -239,16 +243,20 @@ class Recorder:
         coverage every time, so being interrupted costs nothing and the next
         cycle simply picks up what is still unsettled.
 
-        Bars only for now. Chains cannot be backfilled at all from Alpaca —
-        it sells no historical option snapshots — so claiming to would just
-        manufacture `failed` rows for data that is not purchasable. That
-        limit is stated rather than silently skipped.
+        Bars come from Alpaca. CHAINS come from OnclickMedia, because
+        Alpaca sells no historical option snapshots at all — asking it would
+        just manufacture `failed` rows for data that is not purchasable.
+        OnclickMedia's window is a rolling ~180 days, so that is the honest
+        reach for chain history and anything older is reported rather than
+        retried.
         """
         now = now or _utcnow()
+        # NO EARLY RETURN on an empty bars list. The chain pass below is a
+        # separate provider with its own switch, and gating it on the
+        # presence of a BARS job meant a user recording only chains got no
+        # chain history at all — silently, because nothing errors.
         jobs = [dict(j) for j in self._con.execute(
             "SELECT * FROM record_jobs WHERE enabled=1 AND kind='bars'").fetchall()]
-        if not jobs:
-            return {"ran": 0, "reason": "no enabled bars jobs"}
 
         # One settings read per cycle, keyed by the job's own user.
         by_user: dict[int, dict[str, Any]] = {}
@@ -317,7 +325,103 @@ class Recorder:
                      sum(x.get("have", 0) + x.get("absent", 0) for x in r["results"]))
             if self._stop.is_set():
                 break
+
+        # ---- CHAINS, from OnclickMedia -------------------------------------
+        for job in [dict(j) for j in self._con.execute(
+                "SELECT * FROM record_jobs WHERE enabled=1 AND kind='chain'"
+        ).fetchall()]:
+            if self._stop.is_set():
+                break
+            uid = int(job["user_id"])
+            cfg = by_user.get(uid)
+            if cfg is None:
+                try:
+                    cfg = by_user[uid] = self._settings(uid) or {}
+                except Exception:  # noqa: BLE001
+                    cfg = by_user[uid] = {}
+            if not (cfg.get("backfill_enabled", False)
+                    and cfg.get("onclick_chain_backfill", False)):
+                continue
+            done += self._backfill_chains(job["symbol"], now)
         return {"ran": done, "results": results}
+
+    def _backfill_chains(self, symbol: str, now: dt.datetime) -> int:
+        """One symbol's chain history, from OnclickMedia, a day at a time.
+
+        Not routed through backfill.run_one: that maps a row list onto days
+        by their `ts`, and a chain day is one CSV blob for a whole session,
+        not a row per day. Pretending otherwise would be a worse fit than
+        stating the difference.
+
+        The window is recomputed HERE, at execution — it slides a day per
+        day, so anything decided earlier is already stale.
+        """
+        provider = "onclick"
+        lo, hi = onclick.window(now.date())
+        gaps = coverage.gaps(self._con, provider, "chain", symbol, "", lo, hi,
+                             limit=CHAIN_DAYS_PER_CYCLE)
+        if not gaps:
+            return 0
+        con = None
+        done = 0
+        try:
+            for iso in gaps:
+                if self._stop.is_set():
+                    break
+                try:
+                    body = onclick.fetch_day(symbol, iso)
+                except PermissionError as e:
+                    # The date fell outside the plan's range. The provider
+                    # cannot answer — that is not a claim about the market,
+                    # so it stays retryable rather than becoming `absent`.
+                    coverage.mark(self._con, provider, "chain", symbol, "", iso,
+                                  "unknown", detail=str(e)[:200])
+                    done += 1
+                    continue
+                except Exception as e:  # noqa: BLE001 — transient; retry later
+                    coverage.mark(self._con, provider, "chain", symbol, "", iso,
+                                  "failed", detail=str(e)[:200])
+                    done += 1
+                    continue
+
+                if body is onclick.MISMATCH or body == onclick.MISMATCH:
+                    # An open session has no greeks. Absorbing those rows
+                    # would put greek-less records into a history nothing can
+                    # rebuild, so the day is left RETRYABLE and picked up once
+                    # it has settled.
+                    coverage.mark(self._con, provider, "chain", symbol, "", iso,
+                                  "failed",
+                                  detail="columns differ (open session, no greeks)")
+                elif body:
+                    parsed = chainimport.parse_text(
+                        body, "option_chain", "csv", "onclickmedia")
+                    if con is None:
+                        con = btdata.connect_data(btdata.data_db_path(symbol))
+                    res = btdata.import_chain(con, symbol, parsed.chain, "onclickmedia")
+                    # STORED FIRST, then claimed — the same ordering the bars
+                    # path needs and for the same reason: `have` is settled
+                    # forever, so it must never outrun the data.
+                    coverage.mark(self._con, provider, "chain", symbol, "", iso,
+                                  "have", rows=int(res.get("contracts", 0)))
+                else:
+                    # Empty. A holiday, or a ticker it does not carry — the
+                    # two are identical on the wire, so mark() decides using
+                    # whether this provider has ever answered for THIS symbol
+                    # (coverage.EARNS_AUTHORITY), and downgrades to retryable
+                    # when it has not.
+                    coverage.mark(self._con, provider, "chain", symbol, "", iso,
+                                  "absent", detail="empty response")
+                done += 1
+                # PACED. The provider is free and unauthenticated; hammering
+                # it is both rude and the fastest way to lose access.
+                if not self._stop.wait(onclick.MIN_DELAY):
+                    continue
+                break
+        finally:
+            if con is not None:
+                con.close()
+        LOG.info("chain backfill %s: %d day(s) settled", symbol, done)
+        return done
 
     def prune(self) -> dict[str, int]:
         """Delete rows older than the LONGEST retention any job declares for

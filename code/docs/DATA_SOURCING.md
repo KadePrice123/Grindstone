@@ -365,6 +365,25 @@ windows have already moved past it. A symbol that cannot be recorded stays
 starred and reports why (DS-18) rather than failing silently or refusing the
 star.
 
+**Chain history comes from OnclickMedia, and absence there is EARNED.**
+Alpaca sells no historical option snapshots at all, so past chains have
+exactly one source and its window is a rolling ~180 days. That provider
+brings a problem the coverage model had to grow for: its empty response means
+either "the market was shut" or "I do not carry this ticker", and it
+genuinely has never carried SPX, SPXW or XSP. Blanket authority would let one
+empty response permanently blacklist a date for a symbol it never had; no
+authority would re-ask every holiday inside the window forever. So
+`coverage.EARNS_AUTHORITY` lets a provider earn the right to claim absence,
+per symbol, by having answered for that symbol at least once.
+
+The day loop maps each outcome deliberately: a parsed body is `have` (stored
+before the claim), an open session's greek-less header is `failed` and
+retried once it settles, a transient fault is `failed`, a 403 outside the
+plan's range is `unknown` because the provider failing to answer is not a
+statement about the market, and an empty body is `absent` only if authority
+has been earned. Off by default under its own switch, separate from the main
+backfill because it reaches a third party rather than the user's broker key.
+
 **Turning the setting on enrolls the favourites you already have.** The
 `PUT /api/settings` handler reads the OLD value before writing the new one
 and runs `sync_all` on the off→on edge only. Applying to future stars alone
