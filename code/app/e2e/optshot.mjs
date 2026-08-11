@@ -446,6 +446,66 @@ try {
   // SHOT_PAGE=data screenshots the Data and Settings pages instead of the Opt
   // page. Same boot, same scratch profile — a second harness would duplicate
   // ninety lines of auth just to open a different tab.
+  // SHOT_PAGE=opthist: Kade's visual verification — the SPXL history chart
+  // must PLOT through the current session, not merely receive it. The June-29
+  // cliff lived exactly in that gap: serieshistory answered with today in it,
+  // and the chart projected the option onto an underlying spine whose limited
+  // bars request came back oldest-first and stopped six weeks short. So the
+  // assertion reads data-series-last (what was DRAWN) and the screenshot is
+  // the human-checkable axis.
+  if (process.env.SHOT_PAGE === 'opthist') {
+    // The Opt page analyses the LEGS on the symbol's daily chart — with none
+    // it renders the "no legs yet" idle card and no History toggle exists.
+    const seeded = await home.eval(`window.grindstone.request('PUT','/api/chart-objects',{
+      key: 'SPXL|1Day',
+      doc: { legs: [{
+        id: 'lgx1', side: 'short', right: 'P', expiration: '2026-09-04',
+        strike: 267.5, dteTol: 3, strikeTol: 25, slot: 0,
+        pick: 'SPXL260904P00267500'
+      }] }
+    }).then((r)=>r.status)`)
+    console.log('SPXL leg seed:', seeded)
+    await home.eval(`window.grindstone.openTab('opt:SPXL:SPXL260904P00267500')`)
+    const opt = await waitFor(async () => {
+      const ts = await targets()
+      for (const t of ts.filter((x) => x.url.includes('mode=content'))) {
+        const c = await connect(t)
+        if (await c.eval(`document.querySelector('[data-opt-symbol="SPXL"]') !== null`)) return c
+      }
+      return null
+    }, 'the SPXL Opt page', 30000)
+    await sleep(1500)
+    const hist = await opt.eval(`(() => {
+      const b = [...document.querySelectorAll('button')]
+        .find((x) => x.textContent.trim() === 'History')
+      if (!b) return 'no-history-button'
+      b.click(); return 'ok' })()`)
+    console.log('history tab:', hist)
+    const last = await waitFor(async () => {
+      const v = await opt.eval(
+        `document.querySelector('[data-series-last]')?.dataset.seriesLast ?? null`)
+      return v || null
+    }, 'the history chart to plot', 25000).catch(() => null)
+    const n = await opt.eval(
+      `document.querySelector('[data-series-n]')?.dataset.seriesN ?? '0'`)
+    console.log('HIST last plotted:', last, '| points:', n)
+    await opt.send('Emulation.setDeviceMetricsOverride', {
+      width: 1500, height: 950, deviceScaleFactor: 1, mobile: false,
+    })
+    await sleep(1200)
+    await shot(opt, 'opthist-spxl.png')
+    // The archive's own last SPXL session is the honest expectation — the
+    // scratch profile carries a copy of the real options_history.db.
+    const sq = await home.eval(
+      `window.grindstone.request('GET','/api/symbols/SPXL/options/serieshistory'
+        + '?right=P&dte=24&dte_tol=3&delta=-0.22&delta_tol=0.08')
+        .then((r)=> r.body && r.body.last ? r.body.last : 'none')`)
+    console.log('archive last session:', sq)
+    const ok = !!last && sq !== 'none' && last >= sq
+    console.log('OPTHIST:', JSON.stringify({ plotted_to: last, archive_last: sq, ok }))
+    process.exit(ok ? 0 : 1)
+  }
+
   if (process.env.SHOT_PAGE === 'data') {
     // Match the page's OWN heading, not "either of them": a loose regex found
     // the already-open Data tab again and reported its headings as Settings'.

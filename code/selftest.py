@@ -3703,6 +3703,42 @@ console.log(JSON.stringify(out))
         "and must never be persisted into a stored layout")
 
 
+@check("bars: a limited window keeps the NEWEST bars, so charts reach today")
+def _bars_newest():
+    """The June-29 cliff. stock_bars asked Alpaca with sort=asc, so a
+    limited request filled from the WINDOW'S START and truncated the tail:
+    limit=1000 over the /bars route's 1500-day window returned
+    2022-07-05..2026-06-29 — and the Opt page's history chart projects the
+    option onto that bars timeline, so every contract's history stopped at
+    June 29, on a cliff that crept forward one day per day.
+
+    Every layer above answered correctly the whole time: the archive held
+    today, serieshistory returned today, and the chart still drew a six-week
+    lie. Which is why the fix lives in the PRIMITIVE, and why this check
+    reads it there."""
+    src = (CODE / "backend" / "brokers" / "alpaca_data.py").read_text(encoding="utf-8")
+    body = py_member_body(src, "    def stock_bars(")
+    assert '"sort": "desc"' in body, (
+        "stock_bars asks Alpaca ascending again — a limited request will "
+        "keep the OLDEST bars in the window and every chart projected onto "
+        "them cuts off weeks before today")
+    assert "reversed(" in body, (
+        "stock_bars no longer reverses the descending response — every "
+        "caller expects ascending bars, and lightweight-charts refuses "
+        "unsorted data outright")
+    # The other kind of proof: the e2e (SHOT_PAGE=opthist) opens the real
+    # page and asserts data-series-last — what the chart DREW, not what an
+    # endpoint answered. This pin exists so the primitive cannot quietly
+    # regress between e2e runs.
+    opt_page = (CODE / "app/src/renderer/src/pages/OptPage.tsx").read_text(encoding="utf-8")
+    # Anchored with the `=`: a plain `in` matched a RENAMED attribute
+    # (data-series-lastX contains data-series-last) — substring trap #7.
+    assert "data-series-last=" in opt_page, (
+        "the history chart lost its last-plotted-date hook — the one "
+        "assertion that distinguishes 'the response had today' from 'the "
+        "chart drew today', which was exactly the gap the cliff hid in")
+
+
 @check("chains: recorded data reads WITHOUT a key; only fetching needs one")
 def _chain_without_key():
     """A key is needed to FETCH, never to READ.

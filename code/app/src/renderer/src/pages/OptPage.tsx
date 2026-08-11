@@ -610,6 +610,15 @@ export function OptPage({
               ) : (
                 <>
                   {series?.available && series.rows.length > 0 ? (
+                    <div
+                      // The LAST PLOTTED DATE, as data. The chart is canvas,
+                      // so a test cannot read the axis — and "the response
+                      // had today in it" is not the same claim as "the chart
+                      // drew today": the spine projection ate six weeks off
+                      // the tail while every API answer looked complete.
+                      data-series-last={plotted.length ? plotted[plotted.length - 1].date : ''}
+                      data-series-n={plotted.length}
+                    >
                     <HistoryPanel
                       rows={plotted}
                       pct={asPct}
@@ -620,6 +629,7 @@ export function OptPage({
                       refPrice={liveShown}
                       height={420}
                     />
+                    </div>
                   ) : (
                     <div className="dim subtle lc-empty">
                       {series === null ? 'loading…' : series.reason ?? 'no archived rows'}

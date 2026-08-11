@@ -240,11 +240,18 @@ class AlpacaData:
         # inside the last 15 minutes is a 403 ("subscription does not permit
         # querying recent SIP data"); omitted, it silently clamps and 200s.
         # feed=iex additionally allows recent data on the free tier.
+        # sort=DESC, then reversed — so a LIMITED request keeps the NEWEST
+        # bars in the window. With sort=asc Alpaca fills from the window's
+        # START and truncates the tail: limit=1000 over a 1500-day window
+        # returned 2022-07-05..2026-06-29, and every chart projected onto
+        # that timeline (the Opt page's history spine) cut off at June 29 —
+        # a creeping, date-constant cliff the user saw on every contract.
+        # The return contract is unchanged: ascending, oldest first.
         j = self._get(DATA_URL + "/v2/stocks/bars",
                       {"symbols": symbol, "timeframe": timeframe, "start": start,
                        "limit": limit, "adjustment": "raw", "feed": "iex",
-                       "sort": "asc"})
-        return parse_bars(symbol, j)
+                       "sort": "desc"})
+        return list(reversed(parse_bars(symbol, j)))
 
     def stock_bars_range(self, symbol: str, timeframe: str, start: str,
                          end: str, limit: int = 10000) -> list[dict[str, Any]]:
