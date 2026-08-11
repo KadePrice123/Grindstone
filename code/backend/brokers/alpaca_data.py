@@ -8,6 +8,7 @@ omits fields the OPRA feed carries.
 """
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Any, Iterator
 
 import httpx
@@ -241,6 +242,30 @@ class AlpacaData:
         # feed=iex additionally allows recent data on the free tier.
         j = self._get(DATA_URL + "/v2/stocks/bars",
                       {"symbols": symbol, "timeframe": timeframe, "start": start,
+                       "limit": limit, "adjustment": "raw", "feed": "iex",
+                       "sort": "asc"})
+        return parse_bars(symbol, j)
+
+    def stock_bars_range(self, symbol: str, timeframe: str, start: str,
+                         end: str, limit: int = 10000) -> list[dict[str, Any]]:
+        """A BOUNDED historical window — what a backfill needs.
+
+        stock_bars() above omits `end` on purpose: on the free tier an end
+        inside the last 15 minutes 403s the WHOLE request, so the live
+        collector lets Alpaca clamp it. A backfill is the opposite case — it
+        asks about a finite past window and must not receive everything from
+        `start` to now — so the end is explicit and the recency hazard is
+        handled HERE rather than left to the caller to remember.
+
+        The clamp is 30 minutes, comfortably outside the 15-minute edge:
+        being a few minutes short of the present costs a backfill nothing
+        (the live collector owns today), while a 403 costs the whole chunk.
+        """
+        cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=30)
+        safe_end = min(end, cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        j = self._get(DATA_URL + "/v2/stocks/bars",
+                      {"symbols": symbol, "timeframe": timeframe,
+                       "start": start, "end": safe_end,
                        "limit": limit, "adjustment": "raw", "feed": "iex",
                        "sort": "asc"})
         return parse_bars(symbol, j)

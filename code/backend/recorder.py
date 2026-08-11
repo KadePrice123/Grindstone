@@ -22,19 +22,30 @@ import sqlite3
 import threading
 from typing import Any, Callable
 
-from . import newsstore
+from . import backfill, coverage, newsstore
 from .logs import LOG
 from .brokers.alpaca_data import AlpacaData
 from .brokers.base import BrokerError
 
 TICK_SECONDS = 15
 PRUNE_EVERY = dt.timedelta(hours=6)
+# How often a backfill cycle runs. Deliberately unhurried: it competes with
+# the user's own charts for the same 200 req/min free tier, and the history
+# it chases is not going anywhere. Each cycle does a bounded slice and the
+# next one resumes from coverage, so "slow" costs completeness nothing.
+BACKFILL_EVERY = dt.timedelta(minutes=5)
+# Chunks per symbol per cycle. Small on purpose — five symbols x 4 chunks x
+# ~1.5s is under a minute of API time per cycle.
+BACKFILL_CHUNKS_PER_CYCLE = 4
 
 TIMEFRAMES = {"1Min": 60, "5Min": 300, "15Min": 900, "1Hour": 3600, "1Day": 86400}
 CHAIN_INTERVALS = (60, 300, 900, 3600, 86400)
 MIN_INTERVAL = 60
 
 CredsProvider = Callable[[int], dict[str, str] | None]
+#: user_id -> that user's settings. Injected, so this module never imports
+#: the settings store or opens app.db itself.
+SettingsProvider = Callable[[int], dict[str, Any]]
 
 
 def _utcnow() -> dt.datetime:
@@ -67,13 +78,38 @@ def validate_job(kind: str, symbol: str, timeframe: str, interval_seconds: int,
     return None
 
 
+def _backfill_window(years: str, now: dt.datetime) -> tuple[dt.date, dt.date]:
+    """How far back to try, and up to when.
+
+    The end is YESTERDAY: today's bar is the live collector's job and is not
+    final until the close, so a backfill claiming it would settle a day whose
+    data is still moving. 'max' is 2016 because that is where Alpaca's free
+    equity history begins — reaching further would manufacture years of
+    `failed` periods that can never become `have`.
+    """
+    end = now.date() - dt.timedelta(days=1)
+    if years == "max":
+        return dt.date(2016, 1, 1), end
+    try:
+        n = max(1, int(years))
+    except ValueError:
+        n = 2
+    return end - dt.timedelta(days=365 * n), end
+
+
 class Recorder:
-    def __init__(self, con: sqlite3.Connection, creds_provider: CredsProvider) -> None:
+    def __init__(self, con: sqlite3.Connection, creds_provider: CredsProvider,
+                 settings_provider: SettingsProvider | None = None) -> None:
         self._con = con                      # owned by the recorder thread
         self._creds = creds_provider
+        # INJECTED like the credentials, for the same reason: settings live in
+        # app.db and this class must not know that. The unattended process in
+        # particular has to stay clear of anything vault-shaped.
+        self._settings = settings_provider or (lambda _uid: {})
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_prune = _utcnow() - PRUNE_EVERY
+        self._last_backfill = _utcnow() - BACKFILL_EVERY
 
     # ------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -87,6 +123,13 @@ class Recorder:
         while not self._stop.wait(TICK_SECONDS):
             try:
                 self.run_due_jobs()
+                # BACKFILL AFTER the due jobs, always. Live collection is the
+                # thing the user is waiting on; history is not, and a
+                # backfill that delayed today's chain snapshot would be
+                # spending the present to buy the past.
+                if _utcnow() - self._last_backfill > BACKFILL_EVERY:
+                    self.run_backfill()
+                    self._last_backfill = _utcnow()
                 if _utcnow() - self._last_prune > PRUNE_EVERY:
                     self.prune()
                     self._last_prune = _utcnow()
@@ -188,6 +231,94 @@ class Recorder:
         return newsstore.upsert(self._con, items)
 
     # ----------------------------------------------------------------- prune
+    def run_backfill(self, now: dt.datetime | None = None) -> dict[str, Any]:
+        """Fill in the history the coverage table says is missing.
+
+        Off unless the user turned it on. Bounded per cycle, paced between
+        requests, and resumable for free — the plan is recomputed from
+        coverage every time, so being interrupted costs nothing and the next
+        cycle simply picks up what is still unsettled.
+
+        Bars only for now. Chains cannot be backfilled at all from Alpaca —
+        it sells no historical option snapshots — so claiming to would just
+        manufacture `failed` rows for data that is not purchasable. That
+        limit is stated rather than silently skipped.
+        """
+        now = now or _utcnow()
+        jobs = [dict(j) for j in self._con.execute(
+            "SELECT * FROM record_jobs WHERE enabled=1 AND kind='bars'").fetchall()]
+        if not jobs:
+            return {"ran": 0, "reason": "no enabled bars jobs"}
+
+        # One settings read per cycle, keyed by the job's own user.
+        by_user: dict[int, dict[str, Any]] = {}
+        done = 0
+        results: list[dict[str, Any]] = []
+        for job in jobs:
+            uid = int(job["user_id"])
+            if uid not in by_user:
+                try:
+                    by_user[uid] = self._settings(uid) or {}
+                except Exception:  # noqa: BLE001 — a settings read must not kill the loop
+                    LOG.exception("backfill: settings unavailable for user %s", uid)
+                    by_user[uid] = {}
+            cfg = by_user[uid]
+            if not cfg.get("backfill_enabled", False):
+                continue
+            creds = self._creds(uid)
+            if creds is None:
+                continue
+
+            symbol, timeframe = job["symbol"], job["timeframe"]
+            provider = "alpaca-iex"
+            # TELL COVERAGE WHAT IS ALREADY HERE first. Coverage starts empty
+            # while the live recorder has been collecting for weeks; without
+            # this the first cycle would re-fetch every day already on disk.
+            coverage.reconcile_bars(self._con, provider, symbol, timeframe)
+
+            start, end = _backfill_window(str(cfg.get("backfill_years", "2")), now)
+            chunks = backfill.plan(self._con, provider, "bars", symbol, timeframe,
+                                   start, end,
+                                   max_chunks=BACKFILL_CHUNKS_PER_CYCLE)
+            if not chunks:
+                continue
+            client = AlpacaData(creds["key_id"], creds["secret_key"])
+
+            def fetch(sym: str, tf: str, s_: dt.date, e_: dt.date) -> list[dict[str, Any]]:
+                bars = client.stock_bars_range(
+                    sym, tf, f"{s_.isoformat()}T00:00:00Z", f"{e_.isoformat()}T23:59:59Z")
+                # STORE THEM, INSIDE THE FETCH, BEFORE COVERAGE IS WRITTEN.
+                # run_one() marks a day `have` from what came back — and
+                # `have` is a settled state that is never asked for again. So
+                # rows that were fetched but not persisted would mark the day
+                # permanently done while the database stayed empty, and no
+                # later run could ever repair it. Raising here instead leaves
+                # the days `failed`, which retries.
+                if bars:
+                    with self._con:
+                        self._con.executemany(
+                            "INSERT OR REPLACE INTO rec_bars (symbol, timeframe,"
+                            " ts, open, high, low, close, volume)"
+                            " VALUES (?,?,?,?,?,?,?,?)",
+                            [(sym, tf, b["ts"], b["open"], b["high"], b["low"],
+                              b["close"], b["volume"]) for b in bars])
+                return bars
+
+            r = backfill.run(self._con, chunks, fetch,
+                             should_stop=lambda: self._stop.is_set())
+            # The rows themselves still have to land, not just the coverage
+            # claim — a backfill that recorded "have" without storing the bar
+            # would poison the table permanently.
+            for res in r["results"]:
+                done += 1
+                results.append(res)
+            LOG.info("backfill %s %s: %d/%d chunks, %d day(s) settled",
+                     symbol, timeframe, r["done"], r["planned"],
+                     sum(x.get("have", 0) + x.get("absent", 0) for x in r["results"]))
+            if self._stop.is_set():
+                break
+        return {"ran": done, "results": results}
+
     def prune(self) -> dict[str, int]:
         """Delete rows older than the LONGEST retention any job declares for
         that data — never per-job (review 2026-08-02, high: a 7-day job on

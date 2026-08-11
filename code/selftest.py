@@ -4093,6 +4093,240 @@ def _autorecord_routes():
                 os.environ["GRINDSTONE_DATA_DIR"] = old_env
 
 
+@check("the backfill actually RUNS: off by default, stores what it claims, resumes")
+def _backfill_runs():
+    """DS-16, wired.
+
+    The planner and the endpoint existed for a while with nothing calling
+    `backfill.run()` — every piece present, the feature absent. That is the
+    failure this check exists to prevent, so it drives the REAL recorder
+    method against a real database and then asserts the rows landed.
+
+    The nastiest failure here is not "it did nothing". It is recording
+    coverage for rows it never stored: `have` is a settled state that is
+    never asked for again, so a day marked have-but-empty is unreachable
+    forever, by any later run. Rows and coverage are asserted together."""
+    import datetime as _dt
+    import tempfile
+    sys.path.insert(0, str(CODE))
+    from backend import backfill as bf_mod, coverage as cov, recorder as rec_mod
+    from backend.marketdb import connect_market
+
+    today = _dt.date.today()
+
+    class FakeClient:
+        """Every weekday in range except one 'holiday', so the run has to
+        settle both a have and an absent."""
+        holiday = (today - _dt.timedelta(days=10)).isoformat()
+        calls = 0
+
+        def __init__(self, *_a):
+            pass
+
+        def stock_bars_range(self, sym, tf, start, end, limit=10000):
+            FakeClient.calls += 1
+            s_ = _dt.date.fromisoformat(start[:10])
+            e_ = _dt.date.fromisoformat(end[:10])
+            out, d = [], s_
+            while d <= e_:
+                if d.weekday() < 5 and d.isoformat() != FakeClient.holiday:
+                    out.append({"ts": f"{d.isoformat()}T00:00:00Z", "open": 1.0,
+                                "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10})
+                d += _dt.timedelta(days=1)
+            return out
+
+    with tempfile.TemporaryDirectory() as td:
+        con = connect_market(Path(td) / "market.db")
+        try:
+            con.execute(
+                "INSERT INTO record_jobs (id, user_id, kind, symbol, timeframe,"
+                " interval_seconds, retention_days, enabled)"
+                " VALUES (1, 1, 'bars', 'SPY', '1Day', 3600, 3650, 1)")
+            con.commit()
+
+            settings = {"backfill_enabled": False, "backfill_years": "1"}
+            r = rec_mod.Recorder(con, lambda _u: {"key_id": "k", "secret_key": "s"},
+                                 lambda _u: settings)
+            real_client = rec_mod.AlpacaData
+            rec_mod.AlpacaData = FakeClient
+            try:
+                # Rows already on disk from the LIVE recorder, with no coverage
+                # for them — the real starting state on this machine (2,052
+                # bars against 0 coverage rows). A cycle must reconcile these
+                # rather than spend the API re-fetching what it already has.
+                # RECENT days, deliberately. A cycle works oldest-first and is
+                # capped, so days near the far end of the window get fetched
+                # anyway and would be marked `have` by the fetch — proving
+                # nothing about reconciliation. These sit past where the first
+                # cycle can reach, so `have` here can ONLY have come from
+                # reconciling what is already on disk.
+                seeded = [(today - _dt.timedelta(days=d)).isoformat()
+                          for d in (5, 6, 7, 8, 9)]
+                con.executemany(
+                    "INSERT INTO rec_bars (symbol, timeframe, ts, open, high,"
+                    " low, close, volume) VALUES ('SPY','1Day',?,1,1,1,1,1)",
+                    [(f"{d}T00:00:00Z",) for d in seeded])
+                con.commit()
+
+                # --- OFF BY DEFAULT is not a slogan: nothing may happen.
+                out = r.run_backfill()
+                assert out["ran"] == 0 and FakeClient.calls == 0, (
+                    "the backfill ran while the setting was OFF — it spends "
+                    f"API budget the user did not agree to: {out}")
+                assert con.execute("SELECT COUNT(*) FROM data_cover").fetchone()[0] == 0
+
+                # --- ON: it runs, and what it claims it actually stored.
+                settings["backfill_enabled"] = True
+                out = r.run_backfill()
+                assert out["ran"] > 0, f"the backfill did nothing while enabled: {out}"
+                assert FakeClient.calls > 0, "no provider call was made"
+
+                # --- RECONCILIATION HAPPENED, through the recorder, and it is
+                # asserted HERE — after ONE cycle, before convergence. Later
+                # the fetch settles every day anyway, so a check further down
+                # cannot tell reconciliation from re-fetching. These days sit
+                # past the first cycle's oldest-first slice, so `have` now can
+                # only have come from the rows already on disk.
+                for d in seeded:
+                    if _dt.date.fromisoformat(d).weekday() >= 5:
+                        continue
+                    st_seed = cov.state_of(con, "alpaca-iex", "bars", "SPY", "1Day", d)
+                    assert st_seed == "have", (
+                        f"{d} is in rec_bars but coverage says {st_seed!r} — the "
+                        f"cycle would spend the API re-fetching data already on "
+                        f"disk (2,052 bars against 0 coverage rows, on this machine)")
+
+                # BOUNDED. One cycle takes a slice, not the decade: it shares
+                # a 200 req/min tier with the charts the user is looking at.
+                start_w, end_w = rec_mod._backfill_window("1", _dt.datetime.now(_dt.timezone.utc))
+                left = bf_mod.remaining(con, "alpaca-iex", "bars", "SPY", "1Day",
+                                        start_w, end_w)
+                assert left > 0, (
+                    "one cycle settled a whole year — the per-cycle cap is "
+                    "gone and a long gap would monopolise the recorder")
+
+                have = {row[0] for row in con.execute(
+                    "SELECT period FROM data_cover WHERE state='have'")}
+                stored = {row[0] for row in con.execute(
+                    "SELECT DISTINCT substr(ts,1,10) FROM rec_bars WHERE symbol='SPY'")}
+                assert have, "nothing was marked have"
+                assert have <= stored, (
+                    "coverage claims days that are NOT in rec_bars: "
+                    f"{sorted(have - stored)[:5]} — `have` is settled and never "
+                    f"re-asked, so those days are unreachable forever")
+
+                # --- RESUMABLE and BOUNDED. A cycle is capped, so a long gap
+                # takes several — and each one must make progress rather than
+                # redo the last one's work.
+                before = len(have)
+                r.run_backfill()
+                after = con.execute(
+                    "SELECT COUNT(*) FROM data_cover WHERE state IN ('have','absent')"
+                ).fetchone()[0]
+                assert after >= before, "a second cycle went backwards"
+                calls_at_rest = FakeClient.calls
+                for _ in range(40):
+                    if not r.run_backfill()["ran"]:
+                        break
+                assert con.execute(
+                    "SELECT COUNT(*) FROM data_cover WHERE state='failed'"
+                ).fetchone()[0] == 0, "a clean provider produced failed periods"
+                # The holiday settles as ABSENT once the run reaches it — not
+                # left retryable. Asserted AFTER convergence on purpose: a
+                # cycle is capped and works oldest-first, so a recent day is
+                # simply not in the first cycle's slice. Checking it early
+                # tested the cap, not the claim.
+                st = cov.state_of(con, "alpaca-iex", "bars", "SPY", "1Day",
+                                  FakeClient.holiday)
+                assert st == "absent", f"the holiday settled as {st!r}"
+
+                # Converged: once every period is settled it stops asking.
+                spent = FakeClient.calls
+                r.run_backfill()
+                assert FakeClient.calls == spent, (
+                    "a finished backfill keeps calling the provider — it never "
+                    "converges and burns the rate limit forever")
+                assert calls_at_rest <= spent
+
+                # --- A PROVIDER OUTAGE stays retryable, and stores nothing.
+                # Re-open a day the run actually SETTLED, rather than a date
+                # picked by arithmetic: a fixed offset lands on a weekend
+                # roughly two times in seven, and a weekend is never planned
+                # at all — the test would then be asserting against a day the
+                # backfill correctly ignored.
+                reopen = con.execute(
+                    "SELECT period FROM data_cover WHERE state='have'"
+                    " ORDER BY period DESC LIMIT 1").fetchone()[0]
+                # BOTH the claim and the rows. Deleting only the coverage row
+                # does not simulate an outage: reconcile_bars runs first every
+                # cycle and correctly restores `have` from the data still on
+                # disk. That is the reconciliation working, not a bug — so the
+                # day has to genuinely not be there.
+                con.execute("DELETE FROM data_cover WHERE period=?", (reopen,))
+                con.execute("DELETE FROM rec_bars WHERE symbol='SPY'"
+                            " AND substr(ts,1,10)=?", (reopen,))
+                con.commit()
+
+                class Boom(FakeClient):
+                    def stock_bars_range(self, *_a, **_k):
+                        raise RuntimeError("502 from upstream")
+
+                rec_mod.AlpacaData = Boom
+                r.run_backfill()
+                left = con.execute(
+                    "SELECT COUNT(*) FROM data_cover WHERE state='failed'").fetchone()[0]
+                assert left > 0, "an outage was not recorded as retryable"
+            finally:
+                rec_mod.AlpacaData = real_client
+        finally:
+            con.close()
+
+    # --- RECONCILIATION. Coverage starts empty while the live recorder has
+    # been collecting for weeks; without this the first cycle re-fetches
+    # every day already on disk (2,052 bars against 0 coverage rows, here).
+    with tempfile.TemporaryDirectory() as td:
+        con = connect_market(Path(td) / "market.db")
+        try:
+            con.executemany(
+                "INSERT INTO rec_bars (symbol, timeframe, ts, open, high, low,"
+                " close, volume) VALUES ('QQQ','1Day',?,1,1,1,1,1)",
+                [(f"2026-0{m}-0{d}T00:00:00Z",) for m in (1, 2) for d in (2, 5, 6)])
+            con.commit()
+            n = cov.reconcile_bars(con, "alpaca-iex", "QQQ", "1Day")
+            assert n == 6, f"reconciled {n} days, wanted 6"
+            assert cov.state_of(con, "alpaca-iex", "bars", "QQQ", "1Day",
+                                "2026-01-02") == "have"
+            # It may ONLY ever write `have`: inventing an `absent` from local
+            # silence would blacklist a day no provider was ever asked about.
+            assert con.execute(
+                "SELECT COUNT(*) FROM data_cover WHERE state!='have'").fetchone()[0] == 0
+        finally:
+            con.close()
+
+    # --- AND THE LOOP CALLS IT. A method nothing invokes is the exact state
+    # this whole check exists to catch: planner, endpoint and settings all
+    # present, and no background work happening at all.
+    src = (CODE / "backend" / "recorder.py").read_text(encoding="utf-8")
+    loop = member_body(src, "    def _loop(")
+    # The GUARD, not the name: `if False:` left "run_backfill" sitting in the
+    # dead branch and sailed past an `in` check — the same substring trap
+    # this suite keeps re-learning.
+    assert "self._last_backfill > BACKFILL_EVERY" in loop, (
+        "the recorder loop's backfill schedule is gone, so the call below it "
+        "is unreachable — every piece present and no work happening, which "
+        "is exactly the state this shipped in")
+    assert "run_backfill" in loop, (
+        "the recorder loop no longer calls run_backfill — every piece would "
+        "be present and the feature still absent, which is how this shipped "
+        "the first time")
+    for wiring, name in ((CODE / "backend" / "main.py", "the interactive app"),
+                         (CODE / "backend" / "recorder_main.py", "the unattended recorder")):
+        assert "settings_provider" in wiring.read_text(encoding="utf-8") \
+            or "settings_for" in wiring.read_text(encoding="utf-8") \
+            or "system_settings_provider" in wiring.read_text(encoding="utf-8"), \
+            f"{name} does not give the recorder a way to read the setting"
+
+
 @check("addresses: ONE translation, and every page round-trips through it")
 def _address_translation():
     """A .gs address must mean the same thing wherever it is opened.

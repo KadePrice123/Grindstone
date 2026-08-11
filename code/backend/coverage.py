@@ -152,6 +152,37 @@ def summary(con: sqlite3.Connection, kind: str, symbol: str,
     }
 
 
+def reconcile_bars(con: sqlite3.Connection, provider: str, symbol: str,
+                   timeframe: str) -> int:
+    """Tell coverage about rows that are ALREADY on disk.
+
+    Without this the first backfill re-fetches everything the live recorder
+    has been collecting for weeks: coverage starts empty, an empty coverage
+    means "never asked", and "never asked" is retryable. On this machine that
+    was two thousand bars and eighty thousand chain rows already recorded
+    against zero coverage rows.
+
+    Only ever writes `have`, so it can never manufacture a false `absent` —
+    a day missing from rec_bars stays unknown and the backfill goes and asks,
+    which is exactly right.
+
+    Idempotent, and cheap: one GROUP BY over the dates already stored.
+    """
+    rows = con.execute(
+        "SELECT DISTINCT substr(ts, 1, 10) AS d FROM rec_bars"
+        " WHERE symbol=? AND timeframe=?",
+        (symbol.upper(), timeframe)).fetchall()
+    n = 0
+    for r in rows:
+        day = r[0]
+        if not day:
+            continue
+        mark(con, provider, "bars", symbol, timeframe, day, "have", rows=1,
+             detail="reconciled from rows already recorded")
+        n += 1
+    return n
+
+
 def record_bar_days(con: sqlite3.Connection, provider: str, symbol: str,
                     timeframe: str, asked: Iterable[dt.date],
                     got_days: Iterable[str]) -> dict[str, int]:

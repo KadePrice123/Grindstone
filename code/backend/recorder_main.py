@@ -31,7 +31,9 @@ what captures overnight sessions, but it is not a service.
 """
 from __future__ import annotations
 
+import json
 import signal
+import sqlite3
 import sys
 import time
 from typing import Any
@@ -46,6 +48,37 @@ from .recorder import Recorder
 #: API — and the toggle that removes the scheduled task must also be able to
 #: stop the run already in flight.
 STOP_FLAG = "recorder.stop"
+
+
+def system_settings_provider(user_id: int) -> dict[str, Any]:
+    """The user's settings, read straight from app.db.
+
+    A settings row is NOT a secret: no DEK, no session, no `security` import
+    — this process must never be able to unwrap the vault, and reading a
+    boolean does not. Opened read-only per call and closed, because the app
+    may be writing the same file.
+    """
+    try:
+        path = data_dir() / "app.db"
+        if not path.is_file():
+            return {}
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT key, value FROM user_settings WHERE user_id=?",
+                (user_id,)).fetchall()
+        finally:
+            con.close()
+        out: dict[str, Any] = {}
+        for k, v in rows:
+            try:
+                out[k] = json.loads(v)
+            except (TypeError, ValueError):
+                out[k] = v
+        return out
+    except Exception:  # noqa: BLE001 — never kill the recorder over a setting
+        LOG.exception("unattended recorder: settings unreadable")
+        return {}
 
 
 def system_creds_provider(user_id: int) -> dict[str, str] | None:
@@ -98,7 +131,7 @@ def main() -> int:
         return 0  # clean: nothing to do until a human acts
 
     con = connect_market()
-    rec = Recorder(con, system_creds_provider)
+    rec = Recorder(con, system_creds_provider, system_settings_provider)
     rec.start()
     LOG.info("unattended recorder running")
 

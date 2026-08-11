@@ -106,7 +106,8 @@ def main() -> int:
             n = state.backtests.sweep_orphans()
             if n:
                 LOG.info("marked %d interrupted backtest run(s)", n)
-        state.recorder = Recorder(connect_market(), state.creds_for)
+        state.recorder = Recorder(connect_market(), state.creds_for,
+                                  state.settings_for)
         state.recorder.start()
     else:
         LOG.info("an unattended recorder owns this data directory — the app "

@@ -102,6 +102,20 @@ class State:
         with self.db() as db:
             return market.alpaca_creds_for(db, user_id, snap.dek)
 
+    def settings_for(self, user_id: int) -> dict[str, Any]:
+        """This user's settings, for the recorder's backfill gate.
+
+        Needs no session and no DEK: settings are not secrets. Kept beside
+        creds_for so the recorder receives both the same way — injected,
+        never imported — and returns {} rather than raising, because a
+        settings read must not be able to kill the recording loop."""
+        try:
+            with self.db() as db:
+                return settings_mod.get_all(db, user_id)
+        except Exception:  # noqa: BLE001 — the loop outranks this answer
+            LOG.exception("settings unavailable for user %s", user_id)
+            return {}
+
     def system_creds(self) -> dict[str, str] | None:
         """The unattended recorder's credentials, or None.
 
