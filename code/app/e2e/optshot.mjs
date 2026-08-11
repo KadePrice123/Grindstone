@@ -696,6 +696,90 @@ try {
     return JSON.stringify({ unit: c?.getAttribute('data-unit'), peak: c?.getAttribute('data-peak') })
   })()`))
   await shot(opt, 'opt-history-usd.png')
+
+  // ---- THE EXIT VIEW: click a node, follow that trade out -----------------
+  // lightweight-charts only hears TRUSTED input (its click derives from the
+  // crosshair, which a synthetic DOM event never moves — run.mjs learned
+  // this on the draw tools). So: stream mouseMoved onto the history canvas,
+  // then press, then read back the data-exit-* attributes the page stamps.
+  // The x is fanned across the chart until a click lands within the page's
+  // 14px node tolerance — where the nodes are depends on the data.
+  await setUnit('pct')
+  await sleep(1500)
+  const histRect = () => opt.eval(`(() => {
+    const c = document.querySelector('.opt-card canvas')
+    if (!c) return null
+    const r = c.getBoundingClientRect()
+    return JSON.stringify({ x: r.x, y: r.y, w: r.width, h: r.height })
+  })()`)
+  const exitState = () => opt.eval(`(() => {
+    const e = document.querySelector('.opt-exit')
+    return JSON.stringify({
+      picked: e?.getAttribute('data-exit-picked') ?? null,
+      points: e?.getAttribute('data-exit-points') ?? null,
+      pnl: e?.getAttribute('data-exit-pnl') ?? null,
+      canvases: document.querySelectorAll('.opt-exit canvas').length,
+      caption: (e?.querySelector('.opt-note')?.textContent ?? '').slice(0, 220),
+    })
+  })()`)
+  let clicked = false
+  for (const fx of [0.55, 0.45, 0.65, 0.35, 0.75, 0.5, 0.6, 0.4, 0.7, 0.3]) {
+    const rj = await histRect()
+    if (!rj) break
+    const r = JSON.parse(rj)
+    const x = Math.round(r.x + r.w * fx)
+    const y = Math.round(r.y + r.h * 0.5)
+    // Crosshair first (three strides, the draw tools' own pattern), then press.
+    for (const dx of [-24, -9, 0]) {
+      await opt.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + dx, y })
+      await sleep(30)
+    }
+    await opt.send('Input.dispatchMouseEvent',
+      { type: 'mousePressed', x, y, button: 'left', clickCount: 1 })
+    await opt.send('Input.dispatchMouseEvent',
+      { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 })
+    await sleep(1200)
+    const st = JSON.parse(await exitState())
+    if (st.picked) {
+      clicked = true
+      // Wait for the fetch to RESOLVE, not merely for the panel to exist:
+      // the loading placeholder is also a non-empty .lc-empty, so accepting
+      // any text made this wait a tautology that could screenshot the
+      // pre-fetch state and log a working feature as broken.
+      await waitFor(() => opt.eval(
+        `(() => {
+           if (document.querySelectorAll('.opt-exit canvas').length >= 1) return true
+           const t = document.querySelector('.opt-exit .lc-empty')?.textContent ?? ''
+           return t !== '' && !t.startsWith('loading')
+         })()`),
+        'the exit sub-chart or its settled reason', 15000)
+      await sleep(1500)
+      break
+    }
+  }
+  const finalExit = await exitState()
+  console.log('EXIT PROOF:', JSON.stringify({
+    node_clicked: clicked,
+    ...JSON.parse(finalExit),
+    // The caption must NAME the denominator — an unlabelled % here would be
+    // the two-panels-disagree bug reborn one level down.
+    names_denominator: (await opt.eval(
+      `(document.querySelector('.opt-exit .opt-note')?.textContent ?? '')
+         .includes('buying power')`)),
+  }))
+  await shot(opt, 'opt-history-exit.png')
+  // The CLOSE control dismisses the view. (Re-clicking the node toggles too,
+  // but through the same setter — and re-landing a canvas click is a
+  // crosshair race this harness kept losing, while a DOM button is not.)
+  if (clicked) {
+    const was = JSON.parse(finalExit).picked
+    await opt.eval(`[...document.querySelectorAll('.opt-exit-head button')]
+      .find((b) => b.textContent === 'close')?.click()`)
+    await sleep(800)
+    const now = JSON.parse(await exitState())
+    console.log('EXIT CLOSE:', JSON.stringify({
+      was, now: now.picked, closed: now.picked === null }))
+  }
 } catch (e) {
   console.log('FAILED:', e.message)
 } finally {

@@ -6138,6 +6138,11 @@ def _options_chain():
                 assert sr["available"] is True and sr["mode"] == "delta", sr
                 days = {r["date"]: r for r in sr["rows"]}
                 assert days["2026-07-01"]["used_dte"] == 21, days["2026-07-01"]
+                # Every node carries its contract's IDENTITY verbatim — the
+                # exit view reconstructs (expiration, strike, right) from a
+                # clicked node, and re-deriving the date from arithmetic was
+                # exactly the kind of implicit coupling this file refuses.
+                assert days["2026-07-01"]["used_expiration"] == "2026-07-22", days["2026-07-01"]
                 assert abs(days["2026-07-02"]["used_delta"]) == 0.29, days["2026-07-02"]
                 # the strike is an OUTPUT here, not a filter — it must differ by day
                 assert days["2026-07-01"]["used_strike"] != days["2026-07-02"]["used_strike"]
@@ -7125,6 +7130,61 @@ ok('a flat surface shades nothing rather than painting one cell best',
 ok('credit is the gain token, debit the loss token',
    og.sideInk('short') === 'var(--gain)' && og.sideInk('long') === 'var(--loss)', '')
 
+// ---- THE EXIT VIEW: a clicked node, followed forward ----------------------
+// Kade: click a node, see the buy-back price vs the credit received and the
+// P&L as % of the buying-power effect. Known-answer: sell at 4.00 on a 100
+// strike, buy back at 1.50 -> +2.5% of strike. Signs, gaps, entry refusal and
+// archive truncation are all pinned because each is a way to quietly lie.
+{
+  // (payoff's own `near` is declared below this block — TDZ — so: local)
+  const near = (a, b, tol = 1e-6) => typeof a === 'number' && Math.abs(a - b) < tol
+  const life = [
+    { date: '2026-05-01', mid: 4.00, dte: 220 },
+    { date: '2026-05-04', mid: 5.20, dte: 217 },  // moved against the short
+    { date: '2026-05-05', mid: null, dte: 216 },  // one-sided day: a GAP
+    { date: '2026-05-06', mid: 1.50, dte: 215 },  // collapsed our way
+  ]
+  const ex = og.exitSeries(life, '2026-05-01', 'short', 100)
+  ok('the entry is the clicked day at its own mid',
+     ex.entry.date === '2026-05-01' && near(ex.entry.premium, 4.00), JSON.stringify(ex.entry))
+  ok('the exit view starts AT the entry, P&L zero',
+     ex.points[0].date === '2026-05-01' && near(ex.points[0].pnlPct, 0), JSON.stringify(ex.points[0]))
+  ok('a short losing ground shows NEGATIVE P&L: credit 4.00, buy-back 5.20 -> -1.2% of strike',
+     near(ex.points[1].pnlPct, -1.2), ex.points[1].pnlPct)
+  ok('a one-sided day is a gap in BOTH lines, never a zero',
+     ex.points[2].mark === null && ex.points[2].pnlPct === null, JSON.stringify(ex.points[2]))
+  ok('the collapse pays: credit 4.00, buy-back 1.50 -> +2.5% of strike',
+     near(ex.points[3].pnlPct, 2.5), ex.points[3].pnlPct)
+  ok('latest skips the gap and lands on the last PRICED day',
+     ex.latest.date === '2026-05-06' && near(ex.latest.mark, 1.50), JSON.stringify(ex.latest))
+  ok('days before entry do not leak in', ex.points.length === 4, ex.points.length)
+
+  // The LONG side is the same trade mirrored, not a separate formula.
+  const exl = og.exitSeries(life, '2026-05-01', 'long', 100)
+  ok('a long flips the sign exactly: paid 4.00, sells 5.20 -> +1.2%',
+     near(exl.points[1].pnlPct, 1.2), exl.points[1].pnlPct)
+  ok('and mirrors the collapse: paid 4.00, sells 1.50 -> -2.5%',
+     near(exl.points[3].pnlPct, -2.5), exl.points[3].pnlPct)
+
+  // Entering mid-life is entering on THAT day's price, not the first day's.
+  const late = og.exitSeries(life, '2026-05-04', 'short', 100)
+  ok('a later node enters at its own premium (5.20), and the collapse pays 3.7%',
+     near(late.entry.premium, 5.20) && near(late.points[2].pnlPct, 3.7),
+     JSON.stringify(late.entry) + ' ' + late.points[2].pnlPct)
+
+  // Refusals: no honest entry price, no chart — never a made-up one.
+  ok('an entry on a one-sided day refuses',
+     og.exitSeries(life, '2026-05-05', 'short', 100) === null, '')
+  ok('an entry on a day the archive never had refuses',
+     og.exitSeries(life, '2026-04-30', 'short', 100) === null, '')
+  ok('a nonsense strike refuses', og.exitSeries(life, '2026-05-01', 'short', 0) === null, '')
+
+  // Truncation is VISIBLE: the last point carries its dte, so the page can
+  // say "the archive ends with 215d still to run" instead of a quiet flat.
+  ok('the last point knows how much life the archive left unrecorded',
+     ex.points[3].dte === 215, ex.points[3].dte)
+}
+
 // ---- PAYOFF: known-answer structures, checked against hand arithmetic -----
 const pf = await import('./src/renderer/src/payoff.ts')
 const PL = (side, right, strike, premium) => ({ side, right, strike, premium })
@@ -7400,7 +7460,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 159, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 173, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")

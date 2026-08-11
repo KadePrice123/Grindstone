@@ -226,6 +226,68 @@ export function annualYieldOn(
   return annualYield(mid, capitalFor(strike), sessions)
 }
 
+/** One day of a picked contract's exit view: what closing the position costs
+ *  and what that leaves you, from the entry day forward. */
+export interface ExitPoint {
+  date: string
+  /** Cost to close at mid, per share — null on one-sided days (a gap). */
+  mark: number | null
+  /** P&L as % of the capital the contract ties up (capitalFor: the strike —
+   *  the cash-secured buying-power effect, and the SAME denominator as the
+   *  heatmap, so this panel and that one can be read against each other). */
+  pnlPct: number | null
+  dte: number
+}
+
+export interface ExitSeries {
+  /** The opening trade, priced at the clicked day's mid. */
+  entry: { date: string; premium: number; dte: number }
+  points: ExitPoint[]
+  /** The most recent day with a two-sided market, or null if none followed. */
+  latest: { date: string; mark: number; pnlPct: number } | null
+}
+
+/** The exit view of one archived contract, from a clicked entry day.
+ *
+ *  Everything is per share (see capitalFor). SIGNS: for a short, entry premium
+ *  is CREDIT RECEIVED and the mark is the buy-back cost, so P&L per share is
+ *  credit − mark; a long flips it. The percentage divides by the strike — the
+ *  cash-secured buying-power effect — NOT by max loss or a margin model, for
+ *  capitalFor's own documented reasons.
+ *
+ *  Returns null when the entry day has no two-sided mid: a position that could
+ *  not have been opened at a real price has no honest P&L series, and the
+ *  caller reports that instead of charting from a made-up entry. Days after
+ *  entry with no mid stay as GAPS (null mark/pnlPct), same as every other
+ *  chart in this app — a missing quote is not a zero. */
+export function exitSeries(
+  rows: { date: string; mid: number | null; dte: number }[],
+  entryDate: string, side: LegSide, strike: number
+): ExitSeries | null {
+  const capital = capitalFor(strike)
+  if (capital === null) return null
+  const entry = rows.find((r) => r.date === entryDate)
+  if (!entry || entry.mid === null) return null
+  const premium = entry.mid
+  const points: ExitPoint[] = rows
+    .filter((r) => r.date >= entryDate)
+    .map((r) => {
+      const pnl = r.mid === null ? null
+        : side === 'short' ? premium - r.mid : r.mid - premium
+      return {
+        date: r.date,
+        mark: r.mid,
+        pnlPct: pnl === null ? null : (pnl / capital) * 100,
+        dte: r.dte,
+      }
+    })
+  let latest: ExitSeries['latest'] = null
+  for (const p of points) {
+    if (p.mark !== null && p.pnlPct !== null) latest = { date: p.date, mark: p.mark, pnlPct: p.pnlPct }
+  }
+  return { entry: { date: entryDate, premium, dte: entry.dte }, points, latest }
+}
+
 /** Build the grid from whatever contracts the filter returned.
  *
  *  Sparse on purpose: the endpoint returns the contracts inside the leg's

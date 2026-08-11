@@ -31,10 +31,10 @@ import {
 } from '../components/ChartDraw'
 import { OptHeatmap } from '../components/OptHeatmap'
 import { buildChainPayload, buildContractPayload, grab, announce, occAt } from '../datapad'
-import { HistoryPanel, TermPanel, type TermPoint } from '../components/OptCharts'
+import { ExitPanel, HistoryPanel, TermPanel, type TermPoint } from '../components/OptCharts'
 import {
-  annualise, annualYieldOn, capitalFor, midOf, tradingDaysTo, dteBetween,
-  type GridContract,
+  annualise, annualYieldOn, capitalFor, exitSeries, midOf, tradingDaysTo, dteBetween,
+  type GridContract, type LegSide,
 } from '../optgrid'
 import { analyse, fmtExtreme, fmtNet, returnOnRisk, type PayoffLeg } from '../payoff'
 
@@ -71,6 +71,19 @@ interface SeriesRow {
   used_dte: number
   used_strike: number
   used_delta?: number | null
+  /** The matched contract's own expiration, verbatim from the archive — what
+   *  makes a node CLICKABLE as a trade: (expiration, strike, right) is the
+   *  exact contract whose exit path the sub-chart follows. */
+  used_expiration?: string
+}
+
+/** One archived contract's daily life, from /options/history — the exit
+ *  view's raw material once a node is picked. */
+interface ContractHistResponse {
+  available: boolean
+  rows: { date: string; dte: number; mid: number | null; bid: number | null; ask: number | null }[]
+  source: string
+  reason?: string
 }
 
 interface SeriesResponse {
@@ -89,7 +102,28 @@ interface SeriesResponse {
   }
 }
 
-type Sel = { occ: string; strike: number; expiration: string; right: 'P' | 'C'; delta?: number | null }
+type Sel = {
+  occ: string; strike: number; expiration: string; right: 'P' | 'C'
+  delta?: number | null
+  /** The side of the leg this contract was chosen FROM, captured at choose
+   *  time — same-right spreads have both sides of one right on screen, and
+   *  any after-the-fact lookup by right returns whichever leg happens to be
+   *  first. Absent for URL-driven selections, which never saw a leg. */
+  side?: LegSide
+}
+
+/** A picked node's trade, FROZEN at click time. The series under the chart
+ *  re-matches on every refetch (the live delta drifts on the 60s chain tick),
+ *  so the same date can map to a different contract a minute later — and an
+ *  exit view keyed by date alone would silently swap trades. This is the
+ *  contract that was actually clicked, held until the view closes. */
+type ExitPick = {
+  date: string
+  expiration: string
+  strike: number
+  right: 'P' | 'C'
+  side: LegSide
+}
 
 /** The history chart's display unit.
  *
@@ -213,6 +247,11 @@ export function OptPage({
   const [term, setTerm] = useState<Contract[] | null>(null)
   const [series, setSeries] = useState<SeriesResponse | null>(null)
   const [bars, setBars] = useState<{ ts: string; close: number }[]>([])
+  // The EXIT VIEW: a clicked node on the history line, and that contract's
+  // archived life from the click forward. The pick freezes the node's full
+  // contract identity — see ExitPick for why a bare date is not enough.
+  const [exitPick, setExitPick] = useState<ExitPick | null>(null)
+  const [exitHist, setExitHist] = useState<ContractHistResponse | null>(null)
 
   const today = new Date().toISOString().slice(0, 10)
   const key = `${symbol}|1Day`
@@ -417,6 +456,94 @@ export function OptPage({
     }
   }, [symbol, sel?.occ, sel?.strike, sel?.expiration, sel?.right, // eslint-disable-line react-hooks/exhaustive-deps
       today, match, selDelta, focusNonce])
+
+  // ---- the EXIT VIEW: one node, followed forward -------------------------
+  // A new selection or match mode is a NEW SERIES, and a pick from the old
+  // one no longer belongs on screen. Deliberately NOT cleared on the series'
+  // own refetches (focus, delta drift) — the pick is frozen to a contract,
+  // so a re-match under it cannot corrupt the view, only de-anchor the
+  // marker, and the caption owns that case.
+  useEffect(() => {
+    setExitPick(null)
+    setExitHist(null)
+  }, [symbol, sel?.occ, match])
+
+  // The side a click freezes into the pick: the choose-time capture first
+  // (the only unambiguous source — same-right spreads have both sides on
+  // screen), then the leg whose fetched window actually contains this
+  // contract, then the persisted pick, then the right, then short — the
+  // page's whole framing is credit and the header already reads SELL.
+  const exitSide: LegSide =
+    sel?.side ??
+    visible.find(({ leg }) =>
+      (byLeg[leg.id]?.contracts ?? []).some((c) => c.occ_symbol === sel?.occ))?.r.side ??
+    visible.find(({ leg }) => leg.pick === sel?.occ)?.r.side ??
+    visible.find(({ leg }) => leg.right === sel?.right)?.r.side ?? 'short'
+
+  // A node was clicked: freeze that node's contract, or close on a re-click.
+  // Nodes without an identity (a series from before used_expiration existed)
+  // are not pickable — a view that cannot name its contract cannot be honest.
+  const pickNode = (d: string) => {
+    setExitPick((cur) => {
+      if (cur?.date === d) return null
+      const row = series?.rows?.find((r) => r.date === d)
+      if (!row?.used_expiration || !sel) return cur
+      return {
+        date: d,
+        expiration: row.used_expiration,
+        strike: row.used_strike,
+        right: sel.right,
+        side: exitSide,
+      }
+    })
+  }
+
+  // The current series' row at the picked date, for ANCHOR CHECKING only —
+  // never for pricing. When the line has re-matched this date to a different
+  // contract, the marker comes off and the caption says so; the sub-chart
+  // keeps showing the trade that was actually clicked.
+  const exitAnchored = useMemo(() => {
+    if (!exitPick) return false
+    const row = series?.rows?.find((r) => r.date === exitPick.date)
+    return !!row && row.used_expiration === exitPick.expiration &&
+      row.used_strike === exitPick.strike
+  }, [series, exitPick])
+
+  // The picked contract's archived life, fetched by its FROZEN identity —
+  // /options/history is the same table the series matched from, so the entry
+  // day is guaranteed to be in here. What is NOT guaranteed is that the life
+  // extends past it (the archive window may end first); the caption owns that.
+  useEffect(() => {
+    if (!exitPick) {
+      setExitHist(null)
+      return
+    }
+    let alive = true
+    setExitHist(null) // a new pick must never render against the old life
+    api<ContractHistResponse>(
+      'GET',
+      `/api/symbols/${encodeURIComponent(symbol)}/options/history` +
+        `?expiration=${exitPick.expiration}` +
+        `&strike=${exitPick.strike.toFixed(4)}&right=${exitPick.right}`
+    )
+      .then((r) => alive && setExitHist(r))
+      .catch((e) => alive && setExitHist({
+        available: false, rows: [], source: 'none', reason: staleOr(e),
+      }))
+    return () => {
+      alive = false
+    }
+  }, [exitPick, symbol])
+
+  // The exit series itself — pure arithmetic in optgrid, gate-probed there.
+  // Everything it needs rides on the frozen pick, so a series re-match under
+  // the chart cannot change one number here.
+  const exitData = useMemo(() => {
+    if (!exitPick || !exitHist?.available) return null
+    return exitSeries(
+      exitHist.rows.map((r) => ({ date: r.date, mid: r.mid, dte: r.dte })),
+      exitPick.date, exitPick.side, exitPick.strike)
+  }, [exitHist, exitPick])
 
   // The underlying, for the history view's indicator only: past closes share
   // a timeline with the contract's past prices. (On the term structure the x
@@ -761,6 +888,8 @@ export function OptPage({
                       avgLabel={`avg ${avgWin}`}
                       refPrice={liveShown}
                       height={420}
+                      picked={exitAnchored && exitPick ? exitPick.date : null}
+                      onPick={pickNode}
                     />
                     </div>
                   ) : (
@@ -773,7 +902,56 @@ export function OptPage({
                       <span className="loss">{symbol} price history unavailable: {barsErr} · </span>
                     ) : null}
                     {series?.available && sel ? seriesCaption(series, sel, symbol, today, hist, liveShown, unit, match) : null}
+                    {series?.available && !exitPick
+                      ? ' · click a node to follow that trade’s exit'
+                      : null}
                   </div>
+                  {exitPick ? (
+                    <div
+                      className="opt-exit"
+                      data-exit-picked={exitPick.date}
+                      data-exit-points={exitData?.points.length ?? 0}
+                      data-exit-pnl={exitData?.latest ? exitData.latest.pnlPct.toFixed(2) : ''}
+                    >
+                      <div className="opt-exit-head">
+                        <span className="dim subtle">
+                          Exit view · {fmtStrike(exitPick.strike)}{' '}
+                          {exitPick.right === 'P' ? 'put' : 'call'} · {exitPick.expiration}
+                        </span>
+                        {/* An explicit close, because re-clicking the node is
+                            not always possible: a failed series refetch
+                            unmounts the chart the node lives on. */}
+                        <button type="button" className="seg-btn"
+                          onClick={() => setExitPick(null)}>
+                          close
+                        </button>
+                      </div>
+                      {exitData ? (
+                        <>
+                          <ExitPanel
+                            points={exitData.points}
+                            premium={exitData.entry.premium}
+                            side={exitPick.side}
+                            height={240}
+                          />
+                          <div className="dim subtle opt-note">
+                            {exitCaption(exitData, exitPick)}
+                            {!exitAnchored
+                              ? ' · the line above has since re-matched this date to a different contract — this view stays on the one you clicked'
+                              : null}
+                          </div>
+                        </>
+                      ) : (
+                        <div className="dim subtle lc-empty">
+                          {exitHist === null
+                            ? 'loading the contract’s life…'
+                            : exitHist.available === false
+                              ? exitHist.reason ?? 'no archived life for this contract'
+                              : 'the entry day has no two-sided market in the archive, so there is no honest entry price to measure from'}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                 </>
               )}
             </div>
@@ -814,6 +992,10 @@ export function OptPage({
                   occ: c.occ_symbol, strike: c.strike,
                   expiration: c.expiration, right: c.right,
                   delta: c.delta ?? null,
+                  // The leg this cell belongs to is only knowable HERE — the
+                  // exit view's sign convention hangs on it, and a lookup by
+                  // right later cannot tell the two legs of a vertical apart.
+                  side: r.side,
                 })
               }
               return (
@@ -1001,6 +1183,46 @@ function seriesCaption(
       `${Math.max(...strikes).toFixed(0)})` : '') +
     `, so its moneyness walks as ${symbol} moves · matched at ${range} · ` +
     `each node is one archived contract · ${symbol} BLUE on the left axis`
+  )
+}
+
+/** Strikes print the way the chain reads them: 82.5 is a different listed
+ *  contract from 83, so a caption that rounds renames the trade. The heatmap's
+ *  own strike-column idiom. */
+const fmtStrike = (k: number): string => k.toFixed(k % 1 === 0 ? 0 : 1)
+
+/** The exit view's caption: the numbers on the sub-chart, in words, with the
+ *  denominator named. Owns the archive-truncation honesty — a life the archive
+ *  cut short must say so, or a flat line at the end reads as "the trade went
+ *  quiet" when the truth is "the data ran out". */
+function exitCaption(
+  data: NonNullable<ReturnType<typeof exitSeries>>,
+  pick: ExitPick
+): string {
+  const e = data.entry
+  const side = pick.side
+  const what = `the ${fmtStrike(pick.strike)} of ${pick.expiration}`
+  const opened = side === 'short'
+    ? `sold ${what} on ${e.date} for ${e.premium.toFixed(2)} credit`
+    : `bought ${what} on ${e.date} for ${e.premium.toFixed(2)}`
+  // `latest` always exists (the entry day is itself a priced point), so "has
+  // anything traded SINCE entry" is the date comparison, not a null check.
+  const nowPart = data.latest && data.latest.date !== e.date
+    ? (side === 'short'
+        ? `buy-back ${data.latest.mark.toFixed(2)} as of ${data.latest.date}`
+        : `sells for ${data.latest.mark.toFixed(2)} as of ${data.latest.date}`) +
+      ` → P&L ${data.latest.pnlPct >= 0 ? '+' : ''}${data.latest.pnlPct.toFixed(2)}%`
+    : data.points.length > 1
+      ? 'no two-sided market since entry — the entry price is the only print'
+      : 'entered on the archive’s last recorded day — nothing to follow yet'
+  const lastPt = data.points[data.points.length - 1]
+  const tail = lastPt && lastPt.dte > 0
+    ? ` · the archive ends ${lastPt.date} with ${lastPt.dte}d still to run — the tail is missing data, not a quiet trade`
+    : ' · followed to expiry'
+  return (
+    `EXIT VIEW: ${opened} · ${nowPart} · % is per share against the strike ` +
+    `(cash-secured buying power — the heatmap’s own denominator) · gaps are ` +
+    `one-sided days${tail} · click the node again to close`
   )
 }
 

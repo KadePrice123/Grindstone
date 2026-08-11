@@ -331,6 +331,12 @@ def series_history(underlying: str, right: str, dte: int,
             "spread": round(ask - bid, 4) if two_sided else None,
             "used_dte": d, "used_strike": r["strike"],
             "used_delta": r["delta"],
+            # The matched contract's IDENTITY, verbatim. Every node on the
+            # history chart is one archived contract, and clicking one to
+            # follow its exit needs (expiration, strike, right) exactly — not
+            # re-derived client-side from date + used_dte, which is the same
+            # number today but only by arithmetic nobody is checking.
+            "used_expiration": r["expiration"],
             "iv": r["iv"], "delta": r["delta"],
         })
     return {"available": True, "rows": out,

@@ -620,6 +620,14 @@
   font-size: 10px;
   margin: -4px 0 12px 46px;
 }
+/* The exit view's header row: what the sub-chart is showing, and the one
+   dismissal that survives the primary chart unmounting. */
+.opt-exit-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 4px 0 6px 46px;
+}
 .lc-empty {
   padding: 18px 0;
 }

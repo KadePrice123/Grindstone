@@ -25,9 +25,13 @@ import {
   LineSeries,
   LineStyle,
   createChart,
+  createSeriesMarkers,
   type IChartApi,
+  type SeriesMarker,
+  type Time,
   type UTCTimestamp,
 } from 'lightweight-charts'
+import type { ExitPoint } from '../optgrid'
 
 // The candle chart's own palette (Chart.tsx) — one canvas, one theme.
 const C = {
@@ -125,6 +129,7 @@ export interface HistPoint {
  */
 export function HistoryPanel({
   rows, under, underLabel, avg, avgLabel, refPrice = null, pct = false, height = 380,
+  picked = null, onPick,
 }: {
   rows: HistPoint[]
   under: { date: string; close: number }[]
@@ -142,7 +147,26 @@ export function HistoryPanel({
    *  never disagree with the numbers printed on it. */
   pct?: boolean
   height?: number
+  /** The node whose exit view is open, marked ON the line so the sub-chart
+   *  below is visibly anchored to the point it explains. */
+  picked?: string | null
+  /** A NODE was clicked — every node is one archived contract, and clicking
+   *  it asks "and what happened to that trade next". Fires with the node's
+   *  date; the page owns what that means. */
+  onPick?: (date: string) => void
 }) {
+  // The callback lives in a ref so a fresh closure per render does not sit in
+  // the deps array tearing the chart down on every parent render — and the
+  // MARKER is applied through refs for the same reason, one level worse: with
+  // `picked` in the deps, the click that picks a node rebuilt the chart, and
+  // the rebuild's fitContent() threw away the user's pan and zoom at the
+  // exact moment they were looking at a point they had navigated to.
+  const onPickRef = useRef(onPick)
+  onPickRef.current = onPick
+  const pickedRef = useRef(picked)
+  pickedRef.current = picked
+  const markersRef = useRef<{ setMarkers: (m: SeriesMarker<Time>[]) => void } | null>(null)
+  const nodesRef = useRef<Set<string>>(new Set())
   const box = usePanel((chart) => {
     const t = (d: string) => (Date.parse(d + 'T00:00:00Z') / 1000) as UTCTimestamp
 
@@ -204,6 +228,35 @@ export function HistoryPanel({
       return v === undefined || v === null ? { time: t(d) } : { time: t(d), value: v }
     }))
 
+    // ---- picking a node: click near it, get its exit view -------------------
+    // The click lands on whatever SPINE date the crosshair snapped to, which
+    // on a sparse series is almost never a node — so the handler finds the
+    // nearest NODE by pixel distance instead, within a tolerance wide enough
+    // to be clickable and narrow enough not to teleport across the chart.
+    // (14px ≈ the draw engine's own 8px hit tolerance plus the node radius.)
+    const nodeDates = rows.filter((r) => r.value !== null).map((r) => r.date)
+    nodesRef.current = new Set(nodeDates)
+    if (onPickRef.current !== undefined && nodeDates.length > 0) {
+      chart.subscribeClick((param) => {
+        if (!param.point) return
+        let bestDate: string | null = null
+        let bestDx = 14
+        for (const d of nodeDates) {
+          const x = chart.timeScale().timeToCoordinate(t(d))
+          if (x === null) continue
+          const dx = Math.abs(x - param.point.x)
+          if (dx < bestDx) { bestDx = dx; bestDate = d }
+        }
+        if (bestDate !== null) onPickRef.current?.(bestDate)
+      })
+    }
+    // The markers PRIMITIVE is created with the chart; which marker it shows
+    // is applied outside the build (see the effect below), so picking a node
+    // never rebuilds the chart under the click.
+    try {
+      markersRef.current = createSeriesMarkers(mid, markerFor(pickedRef.current, nodesRef.current))
+    } catch { /* markers are decoration; the chart stands without them */ }
+
     if (avg && avg.length > 0) {
       const a = chart.addSeries(LineSeries, {
         color: C.text,
@@ -233,6 +286,113 @@ export function HistoryPanel({
       })
     }
   }, [rows, under, underLabel, avg, avgLabel, refPrice, pct, height], height)
+  // The picked marker, applied WITHOUT a rebuild: setMarkers on the live
+  // primitive. Rebuilds re-seed it from pickedRef inside build, so the two
+  // paths cannot disagree about which node is marked.
+  useEffect(() => {
+    try {
+      markersRef.current?.setMarkers(markerFor(picked, nodesRef.current))
+    } catch { /* chart torn down mid-update; the rebuild will re-seed */ }
+  }, [picked])
+  return <div ref={box} style={{ height }} />
+}
+
+/** The entry marker for a picked node, or none — only a date that IS a node
+ *  gets marked, so a stale pick cannot pin an arrow to empty whitespace. */
+function markerFor(picked: string | null | undefined, nodes: Set<string>): SeriesMarker<Time>[] {
+  if (!picked || !nodes.has(picked)) return []
+  return [{
+    time: (Date.parse(picked + 'T00:00:00Z') / 1000) as UTCTimestamp,
+    position: 'belowBar',
+    shape: 'arrowUp',
+    color: C.up,
+    text: 'entry',
+  }]
+}
+
+// ---------------------------------------------------------------------------
+
+/** The exit view of one picked node: what closing that trade has cost, day by
+ *  day since entry, against the premium it opened at.
+ *
+ *  TWO AXES, TWO QUESTIONS, one timeline. The right axis is dollars: the mark
+ *  (cost to close at mid) against a dashed line at the entry premium — cross
+ *  below the dash and a short is winning. The left axis is P&L as % of the
+ *  strike capital (capitalFor: the cash-secured buying-power effect, the
+ *  heatmap's own denominator), with a dotted zero line — the same story
+ *  normalised, so two picks at different strikes compare honestly.
+ *
+ *  Nodes on both lines because each day is one archived quote; gaps are
+ *  one-sided days, drawn as gaps for the same reason every other chart here
+ *  draws them that way. */
+export function ExitPanel({
+  points, premium, side, height = 240,
+}: {
+  points: ExitPoint[]
+  /** Entry premium per share — credit received (short) or debit paid (long). */
+  premium: number
+  side: 'short' | 'long'
+  height?: number
+}) {
+  const box = usePanel((chart) => {
+    const t = (d: string) => (Date.parse(d + 'T00:00:00Z') / 1000) as UTCTimestamp
+
+    // P&L %, the left axis — the number Kade actually asked for.
+    const pnl = chart.addSeries(LineSeries, {
+      color: C.up,
+      lineWidth: 2,
+      priceScaleId: 'left',
+      title: 'P&L',
+      priceLineVisible: false,
+      lastValueVisible: true,
+      pointMarkersVisible: true,
+      pointMarkersRadius: 2,
+      priceFormat: {
+        type: 'custom',
+        formatter: (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`,
+        minMove: 0.01,
+      },
+    })
+    pnl.setData(points.map((p) =>
+      p.pnlPct === null ? { time: t(p.date) } : { time: t(p.date), value: p.pnlPct }))
+    pnl.createPriceLine({
+      price: 0,
+      color: C.text,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dotted,
+      axisLabelVisible: false,
+      title: '',
+    })
+    chart.priceScale('left').applyOptions({
+      visible: true,
+      borderColor: C.grid,
+      scaleMargins: { top: 0.12, bottom: 0.12 },
+    })
+
+    // The mark, the right axis: what closing actually costs, in dollars.
+    const mark = chart.addSeries(LineSeries, {
+      color: C.accent,
+      lineWidth: 2,
+      title: side === 'short' ? 'buy-back' : 'sell',
+      priceLineVisible: false,
+      lastValueVisible: true,
+      pointMarkersVisible: true,
+      pointMarkersRadius: 2,
+      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+    })
+    mark.setData(points.map((p) =>
+      p.mark === null ? { time: t(p.date) } : { time: t(p.date), value: p.mark }))
+    // The entry premium as the standing reference: the level the whole panel
+    // is read against, labelled by which direction the money went.
+    mark.createPriceLine({
+      price: premium,
+      color: C.accent,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: side === 'short' ? 'credit' : 'cost',
+    })
+  }, [points, premium, side, height], height)
   return <div ref={box} style={{ height }} />
 }
 
