@@ -272,6 +272,9 @@ export function SymbolPage({
     const specs = placePreset(p, spot, new Date().toISOString().slice(0, 10))
     if (!specs) return
     draw.current?.addLegGroup(specs)
+    // Remembered ON THIS CHART, so reopening SPY comes back to the strategy
+    // you were working, and QQQ comes back to its own.
+    draw.current?.setPreset(key)
     setPanel('chain') // the readout must be visible when the zones land
   }, [])
 
@@ -440,6 +443,19 @@ export function SymbolPage({
   const legs = drawState?.legs ?? []
   const selLeg = drawState?.selectedLegs[0]
   const selLegResolved = selLeg ? legs.find((l) => l.id === selLeg.id) : undefined
+  const lastPreset = drawState?.preset ?? null
+
+  // OPENING THE CHAIN FRAMES THE FILTER BOX. The box is persisted with the
+  // chart, so it is already "where we last left it" — but persisted is not
+  // visible. Pan away, come back, open the chain, and you are reading rows
+  // for a filter somewhere off the right-hand edge. Only on the open edge:
+  // re-framing on every render would fight the scrolling the user is doing
+  // while reading the very rows this opened.
+  useEffect(() => {
+    if (panel !== 'chain') return
+    const t = setTimeout(() => draw.current?.revealLegs(), 60)
+    return () => clearTimeout(t)
+  }, [panel])
 
   // Whitespace for the future: keep the furthest zone edge reachable, plus
   // margin, quantized so small drags do not churn the visible range.
@@ -503,11 +519,15 @@ export function SymbolPage({
             <select
               className="seg-select"
               title="Strategy presets — place a whole options structure as zones"
-              value=""
+              // The chart's OWN last strategy, restored from its document, so
+              // the control says what you were doing here rather than
+              // resetting to a blank prompt on every visit. Re-choosing the
+              // same entry still fires: onChange would not, so the reset to
+              // '' below keeps every pick live.
+              value={lastPreset ?? ''}
               disabled={!legsEnabled}
               onChange={(e) => {
                 if (e.target.value) applyPreset(e.target.value)
-                e.target.value = ''
               }}
             >
               <option value="">{legsEnabled ? 'Preset…' : 'Preset (1D only)'}</option>

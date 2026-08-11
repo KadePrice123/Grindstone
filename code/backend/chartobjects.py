@@ -24,6 +24,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import math
+import re
 import sqlite3
 from typing import Any
 
@@ -398,9 +399,30 @@ def validate(doc: Any) -> dict[str, Any]:
             out_leg["hidden"] = True
         legs.append(out_leg)
 
+    # THE CHART'S OWN VIEW STATE. Kade: "every symbol has its own charting
+    # data, just like drawing a line just with the chains and strat presets."
+    # So the last strategy belongs HERE, in the per-symbol document, next to
+    # the drawings it places — not in a global setting that would make SPY
+    # and QQQ share one answer.
+    #
+    # NO DOC_VERSION BUMP, for the reason recorded above `hidden`: a bump
+    # makes get() return empty_doc(), and the next 400ms autosave then
+    # DELETES the row that still held the user's work. An optional key costs
+    # nothing — an older document simply lacks it.
+    view: dict[str, Any] = {}
+    raw_view = doc.get("view")
+    if isinstance(raw_view, dict):
+        preset = raw_view.get("preset")
+        # Bounded and charset-checked: it is a key from the preset registry,
+        # and it comes back from the database into a lookup.
+        if isinstance(preset, str) and re.fullmatch(r"[a-z0-9_-]{1,32}", preset):
+            view["preset"] = preset
+
     clean = {"version": DOC_VERSION, "drawings": drawings,
              "measures": measures, "pins": pins, "constraints": constraints,
              "legs": legs}
+    if view:
+        clean["view"] = view
     size = len(json.dumps(clean))
     if size > MAX_DOC_BYTES:
         _fail(f"chart document is {size} bytes, over the {MAX_DOC_BYTES} limit")

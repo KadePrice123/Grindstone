@@ -4309,6 +4309,42 @@ def _leg_editor():
     opt = m.group(1)
     assert "background" in opt and "color" in opt, opt
 
+    # --- THE LAST STRATEGY IS PER SYMBOL, and rides the chart document.
+    # Kade: "every symbol has its own charting data, just like drawing a line
+    # just with the chains and strat presets." A global setting would make
+    # SPY and QQQ share one answer.
+    sys.path.insert(0, str(CODE))
+    from backend import chartobjects as co
+    base = {"version": 1, "drawings": [], "measures": [], "pins": [],
+            "constraints": [], "legs": []}
+    assert "view" not in co.validate(dict(base)),         "an untouched document gained a view key — it would serialise "        "differently and mark every existing chart dirty exactly once"
+    got = co.validate(dict(base, view={"preset": "iron_condor"}))
+    assert got.get("view", {}).get("preset") == "iron_condor", got
+    # A preset key comes back out of the database into a registry lookup, so
+    # it is charset-checked like every other stored id.
+    for junk in ({"preset": "../etc/passwd"}, {"preset": "x" * 64},
+                 {"preset": 7}, "not-a-dict", []):
+        assert "view" not in co.validate(dict(base, view=junk)), junk
+
+    # AND THE VERSION MUST NOT MOVE. A bump makes get() return empty_doc(),
+    # and the next 400ms autosave then DELETES the row that still held the
+    # user's drawings — the reason `hidden` and `pick` were added the same
+    # way. This is the assertion that stops a future field taking the
+    # tempting route.
+    assert co.DOC_VERSION == 1, (
+        "chart DOC_VERSION moved. get() returns empty_doc() on a mismatch and "
+        "the next autosave deletes the user's work — optional keys, never a "
+        "bump, is why hidden/pick/view were all added without one")
+
+    # --- OPENING THE CHAIN FRAMES THE BOX. Persisted is not visible: the
+    # filter box rides the document, but a panned-away chart shows chain rows
+    # for a zone off the right-hand edge.
+    sym_src = (app / "pages" / "SymbolPage.tsx").read_text(encoding="utf-8")
+    assert "revealLegs" in sym_src and "panel !== 'chain'" in sym_src, (
+        "opening the chain no longer frames the leg zones — the rows would "
+        "describe a filter the user cannot see")
+    assert "setPreset" in sym_src and "drawState?.preset" in sym_src,         "the chart no longer remembers or restores its own last strategy"
+
 
 @check("component grab: a constrained line brings its full chain of objects")
 def _component_grab():

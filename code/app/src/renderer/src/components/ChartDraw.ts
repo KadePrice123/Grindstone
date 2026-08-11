@@ -712,6 +712,13 @@ export interface ChartDoc {
   pins: InspectPin[]
   constraints: Constraint[]
   legs?: OptionLeg[]
+  /** This chart's own view state — today just the last strategy placed on
+   *  it. Per-symbol by construction, because the document is: "every symbol
+   *  has its own charting data, just like drawing a line". Optional, and
+   *  added WITHOUT a version bump on purpose (see chartobjects.py): a bump
+   *  makes the backend hand back an empty document and the next autosave
+   *  deletes the user's work. */
+  view?: { preset?: string }
 }
 
 /** Persistence, INJECTED rather than imported.
@@ -768,6 +775,8 @@ export interface DrawState {
   selectedMeasures: Measure[]
   selectedPins: InspectPin[]
   selectedLegs: OptionLeg[]
+  /** The last strategy placed on this chart, restored from its document. */
+  preset: string | null
   /** EVERY selected id, whatever kind. This — not selection.length — is the
    *  honest "is anything selected". */
   selected: string[]
@@ -829,6 +838,7 @@ interface Bucket {
   pins: InspectPin[]
   constraints: Constraint[]
   legs: OptionLeg[]
+  view: { preset?: string }
 }
 
 const sessionStore = new Map<string, Bucket>()
@@ -836,7 +846,7 @@ const sessionStore = new Map<string, Bucket>()
 function bucketFor(key: string): Bucket {
   let b = sessionStore.get(key)
   if (!b) {
-    b = { drawings: [], measures: [], pins: [], constraints: [], legs: [] }
+    b = { drawings: [], measures: [], pins: [], constraints: [], legs: [], view: {} }
     sessionStore.set(key, b)
   }
   return b
@@ -881,6 +891,11 @@ const docOf = (b: Bucket): ChartDoc => ({
   pins: b.pins,
   constraints: b.constraints,
   legs: b.legs,
+  // Omitted entirely when empty, so an untouched chart serialises byte-for-
+  // byte as before — saveNow compares the serialisation to decide whether to
+  // write, and an always-present `view: {}` would make every existing chart
+  // look dirty exactly once.
+  ...(b.view.preset ? { view: { preset: b.view.preset } } : {}),
 })
 
 /** Move the id counter past everything we just loaded.
@@ -1996,6 +2011,7 @@ export class ChartDraw {
       selectedLegs: this.selected
         .map((id) => b.legs.find((l) => l.id === id))
         .filter((l): l is OptionLeg => l !== undefined),
+      preset: b.view.preset ?? null,
       selected: [...this.selected],
       hidden: this.hidden,
       dof: degreesOfFreedom(b.drawings, b.constraints),
@@ -2694,6 +2710,73 @@ export class ChartDraw {
     this.commit()
   }
 
+  /** The last strategy placed on THIS chart, persisted with it.
+   *
+   *  Per symbol because the document is per symbol — Kade's rule: "every
+   *  symbol has its own charting data, just like drawing a line just with
+   *  the chains and strat presets". A global last-preset would make SPY and
+   *  QQQ share one answer, which is wrong the moment you work two names at
+   *  different horizons. */
+  setPreset(key: string): void {
+    const b = this.bucket()
+    if (b.view.preset === key) return
+    b.view = { ...b.view, preset: key }
+    // emit(), not commit(): nothing geometric changed, so there is no render
+    // to do — but the save has to be scheduled or the choice dies with the
+    // tab. This is the one mutator that touches no object on the chart.
+    this.emit()
+  }
+
+  getPreset(): string | null {
+    return this.bucket().view.preset ?? null
+  }
+
+  /** Scroll the leg zones back onto the screen.
+   *
+   *  Kade: opening the chain should put "the dynamic filter box where we
+   *  last left it" on screen. The box IS persisted — it is the leg, and legs
+   *  ride the chart document — but persisted is not the same as VISIBLE: pan
+   *  away, come back tomorrow, open the chain, and you are reading rows for
+   *  a filter that is somewhere off the right-hand edge.
+   *
+   *  Time only. The price axis auto-fits and fighting it is a losing game;
+   *  the axis that actually strands a zone is time, because expirations live
+   *  out in the future whitespace past the last candle.
+   *
+   *  Returns false when there is nothing to reveal, so a caller can tell
+   *  "already framed" from "did nothing". */
+  revealLegs(): boolean {
+    const b = this.bucket()
+    if (b.legs.length === 0) return false
+    const times: number[] = []
+    for (const leg of b.legs) {
+      for (const id of [leg.timeHostA, leg.timeHostB] as const) {
+        const d = id ? b.drawings.find((x) => x.id === id) : undefined
+        if (d?.points[0]) times.push(d.points[0].time as number)
+      }
+    }
+    if (times.length === 0) return false
+    const ts = this.chart.timeScale()
+    const toX = (t: number): number | null => {
+      try {
+        return ts.timeToCoordinate(t as UTCTimestamp)
+      } catch {
+        return null
+      }
+    }
+    const w = this.host.clientWidth
+    const xs = times.map(toX).filter((x): x is number => x !== null)
+    // Already framed: every edge resolves to a coordinate inside the canvas.
+    // Nothing to do, and scrolling anyway would yank a view the user set.
+    if (xs.length === times.length && xs.every((x) => x >= 0 && x <= w)) return false
+    // scrollToPosition works in BARS from the right edge, and the zone sits
+    // in the whitespace the chart already reserves — so the honest move is
+    // to return to that reserve rather than compute a range and fight
+    // fitContent, which this file has measured itself losing before.
+    ts.scrollToRealTime()
+    return true
+  }
+
   /** A whole strategy in one commit: N legs sharing one group tag, slots
    *  assigned first-free in listed order, ONE render and ONE save — a condor
    *  arriving as four separate commits would debounce-save four times and
@@ -2852,6 +2935,7 @@ export class ChartDraw {
           b.pins = doc?.pins ?? []
           b.constraints = doc?.constraints ?? []
           b.legs = doc?.legs ?? []
+          b.view = { ...(doc?.view ?? {}) }
           adoptIds(b)
           // Now in sync with the store, so the emit below is not a write.
           savedDocs.set(key, JSON.stringify(docOf(b)))
