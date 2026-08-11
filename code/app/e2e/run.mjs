@@ -95,6 +95,25 @@ const cleanup = () => {
   }
 }
 
+// THE SUITE ALWAYS TERMINATES. Two ways it used to fail to: a CDP call that
+// never settles (fixed above), and node draining its loop with a pending
+// top-level await, which exits 13 with no verdict. Either way the run had no
+// exit code, so it could not gate anything and "it hangs at the end" became
+// something to live with. This is the backstop: whatever else happens, the
+// process reports and exits. It never fires on a healthy run — the suite
+// calls process.exit long before.
+const WATCHDOG_MS = 15 * 60 * 1000
+const watchdog = setTimeout(() => {
+  console.log(`FAIL  harness watchdog — the run passed ${WATCHDOG_MS / 60000} minutes ` +
+              `with no verdict; something never settled`)
+  try {
+    child.kill()
+  } catch {
+    /* already gone */
+  }
+  process.exit(1)
+}, WATCHDOG_MS)
+
 let failures = 0
 const check = (ok, label, detail = '') => {
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}${detail ? ' — ' + detail : ''}`)
@@ -137,10 +156,23 @@ async function connect(target) {
       reject(e)
     }
   })
+  // EVERY CDP CALL SETTLES. onclose already covers a dying socket, but a
+  // LIVE socket whose target simply never replies was still an invisible
+  // permanent hang: Page.captureScreenshot on a backgrounded WebContentsView
+  // never returns at all, and the suite stopped dead with no failure, no
+  // exit code and nothing naming the call. A harness that can hang cannot
+  // gate anything, so a silent call now degrades to a NAMED warning.
+  const CDP_TIMEOUT_MS = 20000
   const raw = async (method, params) => {
     const mid = ++id
     const res = await new Promise((resolve) => {
-      pending.set(mid, resolve)
+      const timer = setTimeout(() => {
+        if (!pending.has(mid)) return
+        pending.delete(mid)
+        console.log(`      (cdp timeout after ${CDP_TIMEOUT_MS}ms: ${method})`)
+        resolve({ result: undefined })
+      }, CDP_TIMEOUT_MS)
+      pending.set(mid, (m) => { clearTimeout(timer); resolve(m) })
       ws.send(JSON.stringify({ id: mid, method, params }))
     })
     return res.result
@@ -169,7 +201,13 @@ async function connect(target) {
     eval: async (expression) => {
       const mid = ++id
       const res = await new Promise((resolve) => {
-        pending.set(mid, resolve)
+        const timer = setTimeout(() => {
+          if (!pending.has(mid)) return
+          pending.delete(mid)
+          console.log(`      (cdp timeout after ${CDP_TIMEOUT_MS}ms: eval)`)
+          resolve({ result: undefined })
+        }, CDP_TIMEOUT_MS)
+        pending.set(mid, (m) => { clearTimeout(timer); resolve(m) })
         ws.send(
           JSON.stringify({
             id: mid,
@@ -1874,6 +1912,88 @@ try {
   ).catch(() => null)
   check(oneLeg === 'ok', 'legs: the Leg button places a single at-the-money leg')
 
+  // ---- THE LEG EDITOR'S TOGGLES (Kade: "you cant toggle either the side or
+  // right"). Side is DERIVED from which strike line sits on top, so writing
+  // leg.side was overwritten by the next resolve and the button did nothing
+  // at all. The fix swaps which line is A and which is B: the side flips and
+  // the lines do not move. BOTH halves are asserted here, because a "fix"
+  // that flipped the side by MOVING a line would satisfy the first and
+  // silently wreck the chart.
+  const legDoc = () => legView.eval(
+    `window.grindstone.request('GET','/api/chart-objects?key='+encodeURIComponent('SPY|1Day'))
+       .then((r)=>{ const d=(r.body&&(r.body.doc??r.body))||{};
+         const l=(d.legs??[])[0]||{};
+         return JSON.stringify({
+           prices: (d.drawings??[]).filter(x=>x.kind==='hline')
+                     .map(x=>x.points[0].price).sort(),
+           a: l.strikeHostA ?? null, b: l.strikeHostB ?? null,
+           side: l.side ?? null, right: l.right ?? null }) })`
+  ).then(JSON.parse)
+
+  // Select the leg: its zone is drawn on the canvas, so click until the page
+  // reports a selected leg (data-leg-strike is only set when one is).
+  // Click through the PERSIST view — chartClick above is bound to a
+  // different view that is no longer current here, and awaiting it never
+  // settles (the suite exits 13 with no error naming the page).
+  const pClick = async (fx, fy) => {
+    const r = await persistView
+      .eval(`(() => { const b = document.querySelector('[data-draw-tool]')
+               .getBoundingClientRect();
+         return JSON.stringify({ x: b.x, y: b.y, w: b.width, h: b.height }) })()`)
+      .then(JSON.parse)
+    await persistView.click(r.x + r.w * fx, r.y + r.h * fy)
+  }
+  let legSelected = false
+  for (const [fx, fy] of [[0.72, 0.5], [0.8, 0.5], [0.66, 0.45], [0.85, 0.55],
+                          [0.75, 0.4], [0.6, 0.5], [0.9, 0.5], [0.7, 0.6]]) {
+    await pClick(fx, fy)
+    await sleep(300)
+    if ((await pAttr('data-leg-strike'))) { legSelected = true; break }
+  }
+  check(legSelected, 'legs: clicking a leg zone opens its editor')
+
+  if (legSelected) {
+    const segOn = () => legView.eval(
+      `JSON.stringify([...document.querySelectorAll('.draw-editor .seg-btn.on')]
+         .map(b => b.textContent.trim()))`).then(JSON.parse)
+    const clickSeg = (text) => legView.eval(
+      `(() => { const b = [...document.querySelectorAll('.draw-editor .seg-btn')]
+          .find(x => x.textContent.trim() === ${'${JSON.stringify(text)}'});
+        if (!b) return 'missing'; b.click(); return 'ok' })()`)
+
+    const before = await legDoc()
+    const onBefore = await segOn()
+    const wantSide = onBefore.includes('Buy') ? 'Sell' : 'Buy'
+    await clickSeg(wantSide)
+    await sleep(700)
+    const onAfter = await segOn()
+    const after = await legDoc()
+    check(onAfter.includes(wantSide),
+          `legs: the Buy/Sell toggle actually flips the side (-> ${'${wantSide}'})`,
+          JSON.stringify({ onBefore, onAfter }))
+    check(JSON.stringify(before.prices) === JSON.stringify(after.prices),
+          'legs: flipping the side leaves the lines exactly where they were',
+          `${'${JSON.stringify(before.prices)}'} -> ${'${JSON.stringify(after.prices)}'}`)
+    check(before.a === after.b && before.b === after.a,
+          'legs: the flip swapped the two lines ROLES, which is what encodes the side',
+          `A/B ${'${before.a}'}/${'${before.b}'} -> ${'${after.a}'}/${'${after.b}'}`)
+
+    const wantRight = onBefore.includes('Put') ? 'Call' : 'Put'
+    await clickSeg(wantRight)
+    await sleep(700)
+    const onRight = await segOn()
+    check(onRight.includes(wantRight),
+          `legs: the Call/Put toggle actually flips the right (-> ${'${wantRight}'})`,
+          JSON.stringify(onRight))
+
+    const labels = await legView.eval(
+      `JSON.stringify([...document.querySelectorAll('.draw-editor .de-lbl')]
+         .map(e => e.textContent.trim()))`).then(JSON.parse)
+    check(!labels.some((l) => l.includes('±')),
+          'legs: the +-days / +-$ boxes are gone — the lines set the window',
+          JSON.stringify(labels))
+  }
+
 
   // Place one h-line by hand, then wait for the debounced write.
   await pTool('Horizontal price line')
@@ -2026,6 +2146,7 @@ try {
   console.log('FAIL  harness error —', err.message)
   failures += 1
 } finally {
+  clearTimeout(watchdog)
   cleanup()
 }
 

@@ -2650,6 +2650,27 @@ export class ChartDraw {
     const b = this.bucket()
     const leg = b.legs.find((l) => l.id === id)
     if (!leg) return
+
+    // SIDE IS GEOMETRY, so SETTING it has to be geometry too.
+    //
+    // The rendered side is derived from which strike line sits on top (A
+    // above B reads SELL), because the panel and the chart disagreeing about
+    // one leg was a real bug. But that derivation also meant a plain
+    // `leg.side = 'long'` was overwritten by legResolved on the very next
+    // read — so the Buy/Sell toggle silently did nothing at all.
+    //
+    // Kade's rule settles how to fix it: "changing from buy to sell should
+    // flip the trade but leave the lines where they are." So swap which line
+    // is A and which is B. Nothing on screen moves a pixel — same two
+    // prices, same two lines — but the ORDER that encodes the side reverses,
+    // and geometry stays the single source of truth.
+    if (patch.side !== undefined && leg.strikeHostA && leg.strikeHostB
+        && this.legResolved(leg).side !== patch.side) {
+      const a = leg.strikeHostA
+      leg.strikeHostA = leg.strikeHostB
+      leg.strikeHostB = a
+    }
+
     // PER ROLE. Detaching both bindings because one value was typed is the bug
     // the single hostId made unavoidable: typing a strike on a leg that also
     // rides a vline would silently release its expiration too, and the next

@@ -328,6 +328,16 @@
   color: var(--text-dim);
   cursor: default;
 }
+/* THE POPUP LIST, not the closed control. `background: none` above leaves the
+   OPEN dropdown to the platform default — white on Windows — while the option
+   text inherits our light --text, so the list rendered white-on-white and was
+   completely unreadable. The closed control looked fine, which is why this
+   survived: nothing is wrong until you click it. Chromium honours colours set
+   on the option elements themselves. */
+.seg-select option {
+  background: var(--panel, #1c1c1c);
+  color: var(--text);
+}
 .ind-float {
   width: 230px;
 }

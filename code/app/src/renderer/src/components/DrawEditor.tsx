@@ -238,20 +238,11 @@ export function LegEditor({ engine, leg }: { engine: ChartDraw; leg: ResolvedLeg
         // parseTime hands back epoch seconds; the leg stores the calendar date.
         onCommit={(v) => patch({ expiration: new Date(v * 1000).toISOString().slice(0, 10) })}
       />
-      <Field
-        key={`${leg.id}:dtol:${leg.dteTol}`}
-        label="±days"
-        initial={String(Math.round(leg.dteTol))}
-        parse={parsePrice}
-        onCommit={(v) => patch({ dteTol: Math.max(0, Math.min(60, v)) })}
-      />
-      <Field
-        key={`${leg.id}:stol:${leg.strikeTol}`}
-        label="±$"
-        initial={fmtPrice(leg.strikeTol)}
-        parse={parsePrice}
-        onCommit={(v) => patch({ strikeTol: Math.max(0, Math.min(500, v)) })}
-      />
+      {/* ±days and ±$ used to be typed here. They are the leg's WINDOW, and
+          the window is now the bounding lines — drag them and the tolerance
+          follows. Two ways to set one value is two ways to disagree about
+          it, and the lines are the one you can see. The fields are gone;
+          the values are not. */}
       <button className="btn de-del" onClick={() => engine.deleteLeg(leg.id)}>
         Delete leg
       </button>

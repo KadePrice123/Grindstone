@@ -4253,6 +4253,63 @@ def _class_wheels():
     assert "doc.wheels.some(" in spawn,         "spawn trusts the binding without checking the wheel exists"
 
 
+@check("leg editor: the side toggle is geometry, and the dropdown is readable")
+def _leg_editor():
+    """Two bugs Kade hit in one sitting, both invisible to a source scan of
+    the component alone.
+
+    SIDE IS DERIVED from which strike line sits on top, so `leg.side = x` was
+    overwritten by the next resolve and the Buy/Sell button did nothing at
+    all. The fix swaps which line is A and which is B — the side flips and
+    the lines do not move ("changing from buy to sell should flip the trade
+    but leave the lines where they are").
+
+    THE PRESET DROPDOWN rendered white-on-white: `background: none` leaves an
+    open <select> to the platform default while the options inherit our light
+    --text. The closed control looked correct, which is exactly why it
+    shipped — nothing is wrong until you click it."""
+    app = ROOT / "code" / "app" / "src" / "renderer" / "src"
+    draw = (app / "components" / "ChartDraw.ts").read_text(encoding="utf-8")
+    editor = (app / "components" / "DrawEditor.tsx").read_text(encoding="utf-8")
+    charts_css = (app / "charts.css").read_text(encoding="utf-8")
+
+    # --- the side patch reaches the GEOMETRY, not just the field.
+    body = member_body(draw, "  updateLeg(")
+    head = body[:body.index("// PER ROLE")]
+    assert "patch.side !== undefined" in head, (
+        "updateLeg no longer special-cases side — the stored value is "
+        "overwritten by legResolved on the next read, so the Buy/Sell "
+        "toggle silently does nothing")
+    assert "strikeHostA" in head and "strikeHostB" in head,         "the side flip no longer swaps the strike hosts"
+    # It must swap the ROLES, never move a price: a flip that edited the
+    # lines' prices would satisfy "the side changed" and wreck the chart.
+    for banned in ("points[0].price =", ".price =", "updateDrawing("):
+        assert banned not in head, (
+            f"the side flip writes {banned!r} — it must swap which line is A "
+            f"and which is B, leaving every line exactly where it was")
+
+    # --- the tolerance boxes are gone; the lines are that editor now.
+    # The FIELD, not the words: the comment explaining why they were removed
+    # names them, and matching that made this fail against its own prose —
+    # the sixth time a source scan in this suite has read its own commentary.
+    for gone in ('label="±days"', 'label="±$"'):
+        assert gone not in editor, (
+            f"the {gone} field is back — the window is the bounding lines, "
+            f"and two ways to set one value is two ways to disagree")
+    assert "dteTol:" not in editor and "strikeTol:" not in editor,         "the editor still patches a tolerance directly"
+
+    # --- the dropdown's OPEN list is styled. The rule has to target the
+    # options: styling only .seg-select leaves the popup to the platform.
+    # The SELECTOR, anchored to its brace: a plain `in` also matched
+    # ".seg-select optionX {", which styles nothing at all.
+    m = re.search(r"\.seg-select\s+option\s*\{([^}]*)\}", charts_css)
+    assert m, (
+        "the preset dropdown's option list is unstyled again — it renders "
+        "white-on-white on Windows and is unreadable when opened")
+    opt = m.group(1)
+    assert "background" in opt and "color" in opt, opt
+
+
 @check("component grab: a constrained line brings its full chain of objects")
 def _component_grab():
     """Kade's rule, verbatim: 'if we grab one line that is constrained to
