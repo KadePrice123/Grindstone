@@ -66,6 +66,30 @@ RETRYABLE = ("failed", "unknown")
 # exactly that — editing RETRYABLE changed nothing at all.
 SETTLED = tuple(s for s in STATES if s not in RETRYABLE)
 
+# How long a retryable period rests before it is asked about again.
+#
+# Retryable does NOT mean retry-immediately-forever. Measured here: after the
+# horizon fix, 2016-2019 became `unknown` (correctly — Alpaca's IEX feed has
+# no bars there), and because they are the OLDEST gaps the bars backfill took
+# the same dead years every cycle and logged "4/4 chunks, 0 day(s) settled"
+# over and over. Zero progress, indefinitely, while the days the user wanted
+# sat behind them.
+#
+# A day rests, then gets another chance — which is what keeps a provider
+# outage recoverable without letting a permanently empty period monopolise
+# the queue.
+RETRY_COOLDOWN_HOURS = 20.0
+
+# How many times a period is asked about before the backfill moves on.
+#
+# Kade's rule: "we should just retry a day a few times and move on with
+# backfilling". A day that answers nothing three times running is not going
+# to answer on the fourth in the same session, and letting it keep its place
+# at the head of the queue is how the whole backfill made zero progress. The
+# count is never cleared by giving up — a later run with a different key or
+# a recovered provider still sees it — but it stops costing every cycle.
+MAX_ATTEMPTS = 3
+
 
 def _iso(d: dt.date) -> str:
     return d.isoformat()
@@ -110,12 +134,20 @@ def mark(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
         con.execute(
             "INSERT INTO data_cover"
             " (provider, kind, symbol, timeframe, period, state, rows,"
-            "  checked_at, detail)"
-            " VALUES (?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%SZ','now'),?)"
+            "  checked_at, detail, attempts)"
+            " VALUES (?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%SZ','now'),?,"
+            "         CASE WHEN ? IN ('have','absent') THEN 0 ELSE 1 END)"
             " ON CONFLICT(provider, kind, symbol, timeframe, period) DO UPDATE SET"
             "   state=excluded.state, rows=excluded.rows,"
-            "   checked_at=excluded.checked_at, detail=excluded.detail",
-            (provider, kind, symbol.upper(), timeframe, period, state, rows, detail))
+            "   checked_at=excluded.checked_at, detail=excluded.detail,"
+            # COUNTED ONLY WHILE UNRESOLVED. A settled answer resets it, so a
+            # period that failed twice and then succeeded starts clean if it
+            # is ever re-opened; an unresolved one climbs toward MAX_ATTEMPTS
+            # and stops costing a slot in every cycle.
+            "   attempts=CASE WHEN excluded.state IN ('have','absent') THEN 0"
+            "                 ELSE data_cover.attempts + 1 END",
+            (provider, kind, symbol.upper(), timeframe, period, state, rows,
+             detail, state))
 
 
 def may_claim_absent(con: sqlite3.Connection, provider: str, kind: str,
@@ -171,12 +203,26 @@ def state_of(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
 
 def gaps(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
          timeframe: str, start: dt.date, end: dt.date,
-         limit: int = 5000, prefer_untried: bool = False) -> list[str]:
+         limit: int = 5000, prefer_untried: bool = False,
+         cooldown_hours: float = 0.0,
+         newest_first: bool = True,
+         max_attempts: int = MAX_ATTEMPTS) -> list[str]:
     """The periods still worth asking about, oldest first.
 
     A period is worth asking about when it is retryable — never asked, or
     asked and errored. `have` and `absent` are both settled answers, and the
     whole point of separating them is that neither comes back here.
+
+    NEWEST FIRST by default — Kade's call, and the right one: "the more
+    recent data is the more useful data". A backfill that starts in 2016 and
+    walks forward spends its first hours on the least useful history it will
+    ever fetch, and if it is interrupted (it will be) the part you would
+    actually look at is the part that never landed.
+
+    A period that has been asked about `max_attempts` times without resolving
+    drops out of the list. It is not written off — nothing marks it absent,
+    and a later run with a better key or a recovered provider still sees it —
+    it just stops taking a slot in every single cycle.
 
     `prefer_untried` puts NEVER-ASKED days ahead of ones that already failed.
     Without it a permanently failing day at the head of the queue starves
@@ -196,7 +242,40 @@ def gaps(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
             (provider, kind, symbol.upper(), timeframe, *SETTLED,
              _iso(start), _iso(end)))
     }
+    # RESTING: asked recently, answered nothing useful. Not settled — it will
+    # come back — but not worth spending this cycle on either.
+    if cooldown_hours > 0:
+        settled |= {
+            row[0] for row in con.execute(
+                "SELECT period FROM data_cover WHERE provider=? AND kind=? AND"
+                " symbol=? AND timeframe=? AND period BETWEEN ? AND ?"
+                " AND checked_at > datetime('now', ?)",
+                (provider, kind, symbol.upper(), timeframe,
+                 _iso(start), _iso(end), f"-{cooldown_hours} hours"))
+        }
+    # EXHAUSTED: asked enough times, still nothing. Skipped so the queue can
+    # move on — "retry a day a few times and move on with backfilling".
+    if max_attempts > 0:
+        # ...but only while the attempts are RECENT. Giving up permanently
+        # after three tries would be a write-off through the back door: a
+        # provider that happened to be down for an hour would cost those days
+        # forever, which is precisely what `absent` exists to mean and
+        # `failed` exists to avoid. So the cap parks a day for a cooldown and
+        # then hands it a fresh chance — retry a few times, move on, come
+        # back tomorrow.
+        settled |= {
+            row[0] for row in con.execute(
+                "SELECT period FROM data_cover WHERE provider=? AND kind=? AND"
+                " symbol=? AND timeframe=? AND period BETWEEN ? AND ?"
+                " AND attempts >= ? AND checked_at > datetime('now', ?)",
+                (provider, kind, symbol.upper(), timeframe,
+                 _iso(start), _iso(end), max_attempts,
+                 f"-{RETRY_COOLDOWN_HOURS} hours"))
+        }
+
     out = [_iso(d) for d in trading_days(start, end) if _iso(d) not in settled]
+    if newest_first:
+        out.reverse()
     if prefer_untried:
         failed = {
             row[0] for row in con.execute(

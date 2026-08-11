@@ -135,22 +135,33 @@ def append_day(underlying: str, date: str,
     con = sqlite3.connect(p)
     try:
         con.executescript(_ARCHIVE_SCHEMA)
+        # TWO SHAPES REACH THIS. The live Alpaca collector hands over dicts;
+        # chainimport.parse_text hands over ChainRow dataclasses. Assuming
+        # dicts crashed the entire chain backfill on every tick with
+        # `'ChainRow' object has no attribute 'get'` — and because the
+        # recorder loop catches and logs, it kept running while silently
+        # never archiving a thing.
+        def field(c: Any, name: str) -> Any:
+            if isinstance(c, dict):
+                return c.get(name)
+            return getattr(c, name, None)
+
         rows = []
         for c in contracts:
-            right = str(c.get("right") or "").upper()[:1]
+            right = str(field(c, "right") or "").upper()[:1]
             if right not in ("C", "P"):
                 continue
             try:
-                strike = float(c["strike"])
-            except (KeyError, TypeError, ValueError):
+                strike = float(field(c, "strike"))
+            except (TypeError, ValueError):
                 continue
-            exp = str(c.get("expiration") or "")[:10]
+            exp = str(field(c, "expiration") or "")[:10]
             if not exp:
                 continue
             rows.append((underlying.upper(), date[:10], exp, strike, right,
-                         c.get("bid"), c.get("ask"), c.get("last"),
-                         c.get("iv"), c.get("delta"),
-                         c.get("volume"), c.get("open_interest")))
+                         field(c, "bid"), field(c, "ask"), field(c, "last"),
+                         field(c, "iv"), field(c, "delta"),
+                         field(c, "volume"), field(c, "open_interest")))
         if rows:
             with con:
                 con.executemany(

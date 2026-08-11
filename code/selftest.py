@@ -3811,6 +3811,40 @@ def _coverage_backfill():
                 "would be recorded as though the market had been shut")
             assert len(todo) == everything - 2, todo
 
+            # NEWEST FIRST. Kade's rule: "the more recent data is the more
+            # useful data". A backfill is interrupted far more often than it
+            # completes, so starting in 2016 means the part you would
+            # actually look at is the part that never lands.
+            assert todo == sorted(todo, reverse=True), (
+                f"the queue is not newest-first: {todo[:4]}")
+
+            # AND A DEAD DAY STOPS COSTING A SLOT. "Retry a day a few times
+            # and move on" — measured as "4/4 chunks, 0 day(s) settled" on
+            # repeat when a permanently empty period kept its place.
+            for _ in range(cov.MAX_ATTEMPTS):
+                cov.mark(con, "alpaca-iex", "bars", "SPY", "1Day",
+                         "2026-01-06", "failed", detail="530")
+            after = cov.gaps(con, "alpaca-iex", "bars", "SPY", "1Day", start, end)
+            assert "2026-01-06" not in after, (
+                f"a day asked {cov.MAX_ATTEMPTS}+ times still holds a slot in "
+                f"every cycle — that is how the whole backfill made zero "
+                f"progress for four cycles running")
+            # NOT written off, though: nothing marked it absent, so a later
+            # run with a better key or a recovered provider still sees it.
+            assert cov.state_of(con, "alpaca-iex", "bars", "SPY", "1Day",
+                                "2026-01-06") == "failed"
+            # AND IT COMES BACK. Parking a day permanently after three tries
+            # would be a write-off through the back door — an hour of
+            # provider downtime would cost those days forever, which is
+            # exactly the distinction `absent` vs `failed` exists to draw.
+            with con:
+                con.execute("UPDATE data_cover SET checked_at="
+                            "datetime('now','-3 days') WHERE period='2026-01-06'")
+            revived = cov.gaps(con, "alpaca-iex", "bars", "SPY", "1Day", start, end)
+            assert "2026-01-06" in revived, (
+                "an exhausted day never returns — three failures during a "
+                "provider outage would silently cost that day forever")
+
             # NON-AUTHORITATIVE PROVIDERS CANNOT CLAIM ABSENCE (DS-4). An
             # empty list from a provider that simply does not carry a name is
             # indistinguishable from a true holiday, and letting it write
@@ -4230,6 +4264,18 @@ def _backfill_runs():
                         f"cycle would spend the API re-fetching data already on "
                         f"disk (2,052 bars against 0 coverage rows, on this machine)")
 
+                # THE CHUNKS RUN NEWEST-WINDOW-FIRST too, not just the day
+                # list: chunking has to sort ascending to find contiguous
+                # runs, so the reversal afterwards is what actually decides
+                # which window is fetched first.
+                pch = bf_mod.plan(con, "alpaca-iex", "bars", "ORD", "1Day",
+                                  _dt.date(2026, 1, 1), _dt.date(2026, 4, 30))
+                assert len(pch) > 1, "the fixture produced one chunk"
+                assert pch[0].start > pch[-1].start, (
+                    f"chunks run oldest-window-first ({pch[0].start} before "
+                    f"{pch[-1].start}) — an interrupted backfill would land "
+                    f"the least useful history and never reach recent days")
+
                 # BOUNDED. One cycle takes a slice, not the decade: it shares
                 # a 200 req/min tier with the charts the user is looking at.
                 start_w, end_w = rec_mod._backfill_window("1", _dt.datetime.now(_dt.timezone.utc))
@@ -4581,25 +4627,54 @@ def _chain_backfill():
             lo2, hi2 = _dt.date(2026, 2, 2), _dt.date(2026, 2, 13)
             alld = cov.trading_days(lo2, hi2)
             # The two oldest have already failed; everything after is untried.
-            for d0 in alld[:2]:
+            # The NEWEST two have failed. That matters now that the queue is
+            # newest-first: marking the OLDEST two proved nothing, because a
+            # newest-first cycle would skip past them anyway and the
+            # assertion passed whether prefer_untried worked or not.
+            for d0 in alld[-2:]:
                 cov.mark(c2, "onclick", "chain", "Z", "", d0.isoformat(), "failed",
                          detail="530")
-            plain = cov.gaps(c2, "onclick", "chain", "Z", "", lo2, hi2, limit=3)
+            failed_two = {d0.isoformat() for d0 in alld[-2:]}
             first = cov.gaps(c2, "onclick", "chain", "Z", "", lo2, hi2, limit=3,
                              prefer_untried=True)
-            assert plain[:2] == [d0.isoformat() for d0 in alld[:2]], plain
-            assert not set(first) & {d0.isoformat() for d0 in alld[:2]}, (
+            assert not set(first) & failed_two, (
                 f"a cycle still takes the already-failed days first ({first}) — "
-                f"a day that fails every time blocks the queue forever and the "
+                f"a day that fails every time blocks the queue and the "
                 f"backfill makes no progress at all")
-            # Both halves stay oldest-first, which is what a ROLLING window
-            # needs: its oldest days are the ones about to become unobtainable.
-            assert first == sorted(first), first
+            # NEWEST FIRST within each half: recent data is the useful data,
+            # and an interrupted backfill should have landed that part.
+            assert first == sorted(first, reverse=True), first
             everything = cov.gaps(c2, "onclick", "chain", "Z", "", lo2, hi2,
                                   limit=99, prefer_untried=True)
             assert set(everything) == {d0.isoformat() for d0 in alld},                 "reordering dropped work"
         finally:
             c2.close()
+
+    # --- BOTH ROW SHAPES REACH THE ARCHIVE. The live Alpaca collector hands
+    # over dicts; chainimport.parse_text hands over ChainRow dataclasses.
+    # Assuming dicts crashed the whole chain backfill on every recorder tick
+    # ("'ChainRow' object has no attribute 'get'") and, because the loop
+    # catches and logs, it kept running while archiving nothing at all.
+    from backend import opthist as _oh
+    from backend.chainimport import ChainRow as _CR
+    import tempfile as _tf3
+    _row = _CR(date="2026-08-11", symbol="ZZ", expiration="2026-09-18",
+               strike=100.0, right="P", bid=1.0, ask=1.2, last=1.1, mark=1.1,
+               volume=5, open_interest=9, iv=0.2, delta=-0.3)
+    with _tf3.TemporaryDirectory() as td3:
+        import os as _os
+        _old_dir = _os.environ.get("GRINDSTONE_DATA_DIR")
+        _os.environ["GRINDSTONE_DATA_DIR"] = td3
+        try:
+            assert _oh.append_day("ZZ", "2026-08-11", [_row]) == 1,                 "append_day rejects a ChainRow — the shape the CSV parser "                "produces, and the crash that silently disabled the whole "                "chain backfill"
+            assert _oh.append_day("ZZ", "2026-08-11", [
+                {"right": "C", "strike": 1.0, "expiration": "2026-09-18",
+                 "bid": 1, "ask": 2}]) == 1,                 "append_day rejects a dict — the shape the live collector uses"
+        finally:
+            if _old_dir is None:
+                _os.environ.pop("GRINDSTONE_DATA_DIR", None)
+            else:
+                _os.environ["GRINDSTONE_DATA_DIR"] = _old_dir
 
     src_rec = (CODE / "backend" / "recorder.py").read_text(encoding="utf-8")
     assert "prefer_untried=True" in py_member_body(

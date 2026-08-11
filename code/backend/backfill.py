@@ -84,7 +84,11 @@ def plan(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
     missing = cov.gaps(con, provider, kind, symbol, timeframe, start, end)
     if not missing:
         return []
-    dates = [dt.date.fromisoformat(d) for d in missing]
+    # Chunking needs ASCENDING dates to find contiguous runs; the ORDER the
+    # chunks then run in is reversed below, so the newest window is fetched
+    # first. Sorting here rather than asking gaps() for ascending keeps the
+    # attempt-cap filtering in one place.
+    dates = sorted(dt.date.fromisoformat(d) for d in missing)
     chunks: list[Chunk] = []
     run: list[dt.date] = [dates[0]]
     for d in dates[1:]:
@@ -97,6 +101,9 @@ def plan(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
         else:
             run.append(d)
     chunks.append(_chunk(provider, kind, symbol, timeframe, run))
+    # NEWEST WINDOW FIRST. Recent history is the history that gets looked at,
+    # and a backfill is interrupted far more often than it completes.
+    chunks.reverse()
     return chunks[:max_chunks]
 
 
