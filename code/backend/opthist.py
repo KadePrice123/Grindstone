@@ -99,6 +99,84 @@ def history(underlying: str, expiration: str, strike: float,
             "first": out[0]["date"], "last": out[-1]["date"]}
 
 
+# The archive's own schema, so a live collector can extend it. Mirrors
+# tools/loadhist.py, which built the file in the first place.
+_ARCHIVE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS hist_chain (
+    underlying TEXT NOT NULL,
+    date       TEXT NOT NULL,
+    expiration TEXT NOT NULL,
+    strike     REAL NOT NULL,
+    right      TEXT NOT NULL CHECK (right IN ('C','P')),
+    bid        REAL, ask REAL, last REAL,
+    iv         REAL, delta REAL,
+    volume     REAL, open_interest REAL,
+    PRIMARY KEY (underlying, expiration, strike, right, date)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS hist_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+
+
+def append_day(underlying: str, date: str,
+               contracts: list[dict[str, Any]]) -> int:
+    """Add one session's chain to the archive THE OPT PAGE READS.
+
+    This exists because the chain backfill was writing somewhere else. It
+    stored into `data/backtest_data/<SYM>.db` — the backtest engine's store —
+    while the Opt page reads `data/options_history.db`. Both are real
+    databases, both were being written correctly, and the page showed
+    nothing new, because filling one has never had any effect on the other.
+
+    Idempotent: INSERT OR REPLACE on the archive's own primary key, so
+    re-running a day corrects it rather than duplicating it.
+    """
+    p = db_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(p)
+    try:
+        con.executescript(_ARCHIVE_SCHEMA)
+        rows = []
+        for c in contracts:
+            right = str(c.get("right") or "").upper()[:1]
+            if right not in ("C", "P"):
+                continue
+            try:
+                strike = float(c["strike"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            exp = str(c.get("expiration") or "")[:10]
+            if not exp:
+                continue
+            rows.append((underlying.upper(), date[:10], exp, strike, right,
+                         c.get("bid"), c.get("ask"), c.get("last"),
+                         c.get("iv"), c.get("delta"),
+                         c.get("volume"), c.get("open_interest")))
+        if rows:
+            with con:
+                con.executemany(
+                    "INSERT OR REPLACE INTO hist_chain VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    rows)
+        return len(rows)
+    finally:
+        con.close()
+
+
+def archived_dates(underlying: str, start: str, end: str) -> list[str]:
+    """Sessions already in the archive for this symbol, within a range."""
+    con = _open()
+    if con is None:
+        return []
+    try:
+        return [r[0] for r in con.execute(
+            "SELECT DISTINCT date FROM hist_chain WHERE underlying=?"
+            " AND date BETWEEN ? AND ? ORDER BY date",
+            (underlying.upper(), start[:10], end[:10]))]
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
+
+
 def series_history(underlying: str, right: str, dte: int,
                    delta: float | None = None, strike: float | None = None,
                    dte_tol: int = 3, delta_tol: float = 0.08,

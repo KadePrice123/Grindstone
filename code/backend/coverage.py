@@ -171,12 +171,21 @@ def state_of(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
 
 def gaps(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
          timeframe: str, start: dt.date, end: dt.date,
-         limit: int = 5000) -> list[str]:
+         limit: int = 5000, prefer_untried: bool = False) -> list[str]:
     """The periods still worth asking about, oldest first.
 
     A period is worth asking about when it is retryable — never asked, or
     asked and errored. `have` and `absent` are both settled answers, and the
     whole point of separating them is that neither comes back here.
+
+    `prefer_untried` puts NEVER-ASKED days ahead of ones that already failed.
+    Without it a permanently failing day at the head of the queue starves
+    everything behind it: measured here, three US market holidays returned
+    HTTP 530 on every attempt, the day-at-a-time chain backfill took the same
+    three oldest gaps every cycle, and the queue made ZERO progress — four
+    cycles, nine gaps before, nine gaps after, while the days the user
+    actually wanted sat six places back. Callers that chunk by contiguous
+    dates must leave this off, because reordering breaks the runs.
     """
     placeholders = ",".join("?" for _ in SETTLED)
     settled = {
@@ -187,8 +196,20 @@ def gaps(con: sqlite3.Connection, provider: str, kind: str, symbol: str,
             (provider, kind, symbol.upper(), timeframe, *SETTLED,
              _iso(start), _iso(end)))
     }
-    return [_iso(d) for d in trading_days(start, end)
-            if _iso(d) not in settled][:limit]
+    out = [_iso(d) for d in trading_days(start, end) if _iso(d) not in settled]
+    if prefer_untried:
+        failed = {
+            row[0] for row in con.execute(
+                "SELECT period FROM data_cover WHERE provider=? AND kind=? AND"
+                " symbol=? AND timeframe=? AND state='failed'"
+                " AND period BETWEEN ? AND ?",
+                (provider, kind, symbol.upper(), timeframe, _iso(start), _iso(end)))
+        }
+        # Stable within each group, so both halves stay oldest-first — the
+        # order that matters for a rolling window, where the oldest days are
+        # the ones about to become unobtainable.
+        out = [d for d in out if d not in failed] + [d for d in out if d in failed]
+    return out[:limit]
 
 
 def summary(con: sqlite3.Connection, kind: str, symbol: str,
@@ -240,6 +261,30 @@ def reconcile_bars(con: sqlite3.Connection, provider: str, symbol: str,
             continue
         mark(con, provider, "bars", symbol, timeframe, day, "have", rows=1,
              detail="reconciled from rows already recorded")
+        n += 1
+    return n
+
+
+def reconcile_chain(con: sqlite3.Connection, provider: str, symbol: str,
+                    dates: Iterable[str]) -> int:
+    """Tell coverage about chain sessions already in the archive.
+
+    The exact counterpart of reconcile_bars, and needed for the exact same
+    reason: options_history.db already holds a YEAR of sessions per symbol
+    while onclick coverage starts empty, and empty reads as "never asked".
+    Without this the first chain cycle would spend days of paced requests
+    re-fetching sessions already on disk — at ~5 seconds each, that is hours
+    of asking a free provider for what we already have.
+
+    Only ever writes `have`, so it can never manufacture a false `absent`.
+    """
+    n = 0
+    for d in dates:
+        day = str(d)[:10]
+        if not day:
+            continue
+        mark(con, provider, "chain", symbol, "", day, "have", rows=1,
+             detail="reconciled from the archive already on disk")
         n += 1
     return n
 

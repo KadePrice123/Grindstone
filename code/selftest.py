@@ -63,6 +63,32 @@ def member_body(src: str, sig: str) -> str:
     return tail[: nxt.start()] if nxt else tail
 
 
+def py_member_body(src: str, sig: str) -> str:
+    """A PYTHON function's body, bounded by the next declaration at or above
+    its own indent.
+
+    member_body() above is TypeScript-shaped: it looks for `private `,
+    `public ` and `/**` at two-space indent, none of which occur in a .py
+    file — so on Python it silently returned everything to end of file. Two
+    mutations sailed straight through: deleting the archive write in one
+    method left the identical call in the NEXT method inside the "body" being
+    searched. Green, and blind — the exact failure the other helper's own
+    docstring warns about, in the other language.
+    """
+    parts = src.split(sig, 1)
+    assert len(parts) > 1, f"member not found in source: {sig!r}"
+    indent = len(sig) - len(sig.lstrip())
+    out = []
+    for line in parts[1].splitlines(True):
+        stripped = line.lstrip()
+        if (stripped
+                and len(line) - len(stripped) <= indent
+                and stripped.startswith(("def ", "async def ", "class ", "@"))):
+            break
+        out.append(line)
+    return "".join(out)
+
+
 @check("branding.json parses and is complete")
 def _branding():
     b = json.loads((CODE / "assets/branding/branding.json").read_text(encoding="utf-8"))
@@ -4542,6 +4568,62 @@ def _chain_backfill():
                 rec_mod.Recorder._backfill_chains = orig
         finally:
             con.close()
+
+    # --- A PERSISTENTLY FAILING DAY MUST NOT STARVE THE QUEUE.
+    # Measured: three US market holidays answered HTTP 530 on every attempt,
+    # the day-at-a-time chain cycle took the same three oldest gaps every
+    # time, and four cycles moved the count from nine gaps to nine gaps while
+    # the days beside today sat six places back and were never reached.
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td2:
+        c2 = connect_market(Path(td2) / "m.db")
+        try:
+            lo2, hi2 = _dt.date(2026, 2, 2), _dt.date(2026, 2, 13)
+            alld = cov.trading_days(lo2, hi2)
+            # The two oldest have already failed; everything after is untried.
+            for d0 in alld[:2]:
+                cov.mark(c2, "onclick", "chain", "Z", "", d0.isoformat(), "failed",
+                         detail="530")
+            plain = cov.gaps(c2, "onclick", "chain", "Z", "", lo2, hi2, limit=3)
+            first = cov.gaps(c2, "onclick", "chain", "Z", "", lo2, hi2, limit=3,
+                             prefer_untried=True)
+            assert plain[:2] == [d0.isoformat() for d0 in alld[:2]], plain
+            assert not set(first) & {d0.isoformat() for d0 in alld[:2]}, (
+                f"a cycle still takes the already-failed days first ({first}) — "
+                f"a day that fails every time blocks the queue forever and the "
+                f"backfill makes no progress at all")
+            # Both halves stay oldest-first, which is what a ROLLING window
+            # needs: its oldest days are the ones about to become unobtainable.
+            assert first == sorted(first), first
+            everything = cov.gaps(c2, "onclick", "chain", "Z", "", lo2, hi2,
+                                  limit=99, prefer_untried=True)
+            assert set(everything) == {d0.isoformat() for d0 in alld},                 "reordering dropped work"
+        finally:
+            c2.close()
+
+    src_rec = (CODE / "backend" / "recorder.py").read_text(encoding="utf-8")
+    assert "prefer_untried=True" in py_member_body(
+        src_rec, "    def _backfill_chains("), \
+        "the chain cycle no longer prefers untried days, so one bad day starves it"
+
+    # --- THE CHAIN BACKFILL WRITES THE ARCHIVE THE OPT PAGE READS. It used
+    # to fill backtest_data/<SYM>.db (the engine's store) only, while the Opt
+    # page reads options_history.db — a perfectly working backfill that
+    # changed nothing the user could see.
+    #
+    # Scoped PER METHOD via py_member_body: member_body() is TypeScript-shaped
+    # and returns everything to end of file on a .py, so a whole-file `in`
+    # check passed with one of the two calls deleted — the identical call in
+    # the neighbouring method satisfied it.
+    assert "opthist.append_day" in py_member_body(
+        src_rec, "    def _backfill_chains("), (
+        "the chain BACKFILL no longer appends to options_history.db — it "
+        "would fill the engine's store while the Opt page, which reads a "
+        "different file entirely, showed nothing new")
+    collect = py_member_body(src_rec, "    def _collect_chain(")
+    assert "opthist.append_day" in collect, (
+        "LIVE chain recording no longer reaches the archive, so today never "
+        "becomes history")
 
     # --- THE WINDOW IS RECOMPUTED AT EXECUTION. It slides one day per day,
     # so anything decided earlier is already stale by the time it runs.

@@ -22,7 +22,7 @@ import sqlite3
 import threading
 from typing import Any, Callable
 
-from . import backfill, btdata, chainimport, coverage, newsstore, onclick
+from . import backfill, btdata, chainimport, coverage, newsstore, onclick, opthist
 from .logs import LOG
 from .brokers.alpaca_data import AlpacaData
 from .brokers.base import BrokerError
@@ -227,6 +227,19 @@ class Recorder:
                   c["gamma"], c["theta"], c["vega"], c["rho"], None, None)
                  for c in contracts],
             )
+        # AND THE ARCHIVE THE OPT PAGE READS. rec_chain is a minute-bucketed
+        # intraday record; the Opt page's history is a day-per-session archive
+        # in options_history.db, and nothing was joining the two. So every
+        # chain the recorder captured stayed invisible to the page that exists
+        # to show option history — the archive simply stopped on the day the
+        # last bulk import ended, and no amount of recording moved it.
+        try:
+            opthist.append_day(job["symbol"], now.strftime("%Y-%m-%d"), contracts)
+        except sqlite3.Error:
+            # A recording that landed in rec_chain is not lost because the
+            # archive write failed, so this degrades rather than raising —
+            # but it says so, because a silent miss here is the bug above.
+            LOG.exception("archive append failed for %s", job["symbol"])
         return len(contracts)
 
     def _collect_news(self, client: AlpacaData, job: dict[str, Any]) -> int:
@@ -358,8 +371,21 @@ class Recorder:
         """
         provider = "onclick"
         lo, hi = onclick.window(now.date())
+        # WHAT THE ARCHIVE ALREADY HOLDS, before planning anything. Coverage
+        # starts empty while options_history.db holds a year per symbol, and
+        # at ~5 seconds per paced request re-asking for those sessions would
+        # cost hours and gain nothing.
+        try:
+            known = opthist.archived_dates(symbol, lo.isoformat(), hi.isoformat())
+            if known:
+                coverage.reconcile_chain(self._con, provider, symbol, known)
+        except sqlite3.Error:
+            LOG.exception("archive reconcile failed for %s", symbol)
+        # UNTRIED FIRST. A holiday that answers 530 every single time would
+        # otherwise sit at the head of the queue forever and the backfill
+        # would never reach the days beside today.
         gaps = coverage.gaps(self._con, provider, "chain", symbol, "", lo, hi,
-                             limit=CHAIN_DAYS_PER_CYCLE)
+                             limit=CHAIN_DAYS_PER_CYCLE, prefer_untried=True)
         if not gaps:
             return 0
         con = None
@@ -395,14 +421,22 @@ class Recorder:
                 elif body:
                     parsed = chainimport.parse_text(
                         body, "option_chain", "csv", "onclickmedia")
+                    # BOTH STORES, deliberately. They are different databases
+                    # serving different readers, and writing only one was the
+                    # bug: the backfill filled backtest_data/<SYM>.db (the
+                    # ENGINE's store) while the Opt page reads
+                    # options_history.db, so a perfectly working backfill
+                    # changed nothing the user could see.
                     if con is None:
                         con = btdata.connect_data(btdata.data_db_path(symbol))
                     res = btdata.import_chain(con, symbol, parsed.chain, "onclickmedia")
+                    archived = opthist.append_day(symbol, iso, parsed.chain)
                     # STORED FIRST, then claimed — the same ordering the bars
                     # path needs and for the same reason: `have` is settled
                     # forever, so it must never outrun the data.
                     coverage.mark(self._con, provider, "chain", symbol, "", iso,
-                                  "have", rows=int(res.get("contracts", 0)))
+                                  "have",
+                                  rows=max(int(res.get("contracts", 0)), archived))
                 else:
                     # Empty. A holiday, or a ticker it does not carry — the
                     # two are identical on the wire, so mark() decides using
