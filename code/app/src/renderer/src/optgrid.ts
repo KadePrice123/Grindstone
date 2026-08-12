@@ -226,25 +226,40 @@ export function annualYieldOn(
   return annualYield(mid, capitalFor(strike), sessions)
 }
 
+/** Shares per option contract. This file is per-share EVERYWHERE else on
+ *  purpose (see capitalFor: the multiplier cancels out of every ratio, and
+ *  carrying it was arithmetic that did nothing but invite a units mistake).
+ *
+ *  The exit view is the ONE place it must appear, because a closed trade's
+ *  P&L is the number a trader reads in dollars — "26.10" is a quote, "$2,610"
+ *  is the money. Kade read a 13.25% against a right-hand dollar axis and got
+ *  ~55; the fix is not a better axis, it is showing the actual dollars. */
+export const CONTRACT_MULTIPLIER = 100
+
 /** One day of a picked contract's exit view: what closing the position costs
  *  and what that leaves you, from the entry day forward. */
 export interface ExitPoint {
   date: string
   /** Cost to close at mid, per share — null on one-sided days (a gap). */
   mark: number | null
-  /** P&L as % of the capital the contract ties up (capitalFor: the strike —
-   *  the cash-secured buying-power effect, and the SAME denominator as the
-   *  heatmap, so this panel and that one can be read against each other). */
+  /** P&L in dollars for ONE CONTRACT — credit received minus buy-back cost,
+   *  times the multiplier. The headline number. */
+  pnl: number | null
+  /** The same P&L as % of the capital the contract ties up (capitalFor: the
+   *  strike — the cash-secured buying-power effect, and the SAME denominator
+   *  as the heatmap, so this panel and that one can be read against each
+   *  other). Identical per share or per contract: the x100 cancels. */
   pnlPct: number | null
   dte: number
 }
 
 export interface ExitSeries {
-  /** The opening trade, priced at the clicked day's mid. */
-  entry: { date: string; premium: number; dte: number }
+  /** The opening trade, priced at the clicked day's mid. `credit` is the same
+   *  premium in ONE CONTRACT'S dollars — what actually hit the account. */
+  entry: { date: string; premium: number; credit: number; dte: number }
   points: ExitPoint[]
   /** The most recent day with a two-sided market, or null if none followed. */
-  latest: { date: string; mark: number; pnlPct: number } | null
+  latest: { date: string; mark: number; cost: number; pnl: number; pnlPct: number } | null
 }
 
 /** The exit view of one archived contract, from a clicked entry day.
@@ -272,20 +287,37 @@ export function exitSeries(
   const points: ExitPoint[] = rows
     .filter((r) => r.date >= entryDate)
     .map((r) => {
-      const pnl = r.mid === null ? null
+      // Per share first, because that is the unit both quotes are in; the
+      // multiplier lands once, on the way out.
+      const per = r.mid === null ? null
         : side === 'short' ? premium - r.mid : r.mid - premium
       return {
         date: r.date,
         mark: r.mid,
-        pnlPct: pnl === null ? null : (pnl / capital) * 100,
+        pnl: per === null ? null : per * CONTRACT_MULTIPLIER,
+        pnlPct: per === null ? null : (per / capital) * 100,
         dte: r.dte,
       }
     })
   let latest: ExitSeries['latest'] = null
   for (const p of points) {
-    if (p.mark !== null && p.pnlPct !== null) latest = { date: p.date, mark: p.mark, pnlPct: p.pnlPct }
+    if (p.mark !== null && p.pnl !== null && p.pnlPct !== null) {
+      latest = {
+        date: p.date, mark: p.mark,
+        cost: p.mark * CONTRACT_MULTIPLIER,
+        pnl: p.pnl, pnlPct: p.pnlPct,
+      }
+    }
   }
-  return { entry: { date: entryDate, premium, dte: entry.dte }, points, latest }
+  return {
+    entry: {
+      date: entryDate, premium,
+      credit: premium * CONTRACT_MULTIPLIER,
+      dte: entry.dte,
+    },
+    points,
+    latest,
+  }
 }
 
 /** Build the grid from whatever contracts the filter returned.

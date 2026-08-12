@@ -7147,6 +7147,35 @@ ok('credit is the gain token, debit the loss token',
   const ex = og.exitSeries(life, '2026-05-01', 'short', 100)
   ok('the entry is the clicked day at its own mid',
      ex.entry.date === '2026-05-01' && near(ex.entry.premium, 4.00), JSON.stringify(ex.entry))
+  // THE MULTIPLIER, LANDING EXACTLY ONCE. Kade read a percentage against a
+  // dollar axis and got ~55 for a trade that made $2,610, because the panel
+  // showed a quote and a ratio and left the x100 to him. Quotes stay per
+  // share; money is per contract; the two must never be the same number.
+  ok('the credit is the quote x100 — the money, not the quote',
+     near(ex.entry.credit, 400) && near(ex.entry.premium, 4.00), ex.entry.credit)
+  ok('P&L in dollars is per CONTRACT: 4.00 -> 1.50 is $250',
+     near(ex.points[3].pnl, 250), ex.points[3].pnl)
+  ok('...while the percentage is unchanged by the multiplier (it cancels)',
+     near(ex.points[3].pnlPct, 2.5), ex.points[3].pnlPct)
+  ok('latest carries the cost to close in contract dollars',
+     near(ex.latest.cost, 150) && near(ex.latest.mark, 1.50), JSON.stringify(ex.latest))
+  ok('and its dollar P&L equals credit minus cost, exactly',
+     near(ex.latest.pnl, ex.entry.credit - ex.latest.cost), ex.latest.pnl)
+  ok('a losing day is negative dollars too: 4.00 -> 5.20 is -$120',
+     near(ex.points[1].pnl, -120), ex.points[1].pnl)
+  ok('a gap has no dollar P&L either', ex.points[2].pnl === null, ex.points[2].pnl)
+  // Kade's own trade, to the cent: SPXL 197P, credit 29.25, buy-back 3.15.
+  {
+    const k = og.exitSeries(
+      [{ date: '2026-03-10', mid: 29.25, dte: 220 },
+       { date: '2026-08-12', mid: 3.15, dte: 65 }],
+      '2026-03-10', 'short', 197)
+    ok('the 197P: $2,925 credit, $315 to close, $2,610 profit',
+       near(k.entry.credit, 2925) && near(k.latest.cost, 315) && near(k.latest.pnl, 2610),
+       JSON.stringify({ c: k.entry.credit, x: k.latest.cost, p: k.latest.pnl }))
+    ok('...which is 13.25% of the $19,700 the strike ties up',
+       near(k.latest.pnlPct, 13.2487, 1e-3) && near(197 * 100, 19700), k.latest.pnlPct)
+  }
   ok('the exit view starts AT the entry, P&L zero',
      ex.points[0].date === '2026-05-01' && near(ex.points[0].pnlPct, 0), JSON.stringify(ex.points[0]))
   ok('a short losing ground shows NEGATIVE P&L: credit 4.00, buy-back 5.20 -> -1.2% of strike',
@@ -7460,7 +7489,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 173, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 182, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")

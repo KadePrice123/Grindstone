@@ -337,24 +337,33 @@ export function ExitPanel({
   const box = usePanel((chart) => {
     const t = (d: string) => (Date.parse(d + 'T00:00:00Z') / 1000) as UTCTimestamp
 
-    // P&L %, the left axis — the number Kade actually asked for.
+    // P&L IN DOLLARS PER CONTRACT, the left axis — the money, not a quote.
+    // It was a percentage, and a percentage on a left axis beside dollars on
+    // a right axis is precisely how a reader ends up quoting the green line
+    // against the orange scale: 13.25% "read" as ~55 because that is what the
+    // right-hand axis says at that height. The two axes now carry the SAME
+    // unit ($), so mis-reading one against the other costs nothing. The
+    // percentage still exists — in the caption, next to the capital it
+    // divides by, where it cannot be confused for a price.
     const pnl = chart.addSeries(LineSeries, {
       color: C.up,
       lineWidth: 2,
       priceScaleId: 'left',
-      title: 'P&L',
+      title: 'P&L $',
       priceLineVisible: false,
       lastValueVisible: true,
       pointMarkersVisible: true,
       pointMarkersRadius: 2,
       priceFormat: {
         type: 'custom',
-        formatter: (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`,
-        minMove: 0.01,
+        formatter: (v: number) =>
+          `${v >= 0 ? '+' : '-'}$${Math.abs(v).toLocaleString('en-US', {
+            minimumFractionDigits: 0, maximumFractionDigits: 0 })}`,
+        minMove: 1,
       },
     })
     pnl.setData(points.map((p) =>
-      p.pnlPct === null ? { time: t(p.date) } : { time: t(p.date), value: p.pnlPct }))
+      p.pnl === null ? { time: t(p.date) } : { time: t(p.date), value: p.pnl }))
     pnl.createPriceLine({
       price: 0,
       color: C.text,
@@ -369,11 +378,14 @@ export function ExitPanel({
       scaleMargins: { top: 0.12, bottom: 0.12 },
     })
 
-    // The mark, the right axis: what closing actually costs, in dollars.
+    // The mark, the right axis: the QUOTE, per share, the way a chain prints
+    // it — deliberately not multiplied, because this line is what you would
+    // pay to close and quotes are per-share everywhere else in the app. The
+    // axis title says so, since the other axis is now dollars too.
     const mark = chart.addSeries(LineSeries, {
       color: C.accent,
       lineWidth: 2,
-      title: side === 'short' ? 'buy-back' : 'sell',
+      title: side === 'short' ? 'buy-back (quote)' : 'sell (quote)',
       priceLineVisible: false,
       lastValueVisible: true,
       pointMarkersVisible: true,

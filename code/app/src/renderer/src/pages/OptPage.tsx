@@ -912,12 +912,34 @@ export function OptPage({
                       data-exit-picked={exitPick.date}
                       data-exit-points={exitData?.points.length ?? 0}
                       data-exit-pnl={exitData?.latest ? exitData.latest.pnlPct.toFixed(2) : ''}
+                      data-exit-pnl-usd={exitData?.latest ? exitData.latest.pnl.toFixed(2) : ''}
+                      data-exit-credit={exitData ? exitData.entry.credit.toFixed(2) : ''}
                     >
                       <div className="opt-exit-head">
                         <span className="dim subtle">
                           Exit view · {fmtStrike(exitPick.strike)}{' '}
                           {exitPick.right === 'P' ? 'put' : 'call'} · {exitPick.expiration}
                         </span>
+                        {/* THE HEADLINE, in the money's own units. The chart
+                            axes are per-contract dollars and per-share quotes
+                            respectively; this is the one number that answers
+                            "what did the trade make", so it is not left to be
+                            reconstructed from either axis. */}
+                        {exitData?.latest && exitData.latest.date !== exitData.entry.date ? (
+                          <span className="em">
+                            <span className={exitData.latest.pnl >= 0 ? 'gain' : 'loss'}>
+                              {exitData.latest.pnl >= 0 ? '+' : '−'}
+                              {usd(Math.abs(exitData.latest.pnl))}
+                            </span>
+                            <span className="dim subtle">
+                              {' '}= {usd(exitData.entry.credit)} credit −{' '}
+                              {usd(exitData.latest.cost)} to close ·{' '}
+                              {exitData.latest.pnlPct >= 0 ? '+' : ''}
+                              {exitData.latest.pnlPct.toFixed(2)}% of{' '}
+                              {usd(exitPick.strike * 100)}
+                            </span>
+                          </span>
+                        ) : null}
                         {/* An explicit close, because re-clicking the node is
                             not always possible: a failed series refetch
                             unmounts the chart the node lives on. */}
@@ -1191,6 +1213,11 @@ function seriesCaption(
  *  own strike-column idiom. */
 const fmtStrike = (k: number): string => k.toFixed(k % 1 === 0 ? 0 : 1)
 
+/** Whole dollars with separators — money, not a quote. Cents are noise at
+ *  contract scale and hide the magnitude that was the whole confusion. */
+const usd = (v: number): string =>
+  `$${v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+
 /** The exit view's caption: the numbers on the sub-chart, in words, with the
  *  denominator named. Owns the archive-truncation honesty — a life the archive
  *  cut short must say so, or a flat line at the end reads as "the trade went
@@ -1202,16 +1229,26 @@ function exitCaption(
   const e = data.entry
   const side = pick.side
   const what = `the ${fmtStrike(pick.strike)} of ${pick.expiration}`
+  // ONE CONTRACT, IN DOLLARS. The quote and the money are both shown, in that
+  // order, because reading "29.25" as the credit is a factor-of-100 error and
+  // the panel used to leave that multiplication to the reader.
   const opened = side === 'short'
-    ? `sold ${what} on ${e.date} for ${e.premium.toFixed(2)} credit`
-    : `bought ${what} on ${e.date} for ${e.premium.toFixed(2)}`
+    ? `sold ${what} on ${e.date} at ${e.premium.toFixed(2)} → ${usd(e.credit)} credit`
+    : `bought ${what} on ${e.date} at ${e.premium.toFixed(2)} → ${usd(e.credit)} paid`
   // `latest` always exists (the entry day is itself a priced point), so "has
   // anything traded SINCE entry" is the date comparison, not a null check.
-  const nowPart = data.latest && data.latest.date !== e.date
+  const L = data.latest
+  const capital = pick.strike * 100
+  const nowPart = L && L.date !== e.date
     ? (side === 'short'
-        ? `buy-back ${data.latest.mark.toFixed(2)} as of ${data.latest.date}`
-        : `sells for ${data.latest.mark.toFixed(2)} as of ${data.latest.date}`) +
-      ` → P&L ${data.latest.pnlPct >= 0 ? '+' : ''}${data.latest.pnlPct.toFixed(2)}%`
+        ? `buy it back at ${L.mark.toFixed(2)} = ${usd(L.cost)} as of ${L.date}`
+        : `sells at ${L.mark.toFixed(2)} = ${usd(L.cost)} as of ${L.date}`) +
+      ` → P&L ${L.pnl >= 0 ? '+' : '−'}${usd(Math.abs(L.pnl))}` +
+      (side === 'short'
+        ? ` (${usd(e.credit)} credit − ${usd(L.cost)} to close)`
+        : ` (${usd(L.cost)} out − ${usd(e.credit)} in)`) +
+      `, ${L.pnlPct >= 0 ? '+' : ''}${L.pnlPct.toFixed(2)}% of the ` +
+      `${usd(capital)} the strike ties up`
     : data.points.length > 1
       ? 'no two-sided market since entry — the entry price is the only print'
       : 'entered on the archive’s last recorded day — nothing to follow yet'
@@ -1220,9 +1257,9 @@ function exitCaption(
     ? ` · the archive ends ${lastPt.date} with ${lastPt.dte}d still to run — the tail is missing data, not a quiet trade`
     : ' · followed to expiry'
   return (
-    `EXIT VIEW: ${opened} · ${nowPart} · % is per share against the strike ` +
-    `(cash-secured buying power — the heatmap’s own denominator) · gaps are ` +
-    `one-sided days${tail} · click the node again to close`
+    `EXIT VIEW: ${opened} · ${nowPart} · ONE CONTRACT (×100); the % divides by ` +
+    `the strike as cash-secured buying power, the heatmap’s own denominator · ` +
+    `gaps are one-sided days${tail} · click the node again to close`
   )
 }
 
