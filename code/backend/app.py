@@ -41,6 +41,7 @@ from . import syskey as syskey_mod
 from . import chartobjects as chartobjects_mod
 from . import options as options_mod
 from . import opthist as opthist_mod
+from . import insurance as insurance_mod
 from . import favorites as favorites_mod
 from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
@@ -898,6 +899,289 @@ def create_app(state: State) -> FastAPI:
             return opthist_mod.fanchart(symbol, expiration, strike, right.upper())
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
+
+    # ---- INSURE: puts priced as insurance (docs/INSURE.md) -----------------
+    # Measurement orchestration only — the arithmetic lives in insurance.py,
+    # pure and gate-probed. Single-flight per underlying: the archive changes
+    # at most once a day, and the fingerprint is the ONLY invalidator, so
+    # polling can never re-trigger a sweep on its own.
+    insure_measuring: set[str] = set()
+    insure_lock = threading.Lock()
+
+    def _insure_closes(symbol: str) -> tuple[dict[str, float], str]:
+        """Daily closes for settlement, in the app's own ladder order MINUS
+        the live rung: bar_cache → rec_bars → Yahoo. A measurement must not
+        spend rate limit (INSURE.md), so no Alpaca call ever happens here."""
+        closes: dict[str, float] = {}
+        sources: list[str] = []
+        con = state.market()
+        try:
+            rows = con.execute(
+                "SELECT ts, c FROM bar_cache WHERE symbol=? AND timeframe='1Day'",
+                (symbol,)).fetchall()
+            if rows:
+                sources.append("bar_cache")
+            for r in rows:
+                if r["c"] is not None:
+                    closes[r["ts"][:10]] = r["c"]
+            rows = con.execute(
+                "SELECT ts, close FROM rec_bars WHERE symbol=? AND timeframe='1Day'",
+                (symbol,)).fetchall()
+            if rows:
+                sources.append("rec_bars")
+            for r in rows:
+                if r["close"] is not None:
+                    closes.setdefault(r["ts"][:10], r["close"])
+        finally:
+            con.close()
+        if not closes and market.YahooProvider is not None:
+            try:
+                bars = market.YahooProvider().daily_bars(symbol, period="2y")
+                for b in bars:
+                    if b.get("close") is not None:
+                        closes[str(b["ts"])[:10]] = b["close"]
+                if closes:
+                    sources.append("yahoo (delayed)")
+            except Exception:  # noqa: BLE001
+                LOG.info("insure closes via yahoo failed for %s", symbol, exc_info=True)
+        return closes, "+".join(sources) if sources else "none"
+
+    def _insure_expectancy(symbol: str) -> dict[str, Any]:
+        """The measured side for one underlying: cached when fresh, labeled
+        stale while a recompute runs, honestly 'measuring'/'none' otherwise."""
+        symbol = symbol.upper()
+        hist_con = opthist_mod._open()  # noqa: SLF001 — same package, same idiom
+        if hist_con is None:
+            return {"status": "none", "reason": opthist_mod.NO_DB_REASON}
+        try:
+            meta = opthist_mod._meta(hist_con)  # noqa: SLF001
+            last_hist = hist_con.execute(
+                "SELECT MAX(date) FROM hist_chain WHERE underlying=?",
+                (symbol,)).fetchone()[0]
+        finally:
+            hist_con.close()
+        if not last_hist:
+            return {"status": "none",
+                    "reason": f"no archived chains for {symbol} — record chains "
+                              "from Data management, or import"}
+        closes, closes_src = _insure_closes(symbol)
+        if not closes:
+            return {"status": "none",
+                    "reason": f"no daily closes for {symbol} anywhere — "
+                              "settlement needs a price history"}
+        fp = insurance_mod.fingerprint(meta, last_hist, max(closes))
+
+        con = state.market()
+        try:
+            cached = insurance_mod.cached_expectancy(con, symbol)
+        finally:
+            con.close()
+        if cached and cached["fingerprint"] == fp:
+            return {"status": "ready", "computed_at": cached["computed_at"],
+                    "settle_sources": closes_src, **cached["payload"]}
+
+        with insure_lock:
+            running = symbol in insure_measuring
+            if not running:
+                insure_measuring.add(symbol)
+
+        if not running:
+            def _measure() -> None:
+                t0 = time.monotonic()
+                try:
+                    hc = opthist_mod._open()  # noqa: SLF001 — thread-own connection
+                    if hc is None:
+                        return
+                    try:
+                        today = dt.date.today().isoformat()
+                        payload = insurance_mod.sweep(hc, symbol, closes, today=today)
+                    finally:
+                        hc.close()
+                    mc = connect_market()
+                    try:
+                        insurance_mod.store_expectancy(mc, symbol, fp, payload)
+                    finally:
+                        mc.close()
+                    LOG.info("insure sweep %s: %d rows in %.1fs", symbol,
+                             payload.get("n_rows", 0), time.monotonic() - t0)
+                except Exception:  # noqa: BLE001
+                    LOG.info("insure sweep failed for %s", symbol, exc_info=True)
+                finally:
+                    with insure_lock:
+                        insure_measuring.discard(symbol)
+            threading.Thread(target=_measure, name=f"insure-{symbol}",
+                             daemon=True).start()
+
+        if cached:
+            # Serve the stale payload LABELED — a number with its date beats
+            # a spinner, and the caption owns the age.
+            return {"status": "stale", "computed_at": cached["computed_at"],
+                    "settle_sources": closes_src, **cached["payload"]}
+        return {"status": "measuring"}
+
+    @app.get("/api/insure/status")
+    def insure_status(s=Depends(current_session)) -> dict[str, Any]:
+        """What the page mounts on: the archive's shape, the favorites, and
+        which sweeps are running. Cheap — no chain call, no sweep."""
+        hist_con = opthist_mod._open()  # noqa: SLF001
+        archive: dict[str, Any] | None = None
+        if hist_con is not None:
+            try:
+                meta = opthist_mod._meta(hist_con)
+                rows = hist_con.execute(
+                    "SELECT underlying, MIN(date), MAX(date) FROM hist_chain"
+                    " GROUP BY underlying").fetchall()
+            finally:
+                hist_con.close()
+            archive = {
+                "source": meta.get("source", "your archive"),
+                "built_at": meta.get("built_at", ""),
+                "months": meta.get("months", ""),
+                "underlyings": {r[0]: {"first": r[1], "last": r[2]} for r in rows},
+            }
+        with state.db() as db:
+            favs = [r["key"] for r in db.execute(
+                "SELECT key FROM favorites WHERE user_id=? AND kind='symbol'"
+                " ORDER BY pos", (s.user_id,))]
+        with insure_lock:
+            measuring = sorted(insure_measuring)
+        if archive is None:
+            return {"available": False, "reason": opthist_mod.NO_DB_REASON,
+                    "favorites": [{"symbol": f, "in_archive": False} for f in favs],
+                    "measuring": measuring}
+        return {
+            "available": True,
+            "archive": archive,
+            "favorites": [{"symbol": f, "in_archive": f in archive["underlyings"]}
+                          for f in favs],
+            "measuring": measuring,
+        }
+
+    @app.get("/api/insure/scan")
+    def insure_scan(symbol: str, s=Depends(current_session)) -> dict[str, Any]:
+        """One favorite's scan: today's candidate puts, each married to its
+        risk class's MEASURED history. Raw fractions only — every displayed
+        %/yr derives client-side through optgrid, so this page and the
+        heatmap can never quote two conventions (INSURE.md)."""
+        symbol = symbol.upper()
+        expectancy = _insure_expectancy(symbol)
+
+        closes, _src = _insure_closes(symbol)
+        if not closes:
+            return {"symbol": symbol, "available": False,
+                    "reason": f"no price history for {symbol} — the strike "
+                              "window needs one", "expectancy": expectancy}
+        spot_date = max(closes)
+        spot = closes[spot_date]
+
+        creds = state.creds_for(s.user_id)
+        today = dt.date.today()
+        with state.db() as db:
+            ttl = float(settings_mod.get_all(db, s.user_id)
+                        .get("options_cache_minutes", 15.0))
+        known = state.universe.exact(symbol)
+
+        # Discovery: a narrow near-the-money window across the whole DTE
+        # range, cheap, for its `expirations` field.
+        mcon = state.market()
+        try:
+            disc = options_mod.fetch(
+                creds, symbol,
+                (today + dt.timedelta(days=4)).isoformat(),
+                (today + dt.timedelta(days=60)).isoformat(),
+                round(spot * 0.95, 2), round(spot, 2), "P",
+                con=mcon, ttl_minutes=ttl,
+                asset_class=(known or {}).get("asset_class"))
+            if not disc.get("available"):
+                return {"symbol": symbol, "available": True,
+                        "spot": {"price": spot, "date": spot_date},
+                        "expectancy": expectancy, "candidates": [],
+                        "chain": {"source": disc.get("source", "none"),
+                                  "reason": disc.get("reason")},
+                        "excluded": {}}
+            listed = sorted(set(disc.get("expirations") or []))
+            targets: list[str] = []
+            for anchor in insurance_mod.DTE_ANCHORS:
+                want = today + dt.timedelta(days=anchor)
+                best = min(listed, default=None,
+                           key=lambda e: abs((dt.date.fromisoformat(e) - want).days))
+                if best is not None and best not in targets:
+                    targets.append(best)
+
+            candidates: list[dict[str, Any]] = []
+            chain_src = disc.get("source", "")
+            chain_age = disc.get("age_seconds")
+            for exp in targets:
+                got = options_mod.fetch(
+                    creds, symbol, exp, exp,
+                    round(spot * 0.70, 2), round(spot, 2), "P",
+                    con=mcon, ttl_minutes=ttl,
+                    asset_class=(known or {}).get("asset_class"))
+                if not got.get("available"):
+                    continue
+                chain_src = got.get("source", chain_src)
+                chain_age = got.get("age_seconds", chain_age)
+                candidates.extend(insurance_mod.pick_candidates(
+                    got.get("contracts") or [], spot, today.isoformat()))
+        finally:
+            mcon.close()
+
+        classes = expectancy.get("classes") or {}
+        excluded = {"no_bid": 0, "zero_claim": 0, "thin": 0}
+        out: list[dict[str, Any]] = []
+        for c in candidates:
+            k = c["strike"]
+            bid, ask = c.get("bid"), c.get("ask")
+            two_sided = bid is not None and ask is not None and bid > 0 and ask >= bid
+            offered = ((bid + ask) / 2) / k if two_sided else None
+            if offered is None:
+                excluded["no_bid"] += 1
+            cls = insurance_mod.class_of(
+                c["dte"], c.get("delta") if c["class_mode"] == "delta" else None,
+                c["otm_pct"])
+            measured = classes.get(insurance_mod.class_key(cls)) if cls else None
+            edge = None
+            tier = "unmeasured"
+            if measured and measured.get("n_exp", 0) > 0:
+                n_exp = measured["n_exp"]
+                tier = ("solid" if n_exp >= insurance_mod.SOLID_N
+                        else "thin" if n_exp >= insurance_mod.THIN_N else "none")
+                if n_exp >= insurance_mod.THIN_N:
+                    excluded["thin"] += 0
+                else:
+                    excluded["thin"] += 1
+                req = measured.get("expected_loss_pct")
+                if req is None and measured.get("zero_claims_reason"):
+                    excluded["zero_claim"] += 1
+                if req is not None and offered is not None:
+                    edge = offered - req
+                if offered is not None and measured.get("expiries"):
+                    measured = {**measured,
+                                "win_at_offer": insurance_mod.win_at(
+                                    [tuple(e) for e in measured["expiries"]], offered)}
+            out.append({
+                "occ": c.get("occ_symbol"), "expiration": c["expiration"],
+                "dte": c["dte"], "strike": k,
+                "bid": bid, "ask": ask,
+                "mid": round(((bid + ask) / 2), 4) if two_sided else None,
+                "delta": c.get("delta"), "otm_pct": round(c["otm_pct"], 5),
+                "offered_pct": offered,
+                "class": ({"mode": cls[0], "dte_band": list(cls[1]),
+                           "band": list(cls[2])} if cls else None),
+                "class_mode": c["class_mode"],
+                "measured": measured or {"available": False,
+                                         "reason": "no measured history for this class"},
+                "edge_pct": edge,
+                "tier": tier,
+            })
+        return {
+            "symbol": symbol, "available": True,
+            "spot": {"price": spot, "date": spot_date},
+            "chain": {"source": chain_src, "age_seconds": chain_age},
+            "expectancy": {k: v for k, v in expectancy.items() if k != "classes"},
+            "candidates": out,
+            "excluded": excluded,
+        }
 
     @app.get("/api/symbols/{symbol}/bars")
     def symbol_bars(symbol: str, timeframe: str = "1Day", limit: int = 0,

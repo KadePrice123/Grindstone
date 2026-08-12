@@ -153,6 +153,18 @@ CREATE TABLE IF NOT EXISTS data_cover (
 CREATE INDEX IF NOT EXISTS ix_cover_gap
     ON data_cover (kind, symbol, timeframe, state, period);
 
+-- The Insure page's measured expectancy per underlying (docs/INSURE.md).
+-- App-owned and re-computable from the archive at any time, which is what
+-- makes market.db the right home (the bar_cache argument). The fingerprint
+-- is the ONLY invalidator: the archive changes at most once a day, and
+-- polling must never be able to re-trigger a sweep on its own.
+CREATE TABLE IF NOT EXISTS insure_expectancy (
+    underlying  TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    computed_at TEXT NOT NULL,
+    payload     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS backtest_runs (
     id           INTEGER PRIMARY KEY,
     user_id      INTEGER NOT NULL,
@@ -237,7 +249,7 @@ def market_path() -> Path:
     return data_dir() / "market.db"
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Additive migrations, applied in order for databases created before the
 # current SCHEMA_VERSION. Keep them idempotent-safe: the guard is
@@ -254,6 +266,9 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     # 3: backtest_runs — a new table, created by the _SCHEMA executescript
     # that runs on any version mismatch; no ALTERs needed.
     6: ("ALTER TABLE data_cover ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",),
+    # 7: insure_expectancy — a new table, created by the _SCHEMA executescript
+    # on the version mismatch; the bump is what delivers it to existing
+    # installs (the chain_cover lesson).
     # 5: data_cover — likewise a new table, delivered by the executescript.
     # Listed here only so the version history reads as a history; the bump
     # itself is what makes an existing market.db receive it. (chain_cover was

@@ -6371,6 +6371,166 @@ def _options_chain():
             "boundless chain request was accepted — that is a 10k-row payload"
 
 
+@check("insurance: expirations vote once, zeros refuse, settlement never guesses")
+def _insurance_engine():
+    """The Insure page's expectancy engine (docs/INSURE.md): a put priced as
+    insurance, measured from a fixture archive with KNOWN settlements.
+
+    The lies this check exists to prevent, each with its own mutation: counting
+    pending trials as wins, weighting by entry days instead of expirations,
+    settling against a neighboring session's close, quoting a zero price for a
+    tail nobody has observed, and calling settle-at-the-strike a claim."""
+    import datetime as dt
+    import sqlite3
+    import tempfile
+
+    from backend import insurance as ins
+    from backend import marketdb
+    from backend import opthist as opthist_mod
+
+    # ---- class_of: half-open bands, delta primary, OTM fallback -----------
+    assert ins.class_of(30, -0.20, 0.05) == ("delta", (22, 38), (0.15, 0.25))
+    # THE BOUNDARY: |delta| = 0.15 lands in exactly one bucket.
+    assert ins.class_of(30, -0.15, None) == ("delta", (22, 38), (0.15, 0.25))
+    assert ins.class_of(30, -0.1499, None) == ("delta", (22, 38), (0.05, 0.15))
+    # No delta -> the OTM% fallback is first-class, never silently mixed.
+    assert ins.class_of(30, None, 0.05)[0] == "otm"
+    # DTE 0-3 excluded by design; 61+ out of range.
+    assert ins.class_of(3, -0.2, None) is None and ins.class_of(61, -0.2, None) is None
+    assert ins.class_of(4, -0.2, None)[1] == (4, 10)
+
+    # ---- wilson: fractional-k tolerant, sane endpoints ---------------------
+    lo, hi = ins.wilson(0, 58)
+    assert lo == 0.0 and 0.02 < hi < 0.09, (lo, hi)
+    lo2, hi2 = ins.wilson(2.5, 50)   # cluster sums are fractional
+    assert 0 < lo2 < 0.05 < hi2 < 0.15, (lo2, hi2)
+
+    # ---- trials + class_stats on a KNOWN world ------------------------------
+    # Closes: a continuous weekday series around two expirations.
+    closes = {}
+    d0 = dt.date(2026, 5, 1)
+    for i in range(60):
+        day = d0 + dt.timedelta(days=i)
+        if day.weekday() < 5 and day != dt.date(2026, 5, 25):  # Memorial-day hole
+            closes[day.isoformat()] = 100.0
+    closes["2026-06-19"] = 95.0     # expiration B settles ITM for a 97 put
+    R = lambda d, e, k, bid, ask, delta: {  # noqa: E731
+        "date": d, "expiration": e, "strike": k, "bid": bid, "ask": ask, "delta": delta}
+    rows = [
+        # Expiration A (2026-05-29, settles 100): THREE entry days, one class —
+        # they must cluster to ONE expiration vote. Three against B's two ON
+        # PURPOSE: equal-sized clusters made day-weighting and
+        # expiration-weighting agree by accident, and the clustering mutation
+        # sailed through green. Unequal clusters are what make the two
+        # weightings measurably different things (0.5 vs 0.4 here).
+        R("2026-05-04", "2026-05-29", 97.0, 0.90, 1.00, -0.20),   # 25 DTE
+        R("2026-05-05", "2026-05-29", 97.0, 0.80, 0.90, -0.20),   # 24 DTE
+        R("2026-05-06", "2026-05-29", 97.0, 0.85, 0.95, -0.20),   # 23 DTE
+        # settle == strike is a WIN, strictly: 100-strike put, settles 100.
+        R("2026-05-04", "2026-05-29", 100.0, 2.00, 2.10, -0.34),
+        # Expiration B (2026-06-19, settles 95): the 97 put CLAIMS, sev 2/97.
+        R("2026-05-20", "2026-06-19", 97.0, 1.10, 1.20, -0.20),
+        # zero-bid entry: counts in the CLAIMS ledger, not the priced one.
+        R("2026-05-21", "2026-06-19", 97.0, 0.0, 0.30, -0.20),
+        # pending: expiration beyond `today` — 51 DTE (inside the 39-60 band,
+        # or it would be dropped as unclassable rather than counted).
+        R("2026-05-20", "2026-07-10", 97.0, 1.00, 1.10, -0.20),
+        # DTE outside every band: dropped before trial-hood.
+        R("2026-05-28", "2026-05-29", 97.0, 0.10, 0.20, -0.05),
+    ]
+    ts = ins.trials(rows, closes, today="2026-07-01")
+    assert sum(1 for t in ts if t["status"] == "pending") == 1
+    assert sum(1 for t in ts if t["status"] == "settled") == 6
+    stats = ins.class_stats(ts)
+    k20 = ins.class_key(("delta", (22, 38), (0.15, 0.25)))
+    c = stats[k20]
+    # THREE entry days into expiration A cluster into ONE vote; B is the second.
+    assert c["n_exp"] == 2 and c["n_days"] == 5, c
+    # claim_freq: A claimed 0/3, B claimed 2/2 -> mean(0, 1) = 0.5 — and NOT
+    # the day-weighted 2/5 = 0.4, which is exactly the mutation this pins.
+    assert abs(c["claim_freq"] - 0.5) < 1e-12, c["claim_freq"]
+    # expected loss: mean(sev_A=0, sev_B=2/97) — the pure premium to the digit.
+    assert abs(c["expected_loss_pct"] - (2.0 / 97.0) / 2) < 1e-12, c["expected_loss_pct"]
+    # the zero-bid trial priced NOTHING (n_priced=4 of 5) but voted on claims.
+    assert c["n_priced"] == 4, c["n_priced"]
+    assert c["episodes"] == 1 and c["severity"]["worst_date"] == "2026-06-19", c
+    # settle == strike is a win: the 100P class (delta .25-.35) has no claims,
+    # and THE ZERO-CLAIMS RULE refuses to price it rather than quoting zero.
+    c34 = stats[ins.class_key(("delta", (22, 38), (0.25, 0.35)))]
+    assert c34["claim_freq"] == 0.0 and c34["expected_loss_pct"] is None, c34
+    assert "cannot price this tail" in c34["zero_claims_reason"], c34
+    assert abs(c34["rule_of_three"] - 3.0) < 1e-12, c34  # 3/n_exp, n_exp=1
+
+    # ---- settlement: holiday lookback yes, data gap no ----------------------
+    # Memorial-day-style hole (both weekday neighbours present) -> prior close.
+    hole = {**closes}
+    got = ins._settle_close("2026-05-25", hole)  # the hole created above
+    assert got is not None and got[1] == "2026-05-22", got
+    # weekend expiration -> Friday's close.
+    got = ins._settle_close("2026-05-30", closes)
+    assert got is not None and got[1] == "2026-05-29", got
+    # a MISSING SESSION (three-day gap, neighbour absent too): refused.
+    gap = dict(closes)
+    for d_ in ("2026-05-27", "2026-05-28", "2026-05-29"):
+        gap.pop(d_, None)
+    assert ins._settle_close("2026-05-28", gap) is None, \
+        "a data gap settled against a neighboring day — different contract outcome"
+
+    # ---- win_at: today's credit against history's claims -------------------
+    exps = [("a", 1, 0.0, 0.0), ("b", 1, 1.0, 0.02), ("c", 1, 1.0, 0.005)]
+    assert abs(ins.win_at(exps, 0.01) - 2 / 3) < 1e-12    # beats 0 and 0.005
+    assert ins.win_at([], 0.01) is None
+
+    # ---- suspect: a split-sized jump poisons trials that span it ------------
+    split = dict(closes)
+    split["2026-05-15"] = 50.0  # 2:1 overnight
+    ts2 = ins.trials([R("2026-05-04", "2026-05-29", 97.0, 0.9, 1.0, -0.2)],
+                     split, today="2026-07-01")
+    assert ts2[0]["status"] == "suspect", ts2[0]
+
+    # ---- the cache: fingerprint is the ONLY invalidator ---------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        mdb = marketdb.connect_market(Path(tmp) / "market.db")
+        try:
+            assert ins.cached_expectancy(mdb, "USO") is None
+            ins.store_expectancy(mdb, "USO", "fp1", {"classes": {}, "n_rows": 1})
+            got1 = ins.cached_expectancy(mdb, "USO")
+            assert got1 and got1["fingerprint"] == "fp1"
+            ins.store_expectancy(mdb, "USO", "fp2", {"classes": {}, "n_rows": 2})
+            got2 = ins.cached_expectancy(mdb, "USO")
+            assert got2["fingerprint"] == "fp2" and got2["payload"]["n_rows"] == 2
+        finally:
+            mdb.close()
+
+    # ---- the DTE-0 self-check catches a settlement source that lies ---------
+    with tempfile.TemporaryDirectory() as tmp:
+        hp = Path(tmp) / "options_history.db"
+        hdb = sqlite3.connect(hp)
+        hdb.executescript(opthist_mod._ARCHIVE_SCHEMA)  # noqa: SLF001
+        lie_rows = []
+        for i in range(25):
+            d_ = (dt.date(2026, 3, 2) + dt.timedelta(days=i * 7)).isoformat()
+            # DTE-0 row: strike 100, "close" says 100 -> intrinsic 0, but the
+            # mid says 8 — chains and closes describing different instruments.
+            lie_rows.append(("LIE", d_, d_, 100.0, "P", 7.9, 8.1, None,
+                             None, None, None, None))
+        hdb.executemany("INSERT INTO hist_chain VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        lie_rows)
+        hdb.commit(); hdb.close()
+        lie_closes = {r[1]: 100.0 for r in lie_rows}
+        con = sqlite3.connect(hp)
+        con.row_factory = sqlite3.Row
+        res = ins.sweep(con, "LIE", lie_closes, today="2026-12-31")
+        con.close()
+        assert res["selfcheck"]["suspect"] is True, res["selfcheck"]
+        # ...and an EMPTY archive refuses with a reason, never an empty 200.
+        con = sqlite3.connect(hp)
+        con.row_factory = sqlite3.Row
+        miss = ins.sweep(con, "GHOST", {}, today="2026-12-31")
+        con.close()
+        assert miss["available"] is False and "no archived chains" in miss["reason"]
+
+
 @check("option legs: expiration is the primitive, hosts drive, snapshots survive")
 def _chart_legs():
     """A leg is a point (expiration, strike) with an acceptance window, drawn
