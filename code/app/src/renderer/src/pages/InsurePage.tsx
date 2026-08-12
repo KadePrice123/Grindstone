@@ -56,7 +56,14 @@ interface ScanResponse {
   reason?: string
   spot?: { price: number; date: string }
   chain?: { source: string; age_seconds?: number; reason?: string }
-  expectancy: { status: string; computed_at?: string; reason?: string }
+  expectancy: {
+    status: string; computed_at?: string; reason?: string
+    /** The measuring window — 'baked' status means the loader's all-regime
+     *  sweep (2008→, crashes included); anything else is the runtime
+     *  archive's ~12 months. */
+    window?: { first: string; last: string }
+    regimes?: string
+  }
   /** The measuring year's own confession: its return and worst drawdown. */
   window_character?: {
     return_pct: number; max_drawdown_pct: number; first: string; last: string
@@ -316,13 +323,28 @@ export function InsurePage() {
             onPick={(d) => d.occ && openOpt(d.symbol, d.occ)} />
           <div className="dim subtle opt-note">
             each dot is one candidate put · across: the measured cost of claims
-            for its risk class ({status?.archive ? 'your archive' : 'archive'}
-            {status?.archive?.months ? `, ~${status.archive.months} months — one
-            regime; a year without a crash under-prices crashes` : ''}) · up:
-            today’s credit at the mid · both %/yr of the strike, the heatmap’s
-            own unit · dots above the dashed line pay more than the risk has
-            cost · ring = measured claim frequency · hollow = thin evidence
-            (8–19 expirations) · click a dot to open the contract
+            for its risk class
+            {(() => {
+              // Each symbol names ITS OWN measuring window: a baked symbol
+              // has seen 2008 and 2020; a runtime one has seen ~12 months —
+              // and those two fair lines deserve very different trust.
+              const spans = Object.values(scans)
+                .filter((s): s is ScanResponse => !!s?.available)
+                .map((s) => {
+                  const e = s.expectancy
+                  if (e?.status === 'baked' && e.window) {
+                    return `${s.symbol} measured ${e.window.first.slice(0, 4)}→` +
+                      `${e.window.last.slice(0, 4)}` +
+                      (e.regimes ? ` (${e.regimes})` : '')
+                  }
+                  return `${s.symbol} ~12 months — one regime, no crash seen`
+                })
+              return spans.length ? ` (${spans.join(' · ')})` : ' (your archive)'
+            })()}
+            {' '}· up: today’s credit at the mid · both %/yr of the strike, the
+            heatmap’s own unit · dots above the dashed line pay more than the
+            risk has cost · ring = measured claim frequency · hollow = thin
+            evidence (8–19 expirations) · click a dot to open the contract
             {honesty.noBid || honesty.zeroClaim || honesty.thin ? (
               ` · not plotted: ${[
                 honesty.noBid ? `${honesty.noBid} with no bid` : '',

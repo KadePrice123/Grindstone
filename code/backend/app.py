@@ -954,6 +954,14 @@ def create_app(state: State) -> FastAPI:
         if hist_con is None:
             return {"status": "none", "reason": opthist_mod.NO_DB_REASON}
         try:
+            # THE BAKED MEASUREMENT WINS. The loader's all-regime sweep has
+            # seen 2008 and 2020; the runtime archive's 12 months has not,
+            # and a fair line that remembers a crash beats a fresher one that
+            # cannot (docs/INSURE.md v1.1). Freshness costs a few months of
+            # expirations that barely move an 18-year mean.
+            baked = insurance_mod.baked_expectancy(hist_con, symbol)
+            if baked is not None:
+                return {"status": "baked", **baked}
             meta = opthist_mod._meta(hist_con)  # noqa: SLF001
             last_hist = hist_con.execute(
                 "SELECT MAX(date) FROM hist_chain WHERE underlying=?",

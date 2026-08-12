@@ -280,8 +280,8 @@ def class_stats(all_trials: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         # ceiling on what the true claim rate could still be.
         if total_claim == 0:
             expected_loss = None
-            zero_reason = (f"no claims in {n_exp} expirations — one year "
-                           f"cannot price this tail")
+            zero_reason = (f"no claims in {n_exp} expirations — a window with "
+                           f"no claims cannot price this tail")
             rule3 = 3.0 / n_exp
         else:
             expected_loss = sum(s for (_e, _n, _c, s) in expiries) / n_exp
@@ -337,6 +337,141 @@ def class_stats(all_trials: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             "expiries": [[e, n, c, s] for (e, n, c, s) in expiries],
         }
     return out
+
+
+# -------------------------------------------------- streaming aggregation
+# The 18-year vault is ~13M put rows — materializing every trial dict at once
+# is a multi-GB list, so the bake folds CHUNKS of trials into this aggregate
+# and finishes once. trials() is row-independent (its suspect scan derives
+# from `closes` alone), which is what makes chunking EXACT — and the gate
+# pins finish_stats(fold(...)) == class_stats(...) on the same fixture, so
+# the two aggregation paths cannot drift.
+
+def new_agg() -> dict[str, Any]:
+    return {"classes": {}}
+
+
+def fold_trials(agg: dict[str, Any], chunk: list[dict[str, Any]]) -> None:
+    for t in chunk:
+        key = class_key(t["class"])
+        c = agg["classes"].get(key)
+        if c is None:
+            mode, dte_band, band = t["class"]
+            c = agg["classes"][key] = {
+                "mode": mode, "dte_band": list(dte_band), "band": list(band),
+                "exp": {},          # exp -> [n, claim_sum, sev_sum]
+                "credits": [],      # priced trials' credit_pct
+                "win_sum": 0.0, "win_n": 0, "loss_sum": 0.0, "loss_n": 0,
+                "delta_sum": 0.0, "delta_n": 0,
+                "n_days": 0, "first": None, "last": None,
+                "censored": {"pending": 0, "no_close": 0, "no_spot": 0, "suspect": 0},
+            }
+        st = t["status"]
+        if st != "settled":
+            k = {"pending": "pending", "no-close": "no_close",
+                 "no-spot": "no_spot", "suspect": "suspect"}.get(st)
+            if k:
+                c["censored"][k] += 1
+            continue
+        e = c["exp"].setdefault(t["expiration"], [0, 0.0, 0.0])
+        e[0] += 1
+        e[1] += t["claim"]
+        e[2] += t["sev_pct"]
+        c["n_days"] += 1
+        c["first"] = t["date"] if c["first"] is None else min(c["first"], t["date"])
+        c["last"] = t["date"] if c["last"] is None else max(c["last"], t["date"])
+        if t.get("delta") is not None:
+            c["delta_sum"] += abs(t["delta"])
+            c["delta_n"] += 1
+        if t["credit_pct"] is not None:
+            c["credits"].append(t["credit_pct"])
+            net = t["credit_pct"] - t["sev_pct"]
+            if net > 0:
+                c["win_sum"] += net
+                c["win_n"] += 1
+            else:
+                c["loss_sum"] += -net
+                c["loss_n"] += 1
+
+
+def finish_stats(agg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The same payload shape class_stats produces, from folded aggregates."""
+    out: dict[str, dict[str, Any]] = {}
+    for key, c in agg["classes"].items():
+        base = {"mode": c["mode"], "dte_band": c["dte_band"], "band": c["band"]}
+        if not c["exp"]:
+            out[key] = {**base, "n_exp": 0, "n_days": 0, "censored": c["censored"]}
+            continue
+        expiries = []
+        for exp in sorted(c["exp"]):
+            n, claim_sum, sev_sum = c["exp"][exp]
+            expiries.append((exp, n, claim_sum / n, sev_sum / n))
+        n_exp = len(expiries)
+        total_claim = sum(cl for (_e, _n, cl, _s) in expiries)
+        lo, hi = wilson(total_claim, n_exp)
+        if total_claim == 0:
+            expected_loss = None
+            zero = {"zero_claims_reason": f"no claims in {n_exp} expirations — "
+                                          "a window with no claims cannot price this tail",
+                    "rule_of_three": 3.0 / n_exp}
+        else:
+            expected_loss = sum(s for (_e, _n, _c, s) in expiries) / n_exp
+            zero = {}
+        claim_sevs = [(e, s) for (e, _n, cl, s) in expiries if cl > 0]
+        severity = None
+        if claim_sevs:
+            vals = sorted(s for (_e, s) in claim_sevs)
+            worst_exp, worst = max(claim_sevs, key=lambda x: x[1])
+            p95 = vals[min(len(vals) - 1, math.ceil(0.95 * len(vals)) - 1)]
+            severity = {"mean": sum(vals) / len(vals), "p95": p95,
+                        "worst": worst, "worst_date": worst_exp}
+        win_rate = wl_ratio = None
+        if c["credits"]:
+            med = statistics.median(c["credits"])
+            win_rate = sum(1 for (_e, _n, _c2, s) in expiries if s < med) / n_exp
+            if c["win_n"] and c["loss_n"]:
+                wl_ratio = ((c["win_sum"] / c["win_n"])
+                            / (c["loss_sum"] / c["loss_n"]))
+        out[key] = {
+            **base,
+            "n_exp": n_exp, "n_days": c["n_days"],
+            "episodes": _episodes([(e, cl) for (e, _n, cl, _s) in expiries]),
+            "claim_freq": total_claim / n_exp,
+            "ci90": [lo, hi],
+            "implied": (c["delta_sum"] / c["delta_n"]) if c["delta_n"] else None,
+            "expected_loss_pct": expected_loss,
+            **zero,
+            "severity": severity,
+            "win_rate": win_rate, "wl_ratio": wl_ratio,
+            "n_priced": len(c["credits"]),
+            "window": {"first": c["first"], "last": c["last"]},
+            "censored": c["censored"],
+            "expiries": [[e, n, cl, s] for (e, n, cl, s) in expiries],
+        }
+    return out
+
+
+def baked_expectancy(hist_con: sqlite3.Connection,
+                     underlying: str) -> dict[str, Any] | None:
+    """The loader-baked, all-regime measurement, when the archive carries one.
+
+    Preferred over the runtime sweep because its window has SEEN crashes —
+    the runtime archive's 12 months structurally cannot price a tail, and the
+    caption difference ('measured 2008–2026' vs 'one regime') is the whole
+    reason the bake exists (docs/INSURE.md v1.1)."""
+    try:
+        row = hist_con.execute(
+            "SELECT computed_at, payload FROM hist_expectancy WHERE underlying=?",
+            (underlying.upper(),)).fetchone()
+    except sqlite3.Error:
+        return None  # the table simply is not baked into this archive
+    if not row:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except (ValueError, TypeError):
+        return None
+    return {"computed_at": row["computed_at"], **payload}
 
 
 # --------------------------------------------------------------- the sweep

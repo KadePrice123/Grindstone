@@ -6488,6 +6488,43 @@ def _insurance_engine():
                      split, today="2026-07-01")
     assert ts2[0]["status"] == "suspect", ts2[0]
 
+    # ---- the STREAMING aggregator is the batch one, bit for bit -------------
+    # The 18-year bake folds chunks (13M trials will not fit as dicts); if its
+    # arithmetic drifts from class_stats by one field, the baked fair line and
+    # the runtime fair line become two different instruments with one name.
+    agg = ins.new_agg()
+    ins.fold_trials(agg, ts[:3])   # split at an arbitrary seam on purpose
+    ins.fold_trials(agg, ts[3:])
+    folded = ins.finish_stats(agg)
+    assert folded == stats, (
+        "fold/finish diverged from class_stats on identical trials:\n"
+        f"folded: {json.dumps(folded, sort_keys=True)[:400]}\n"
+        f"batch:  {json.dumps(stats, sort_keys=True)[:400]}")
+
+    # ---- the baked (all-regime) expectancy is PREFERRED and labeled ---------
+    with tempfile.TemporaryDirectory() as tmp:
+        hp2 = Path(tmp) / "options_history.db"
+        b = sqlite3.connect(hp2)
+        b.executescript(opthist_mod._ARCHIVE_SCHEMA)  # noqa: SLF001
+        b.execute("CREATE TABLE hist_expectancy (underlying TEXT PRIMARY KEY,"
+                  " computed_at TEXT NOT NULL, payload TEXT NOT NULL)")
+        b.execute("INSERT INTO hist_expectancy VALUES (?,?,?)",
+                  ("SPY", "2026-08-13T00:00:00Z", json.dumps({
+                      "classes": {}, "window": {"first": "2008-01-02",
+                                                "last": "2026-04-17"},
+                      "regimes": "includes 2008 and 2020"})))
+        b.commit()
+        b.row_factory = sqlite3.Row
+        got = ins.baked_expectancy(b, "spy")
+        assert got is not None and got["window"]["first"] == "2008-01-02", got
+        assert got["regimes"] == "includes 2008 and 2020", got
+        # an archive WITHOUT the table refuses quietly (None), never raises —
+        # every pre-bake install hits this path on every scan.
+        b.execute("DROP TABLE hist_expectancy")
+        b.commit()
+        assert ins.baked_expectancy(b, "SPY") is None
+        b.close()
+
     # ---- the cache: fingerprint is the ONLY invalidator ---------------------
     with tempfile.TemporaryDirectory() as tmp:
         mdb = marketdb.connect_market(Path(tmp) / "market.db")
