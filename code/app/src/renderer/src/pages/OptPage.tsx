@@ -81,7 +81,14 @@ interface SeriesRow {
  *  view's raw material once a node is picked. */
 interface ContractHistResponse {
   available: boolean
-  rows: { date: string; dte: number; mid: number | null; bid: number | null; ask: number | null }[]
+  rows: {
+    date: string; dte: number
+    mid: number | null; bid: number | null; ask: number | null
+    /** The feed's own delta for THIS contract on THIS day — the exit view's
+     *  assignment-odds line. Already returned by /options/history. */
+    delta?: number | null
+    iv?: number | null
+  }[]
   source: string
   reason?: string
 }
@@ -549,7 +556,9 @@ export function OptPage({
   const exitData = useMemo(() => {
     if (!exitPick || !exitHist?.available) return null
     return exitSeries(
-      exitHist.rows.map((r) => ({ date: r.date, mid: r.mid, dte: r.dte })),
+      exitHist.rows.map((r) => ({
+        date: r.date, mid: r.mid, dte: r.dte, delta: r.delta ?? null,
+      })),
       exitPick.date, exitPick.side, exitPick.strike,
       spotByDate, exitPick.right)
   }, [exitHist, exitPick, spotByDate])
@@ -932,6 +941,12 @@ export function OptPage({
                       data-exit-worst-itm={
                         exitData?.worstIntrinsic
                           ? exitData.worstIntrinsic.intrinsic.toFixed(2) : ''}
+                      data-exit-odds-entry={
+                        exitData?.odds.entry != null ? exitData.odds.entry.toFixed(2) : ''}
+                      data-exit-odds-latest={
+                        exitData?.odds.latest ? exitData.odds.latest.pct.toFixed(2) : ''}
+                      data-exit-odds-peak={
+                        exitData?.odds.peak ? exitData.odds.peak.pct.toFixed(2) : ''}
                     >
                       <div className="opt-exit-head">
                         <span className="dim subtle">
@@ -956,6 +971,20 @@ export function OptPage({
                               {exitData.latest.pnlPct.toFixed(2)}% of{' '}
                               {usd(exitPick.strike * 100)}
                             </span>
+                            {/* The risk half of the headline. P&L says what
+                                it made; this says how close it came. */}
+                            {exitData.odds.latest ? (
+                              <span className="dim subtle">
+                                {' · assignment odds '}
+                                {exitData.odds.entry != null
+                                  ? `${exitData.odds.entry.toFixed(0)}% → ` : ''}
+                                {exitData.odds.latest.pct.toFixed(
+                                  exitData.odds.latest.pct >= 10 ? 0 : 1)}%
+                                {exitData.odds.peak &&
+                                 exitData.odds.peak.pct > exitData.odds.latest.pct + 0.05
+                                  ? `, peak ${exitData.odds.peak.pct.toFixed(0)}%` : ''}
+                              </span>
+                            ) : null}
                           </span>
                         ) : null}
                         {/* An explicit close, because re-clicking the node is
@@ -1292,14 +1321,34 @@ function exitCaption(
           ? ` · deepest it ever went in the money: ${w.intrinsic.toFixed(2)} on ${w.date}`
           : '')
   })()
+  // ASSIGNMENT ODDS in words: where it opened, where it stands, and the worst
+  // it ever got. The peak is the one the other two cannot imply — a position
+  // that ends at 2% may have been at 60% in between, and that is the risk
+  // that was actually run.
+  const odds = (() => {
+    const o = data.odds
+    if (o.entry === null && o.latest === null) {
+      return ' · the feed recorded no delta for this contract, so there are no ' +
+        'assignment odds to show'
+    }
+    const pct = (v: number): string => `${v.toFixed(v >= 10 ? 0 : 1)}%`
+    const parts: string[] = []
+    if (o.entry !== null) parts.push(`${pct(o.entry)} at entry`)
+    if (o.latest) parts.push(`${pct(o.latest.pct)} on ${o.latest.date}`)
+    const peaked = o.peak && o.latest && o.peak.pct > o.latest.pct + 0.05 &&
+      (o.entry === null || o.peak.pct > o.entry + 0.05)
+    return ` · ASSIGNMENT ODDS (|delta|, the feed’s own chance of finishing in ` +
+      `the money): ${parts.join(' → ')}` +
+      (peaked ? `, peaking at ${pct(o.peak!.pct)} on ${o.peak!.date}` : '')
+  })()
   const lastPt = data.points[data.points.length - 1]
   const tail = lastPt && lastPt.dte > 0
     ? ` · the archive ends ${lastPt.date} with ${lastPt.dte}d still to run — the tail is missing data, not a quiet trade`
     : ' · followed to expiry'
   return (
-    `EXIT VIEW: ${opened} · ${nowPart}${split} · ONE CONTRACT (×100); the % ` +
-    `divides by the strike as cash-secured buying power, the heatmap’s own ` +
-    `denominator · gaps are one-sided days${tail} · click the node again to close`
+    `EXIT VIEW: ${opened} · ${nowPart}${odds}${split} · ONE CONTRACT (×100); ` +
+    `the % divides by the strike as cash-secured buying power, the heatmap’s ` +
+    `own denominator · gaps are one-sided days${tail} · click the node again to close`
   )
 }
 

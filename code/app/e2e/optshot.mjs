@@ -731,6 +731,9 @@ try {
       intrinsic: e?.getAttribute('data-exit-intrinsic') ?? null,
       extrinsic: e?.getAttribute('data-exit-extrinsic') ?? null,
       worstItm: e?.getAttribute('data-exit-worst-itm') ?? null,
+      oddsEntry: e?.getAttribute('data-exit-odds-entry') ?? null,
+      oddsLatest: e?.getAttribute('data-exit-odds-latest') ?? null,
+      oddsPeak: e?.getAttribute('data-exit-odds-peak') ?? null,
       canvases: document.querySelectorAll('.opt-exit canvas').length,
       caption: (e?.querySelector('.opt-note')?.textContent ?? '').slice(0, 460),
     })
@@ -814,6 +817,24 @@ try {
       caption_explains: (await opt.eval(
         `(document.querySelector('.opt-exit .opt-note')?.textContent ?? '')
            .includes('does NOT decay')`)),
+    }))
+    // ASSIGNMENT ODDS: the line Kade actually asked for. It must MOVE — a
+    // flat reading is the failure that sent the intrinsic band back, so the
+    // proof is the spread between entry, latest and peak, not merely that
+    // some number rendered.
+    const oe = st.oddsEntry === '' ? null : Number(st.oddsEntry)
+    const ol = st.oddsLatest === '' ? null : Number(st.oddsLatest)
+    const op = st.oddsPeak === '' ? null : Number(st.oddsPeak)
+    console.log('ODDS PROOF:', JSON.stringify({
+      entry: oe, latest: ol, peak: op,
+      recorded: oe !== null && ol !== null,
+      moved: oe !== null && ol !== null ? Math.abs(oe - ol) > 0.5 : null,
+      peak_is_max: op !== null && oe !== null && ol !== null
+        ? op >= Math.max(oe, ol) - 1e-9 : null,
+      in_range: [oe, ol, op].every((v) => v === null || (v >= 0 && v <= 100)),
+      caption_names_it: (await opt.eval(
+        `(document.querySelector('.opt-exit .opt-note')?.textContent ?? '')
+           .includes('ASSIGNMENT ODDS')`)),
     }))
   }
   await shot(opt, 'opt-history-exit.png')

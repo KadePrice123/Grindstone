@@ -7267,6 +7267,60 @@ ok('credit is the gain token, debit the loss token',
        none.points.every((p) => p.intrinsic === null && p.extrinsic === null) &&
        near(none.points[3].pnl, 250) && none.worstIntrinsic === null, '')
 
+    // ---- ASSIGNMENT ODDS: the line that moves when intrinsic cannot -------
+    // Kade asked for the value that changes through the life of the trade and
+    // says how close assignment got. Intrinsic does not: on his SPXL 150P it
+    // was flat zero from open to close while |delta| ran 25% -> 2%. These are
+    // his real archived numbers, so the case that motivated the line is the
+    // case that pins it.
+    const k150 = [
+      { date: '2026-03-30', mid: 6.70, dte: 25, delta: -0.2511 },
+      { date: '2026-04-01', mid: 2.48, dte: 23, delta: -0.1145 },
+      { date: '2026-04-07', mid: 2.08, dte: 17, delta: -0.0987 },
+      { date: '2026-04-10', mid: 0.30, dte: 14, delta: -0.0211 },
+    ]
+    // SPXL sat ~200-290 against a 150 strike: never remotely in the money.
+    const k150spots = new Map([
+      ['2026-03-30', 198.4], ['2026-04-01', 210.0],
+      ['2026-04-07', 232.0], ['2026-04-10', 241.1],
+    ])
+    const kx = og.exitSeries(k150, '2026-03-30', 'short', 150, k150spots, 'P')
+    ok('THE MOTIVATING CASE: intrinsic is flat zero for the whole trade',
+       kx.points.every((p) => p.intrinsic === 0), JSON.stringify(kx.points.map((p) => p.intrinsic)))
+    ok('...while assignment odds move across it: 25% -> 2%',
+       near(kx.odds.entry, 25.11, 1e-2) && near(kx.odds.latest.pct, 2.11, 1e-2),
+       JSON.stringify(kx.odds))
+    ok('odds are |delta| as a percentage, sign discarded (a put delta is negative)',
+       kx.points.every((p) => p.assignPct > 0), JSON.stringify(kx.points.map((p) => p.assignPct)))
+    ok('the peak is the WORST moment, not the latest one',
+       kx.odds.peak.pct === kx.odds.entry && kx.odds.peak.date === '2026-03-30',
+       JSON.stringify(kx.odds.peak))
+    // A trade that ends calm after a scare must still report the scare — the
+    // whole reason peak exists separately from latest.
+    const scare = og.exitSeries(
+      [{ date: '2026-05-01', mid: 1.00, dte: 40, delta: -0.10 },
+       { date: '2026-05-04', mid: 6.00, dte: 37, delta: -0.62 },
+       { date: '2026-05-06', mid: 0.40, dte: 35, delta: -0.04 }],
+      '2026-05-01', 'short', 100)
+    ok('a trade that ends at 4% but touched 62% reports BOTH',
+       near(scare.odds.latest.pct, 4) && near(scare.odds.peak.pct, 62) &&
+       scare.odds.peak.date === '2026-05-04', JSON.stringify(scare.odds))
+    // The greek does not depend on our being able to price a close: a
+    // one-sided day still has a valid assignment reading.
+    const oneSided = og.exitSeries(
+      [{ date: '2026-05-01', mid: 4.00, dte: 40, delta: -0.30 },
+       { date: '2026-05-04', mid: null, dte: 37, delta: -0.44 }],
+      '2026-05-01', 'short', 100)
+    ok('a day with no mid still carries its assignment odds',
+       oneSided.points[1].mark === null && near(oneSided.points[1].assignPct, 44),
+       JSON.stringify(oneSided.points[1]))
+    // A feed that omitted the greek gets nulls, never a fabricated 0% — "no
+    // chance of assignment" is the most dangerous thing this could invent.
+    const noGreek = og.exitSeries(life, '2026-05-01', 'short', 100)
+    ok('no recorded delta means NO odds, never a comforting zero',
+       noGreek.points.every((p) => p.assignPct === null) &&
+       noGreek.odds.entry === null && noGreek.odds.peak === null, '')
+
     // Parity clamp: a stale mark below intrinsic is not NEGATIVE time value.
     const deep = og.exitSeries(
       [{ date: '2026-05-01', mid: 4.00, dte: 220 },
@@ -7553,7 +7607,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 193, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 200, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")

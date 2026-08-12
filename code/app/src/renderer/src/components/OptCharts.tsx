@@ -46,6 +46,10 @@ const C = {
   under: '#6BA4E8',
   band: 'rgba(232, 234, 237, 0.10)',
   bandInner: 'rgba(232, 234, 237, 0.16)',
+  // Assignment odds are not money and not the underlying, so they get a
+  // colour that is neither — violet reads as "risk reading" beside the
+  // green/orange/red the dollars already own.
+  odds: '#A98EDA',
 }
 
 const DAY = 86400
@@ -431,6 +435,42 @@ export function ExitPanel({
       axisLabelVisible: true,
       title: side === 'short' ? 'credit' : 'cost',
     })
+
+    // ---- ASSIGNMENT ODDS, the line that moves for the whole life ----------
+    // |delta| as a percentage: the market's own estimate of finishing in the
+    // money, and the reading that says how close assignment ever got. It
+    // earns its place because intrinsic does NOT move on an out-of-the-money
+    // trade — Kade's 150P sat at zero intrinsic from open to close while its
+    // odds ran 25% down to 2%, which is the entire life of the position.
+    //
+    // On its OWN overlay scale, pinned to the lower band: it is a probability,
+    // not money, and putting it on either dollar axis would invite exactly
+    // the cross-axis misreading that cost us a round already. No axis of its
+    // own is drawn (the library only renders left/right), so the value rides
+    // on the last-value chip and the crosshair, and the caption states it in
+    // words.
+    if (points.some((p) => p.assignPct !== null)) {
+      const odds = chart.addSeries(LineSeries, {
+        color: C.odds,
+        lineWidth: 2,
+        priceScaleId: 'odds',
+        title: 'assignment odds',
+        priceLineVisible: false,
+        lastValueVisible: true,
+        pointMarkersVisible: true,
+        pointMarkersRadius: 2,
+        priceFormat: {
+          type: 'custom',
+          formatter: (v: number) => `${v.toFixed(v >= 10 ? 0 : 1)}%`,
+          minMove: 0.1,
+        },
+      })
+      odds.setData(points.map((p) =>
+        p.assignPct === null ? { time: t(p.date) } : { time: t(p.date), value: p.assignPct }))
+      chart.priceScale('odds').applyOptions({
+        scaleMargins: { top: 0.72, bottom: 0 },
+      })
+    }
   }, [points, premium, side, height], height)
   return <div ref={box} style={{ height }} />
 }

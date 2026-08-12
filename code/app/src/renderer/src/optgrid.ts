@@ -251,6 +251,15 @@ export interface ExitPoint {
    *  premium seller actually sold. Clamped at 0 — a mark below intrinsic is
    *  a stale/one-sided quote, not negative time value. */
   extrinsic: number | null
+  /** ASSIGNMENT ODDS for this day, as a percentage: |delta| × 100.
+   *
+   *  Delta is the market's own estimate of the chance this contract finishes
+   *  in the money, which is the number that says how close assignment is —
+   *  and unlike intrinsic it MOVES for the whole life of an out-of-the-money
+   *  trade (Kade's 150P ran 25% at entry to 2% at the end while intrinsic sat
+   *  flat at zero the entire time). Recorded per day by the feed, not modelled
+   *  here: null when the feed omitted the greek, never a guess. */
+  assignPct: number | null
   /** P&L in dollars for ONE CONTRACT — credit received minus buy-back cost,
    *  times the multiplier. The headline number. */
   pnl: number | null
@@ -277,6 +286,14 @@ export interface ExitSeries {
    *  after a deep excursion. `intrinsic: 0` means it never crossed; null
    *  means no day's underlying close was available to judge. */
   worstIntrinsic: { date: string; intrinsic: number } | null
+  /** Assignment odds at entry and at the latest print, plus the scariest day
+   *  the trade ever saw. The peak is the point: a trade that ended at 2% may
+   *  have been at 40% in the middle, and only the peak says so. */
+  odds: {
+    entry: number | null
+    latest: { date: string; pct: number } | null
+    peak: { date: string; pct: number } | null
+  }
 }
 
 /** The exit view of one archived contract, from a clicked entry day.
@@ -300,7 +317,7 @@ export function intrinsicOf(
 }
 
 export function exitSeries(
-  rows: { date: string; mid: number | null; dte: number }[],
+  rows: { date: string; mid: number | null; dte: number; delta?: number | null }[],
   entryDate: string, side: LegSide, strike: number,
   /** The underlying's close per date, for the intrinsic/extrinsic split.
    *  Optional: without it both come back null and the panel draws the mark
@@ -334,6 +351,11 @@ export function exitSeries(
         // negative time value, and a dip below zero here would draw the
         // extrinsic band inverted.
         extrinsic: r.mid === null || intr === null ? null : Math.max(0, r.mid - intr),
+        // The greek stands on its own: an assignment reading is valid on a
+        // day whose market was one-sided (no mid), because the feed's delta
+        // does not depend on our being able to price a close.
+        assignPct: typeof r.delta === 'number' && Number.isFinite(r.delta)
+          ? Math.abs(r.delta) * 100 : null,
         pnl: per === null ? null : per * CONTRACT_MULTIPLIER,
         pnlPct: per === null ? null : (per / capital) * 100,
         dte: r.dte,
@@ -361,6 +383,19 @@ export function exitSeries(
       worst = { date: p.date, intrinsic: p.intrinsic }
     }
   }
+  // ASSIGNMENT ODDS: at entry, now, and at the worst moment. The peak is what
+  // the other two cannot show — a trade that opened at 25% and closed at 2%
+  // may have touched 60% in between, and that excursion is the risk actually
+  // taken rather than the risk it happened to end on.
+  let oddsLatest: { date: string; pct: number } | null = null
+  let oddsPeak: { date: string; pct: number } | null = null
+  for (const p of points) {
+    if (p.assignPct === null) continue
+    oddsLatest = { date: p.date, pct: p.assignPct }
+    if (oddsPeak === null || p.assignPct > oddsPeak.pct) {
+      oddsPeak = { date: p.date, pct: p.assignPct }
+    }
+  }
   return {
     entry: {
       date: entryDate, premium,
@@ -370,6 +405,11 @@ export function exitSeries(
     points,
     latest,
     worstIntrinsic: worst,
+    odds: {
+      entry: points[0]?.assignPct ?? null,
+      latest: oddsLatest,
+      peak: oddsPeak,
+    },
   }
 }
 
