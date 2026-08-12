@@ -706,24 +706,50 @@ try {
   // 14px node tolerance — where the nodes are depends on the data.
   await setUnit('pct')
   await sleep(1500)
+  // The BIGGEST canvas in the card, not the first: lightweight-charts builds
+  // several (panes, axes, crosshair), and the first in DOM order can be a
+  // narrow axis strip — clicking its middle lands on the price scale, where
+  // the chart has no series to hit.
   const histRect = () => opt.eval(`(() => {
-    const c = document.querySelector('.opt-card canvas')
-    if (!c) return null
-    const r = c.getBoundingClientRect()
-    return JSON.stringify({ x: r.x, y: r.y, w: r.width, h: r.height })
+    const cs = [...document.querySelectorAll('.opt-card canvas')]
+    if (cs.length === 0) return null
+    const r = cs.map((c) => c.getBoundingClientRect())
+      .sort((a, b) => b.width * b.height - a.width * a.height)[0]
+    return JSON.stringify({ x: r.x, y: r.y, w: r.width, h: r.height, n: cs.length })
   })()`)
+  console.log('HIST RECT:', await histRect())
   const exitState = () => opt.eval(`(() => {
     const e = document.querySelector('.opt-exit')
     return JSON.stringify({
       picked: e?.getAttribute('data-exit-picked') ?? null,
       points: e?.getAttribute('data-exit-points') ?? null,
       pnl: e?.getAttribute('data-exit-pnl') ?? null,
+      usd: e?.getAttribute('data-exit-pnl-usd') ?? null,
+      credit: e?.getAttribute('data-exit-credit') ?? null,
+      // THE SPLIT. intrinsic + extrinsic must re-add to the buy-back quote,
+      // and an empty intrinsic means "no underlying close", NOT "zero".
+      intrinsic: e?.getAttribute('data-exit-intrinsic') ?? null,
+      extrinsic: e?.getAttribute('data-exit-extrinsic') ?? null,
+      worstItm: e?.getAttribute('data-exit-worst-itm') ?? null,
       canvases: document.querySelectorAll('.opt-exit canvas').length,
-      caption: (e?.querySelector('.opt-note')?.textContent ?? '').slice(0, 220),
+      caption: (e?.querySelector('.opt-note')?.textContent ?? '').slice(0, 460),
     })
   })()`)
+  // The series must actually HAVE nodes before clicking at one. Without this
+  // the fan raced a refetch triggered by the unit/match changes above and the
+  // whole section reported "no node clicked" on a working build.
+  // (data-series-n lives on the chart's own wrapper, NOT on .opt-card — the
+  // first version of this wait queried .opt-card, read null, and timed out on
+  // a build whose chart was fully drawn.)
+  await waitFor(() => opt.eval(
+    `Number(document.querySelector('[data-series-n]')?.getAttribute('data-series-n') ?? 0) > 0`),
+    'a history series with nodes', 20000)
+  await sleep(1200)
   let clicked = false
-  for (const fx of [0.55, 0.45, 0.65, 0.35, 0.75, 0.5, 0.6, 0.4, 0.7, 0.3]) {
+  // Two passes: lightweight-charts derives its click from the crosshair, which
+  // updates on rAF, so a first sweep can lose the race even where a node is.
+  const fan = [0.55, 0.45, 0.65, 0.35, 0.75, 0.5, 0.6, 0.4, 0.7, 0.3]
+  for (const fx of [...fan, ...fan]) {
     const rj = await histRect()
     if (!rj) break
     const r = JSON.parse(rj)
@@ -732,7 +758,7 @@ try {
     // Crosshair first (three strides, the draw tools' own pattern), then press.
     for (const dx of [-24, -9, 0]) {
       await opt.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + dx, y })
-      await sleep(30)
+      await sleep(40)
     }
     await opt.send('Input.dispatchMouseEvent',
       { type: 'mousePressed', x, y, button: 'left', clickCount: 1 })
@@ -767,6 +793,29 @@ try {
       `(document.querySelector('.opt-exit .opt-note')?.textContent ?? '')
          .includes('buying power')`)),
   }))
+  // The decomposition, checked against the quote it decomposes. Done here
+  // rather than only in the gate because the SPOT comes from the live bars
+  // series, which the offline probe cannot supply — this is the only place
+  // the real underlying meets the real archive.
+  {
+    const st = JSON.parse(finalExit)
+    const i = st.intrinsic === '' || st.intrinsic === null ? null : Number(st.intrinsic)
+    const x = st.extrinsic === '' || st.extrinsic === null ? null : Number(st.extrinsic)
+    const markTxt = /buy it back at ([\d.]+)/.exec(st.caption ?? '')
+    const mark = markTxt ? Number(markTxt[1]) : null
+    console.log('SPLIT PROOF:', JSON.stringify({
+      intrinsic: i, extrinsic: x, mark,
+      // The load-bearing identity: the two halves ARE the quote.
+      halves_readd: i !== null && x !== null && mark !== null
+        ? Math.abs(i + x - mark) < 0.02 : 'no-spot',
+      // A real ITM contract exercises the branch a flat-zero one never would.
+      exercised_itm_branch: i !== null && i > 0,
+      worst_itm: st.worstItm,
+      caption_explains: (await opt.eval(
+        `(document.querySelector('.opt-exit .opt-note')?.textContent ?? '')
+           .includes('does NOT decay')`)),
+    }))
+  }
   await shot(opt, 'opt-history-exit.png')
   // The CLOSE control dismisses the view. (Re-clicking the node toggles too,
   // but through the same setter — and re-landing a canvas click is a

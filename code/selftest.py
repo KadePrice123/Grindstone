@@ -7212,6 +7212,70 @@ ok('credit is the gain token, debit the loss token',
   // say "the archive ends with 215d still to run" instead of a quiet flat.
   ok('the last point knows how much life the archive left unrecorded',
      ex.points[3].dte === 215, ex.points[3].dte)
+
+  // ---- THE SPLIT: which half of the cost to close will evaporate ---------
+  // Kade asked whether intrinsic should replace P&L. Measured on his own
+  // archive, 91% of contracts that start OTM never cross, so an intrinsic
+  // line alone says nothing on most picks — but the DECOMPOSITION always
+  // does: extrinsic is time value and decays to zero, intrinsic is real
+  // moneyness and does not. mark = intrinsic + extrinsic, always.
+  {
+    // A 100-strike PUT against an underlying that dives through it and back.
+    const spots = new Map([
+      ['2026-05-01', 120],   // far OTM: all time value
+      ['2026-05-04', 96],    // ITM by 4
+      ['2026-05-05', 90],    // ITM by 10 (but this day has no mid: a gap)
+      ['2026-05-06', 130],   // recovered, back to all time value
+    ])
+    const s = og.exitSeries(life, '2026-05-01', 'short', 100, spots, 'P')
+    ok('OTM day: intrinsic 0, extrinsic is the whole mark',
+       near(s.points[0].intrinsic, 0) && near(s.points[0].extrinsic, 4.00),
+       JSON.stringify(s.points[0]))
+    ok('ITM day: intrinsic is strike-spot, extrinsic is the remainder',
+       near(s.points[1].intrinsic, 4) && near(s.points[1].extrinsic, 1.20),
+       JSON.stringify(s.points[1]))
+    ok('the two halves ALWAYS re-add to the mark',
+       s.points.every((p) => p.mark === null ||
+         Math.abs((p.intrinsic + p.extrinsic) - p.mark) < 1e-9), '')
+    ok('a no-mid day splits into nothing, not into zeros',
+       s.points[2].intrinsic === null && s.points[2].extrinsic === null,
+       JSON.stringify(s.points[2]))
+    ok('the deepest excursion is remembered, not just the latest state',
+       s.worstIntrinsic.intrinsic === 4 && s.worstIntrinsic.date === '2026-05-04',
+       JSON.stringify(s.worstIntrinsic))
+    ok('...which P&L alone hides: it ends GREEN despite having gone ITM',
+       s.latest.pnl > 0 && s.worstIntrinsic.intrinsic > 0,
+       `${s.latest.pnl} / ${s.worstIntrinsic.intrinsic}`)
+
+    // A CALL is the mirror: intrinsic is spot-strike.
+    const c = og.exitSeries(life, '2026-05-01', 'short', 100, spots, 'C')
+    ok('a call takes intrinsic from the other side',
+       near(c.points[0].intrinsic, 20) && near(c.points[1].intrinsic, 0),
+       JSON.stringify([c.points[0].intrinsic, c.points[1].intrinsic]))
+
+    // AN UNKNOWN SPOT IS NOT A ZERO SPOT. Drawing 0 intrinsic for a day we
+    // cannot price would claim the position was safely out of the money.
+    const partial = og.exitSeries(life, '2026-05-01', 'short', 100,
+                                  new Map([['2026-05-01', 120]]), 'P')
+    ok('a day with no underlying close has NO split, rather than a zero one',
+       near(partial.points[0].intrinsic, 0) && partial.points[1].intrinsic === null,
+       JSON.stringify([partial.points[0].intrinsic, partial.points[1].intrinsic]))
+    // And with no spots at all the split is absent everywhere — the panel
+    // falls back to the undecomposed mark it drew before this existed.
+    const none = og.exitSeries(life, '2026-05-01', 'short', 100)
+    ok('no spots at all: every split is null and the P&L is untouched',
+       none.points.every((p) => p.intrinsic === null && p.extrinsic === null) &&
+       near(none.points[3].pnl, 250) && none.worstIntrinsic === null, '')
+
+    // Parity clamp: a stale mark below intrinsic is not NEGATIVE time value.
+    const deep = og.exitSeries(
+      [{ date: '2026-05-01', mid: 4.00, dte: 220 },
+       { date: '2026-05-04', mid: 3.00, dte: 217 }],
+      '2026-05-01', 'short', 100, new Map([['2026-05-01', 120], ['2026-05-04', 94]]), 'P')
+    ok('a mark below parity clamps time value at zero, never negative',
+       near(deep.points[1].intrinsic, 6) && near(deep.points[1].extrinsic, 0),
+       JSON.stringify(deep.points[1]))
+  }
 }
 
 // ---- PAYOFF: known-answer structures, checked against hand arithmetic -----
@@ -7489,7 +7553,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 182, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 193, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")

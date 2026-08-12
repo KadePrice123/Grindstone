@@ -535,6 +535,14 @@ export function OptPage({
     }
   }, [exitPick, symbol])
 
+  // The underlying's close per session, for the intrinsic/extrinsic split.
+  // Same `bars` the history view already draws — the spot is what turns a
+  // quote into "how much of this is real moneyness", and no new endpoint is
+  // needed because the panel above is already showing this exact series.
+  const spotByDate = useMemo(
+    () => new Map(bars.map((b) => [b.ts.slice(0, 10), b.close])),
+    [bars])
+
   // The exit series itself — pure arithmetic in optgrid, gate-probed there.
   // Everything it needs rides on the frozen pick, so a series re-match under
   // the chart cannot change one number here.
@@ -542,8 +550,9 @@ export function OptPage({
     if (!exitPick || !exitHist?.available) return null
     return exitSeries(
       exitHist.rows.map((r) => ({ date: r.date, mid: r.mid, dte: r.dte })),
-      exitPick.date, exitPick.side, exitPick.strike)
-  }, [exitHist, exitPick])
+      exitPick.date, exitPick.side, exitPick.strike,
+      spotByDate, exitPick.right)
+  }, [exitHist, exitPick, spotByDate])
 
   // The underlying, for the history view's indicator only: past closes share
   // a timeline with the contract's past prices. (On the term structure the x
@@ -914,6 +923,15 @@ export function OptPage({
                       data-exit-pnl={exitData?.latest ? exitData.latest.pnlPct.toFixed(2) : ''}
                       data-exit-pnl-usd={exitData?.latest ? exitData.latest.pnl.toFixed(2) : ''}
                       data-exit-credit={exitData ? exitData.entry.credit.toFixed(2) : ''}
+                      data-exit-intrinsic={
+                        exitData?.latest?.intrinsic != null
+                          ? exitData.latest.intrinsic.toFixed(2) : ''}
+                      data-exit-extrinsic={
+                        exitData?.latest?.extrinsic != null
+                          ? exitData.latest.extrinsic.toFixed(2) : ''}
+                      data-exit-worst-itm={
+                        exitData?.worstIntrinsic
+                          ? exitData.worstIntrinsic.intrinsic.toFixed(2) : ''}
                     >
                       <div className="opt-exit-head">
                         <span className="dim subtle">
@@ -1252,14 +1270,36 @@ function exitCaption(
     : data.points.length > 1
       ? 'no two-sided market since entry — the entry price is the only print'
       : 'entered on the archive’s last recorded day — nothing to follow yet'
+  // THE SPLIT, in words. The whole point is which half of the cost to close
+  // will disappear on its own: extrinsic decays to zero by expiry, intrinsic
+  // does not. A silent flat-zero intrinsic line is a real reading ("never in
+  // the money"), so say it rather than leaving an unexplained empty band.
+  const split = (() => {
+    if (!L || L.intrinsic === null || L.extrinsic === null) {
+      return data.points.some((p) => p.intrinsic !== null)
+        ? '' // some days known, the latest not — the band says it
+        : ' · no underlying closes for this span, so the cost cannot be split ' +
+          'into moneyness and time value'
+    }
+    const w = data.worstIntrinsic
+    const never = w !== null && w.intrinsic === 0
+    return ` · of the ${L.mark.toFixed(2)} to close, ${L.intrinsic.toFixed(2)} is ` +
+      `intrinsic (real moneyness, does NOT decay) and ${L.extrinsic.toFixed(2)} is ` +
+      `time value (decays to zero by expiry)` +
+      (never
+        ? ' — and it never went in the money at any point'
+        : w !== null && w.intrinsic > 0
+          ? ` · deepest it ever went in the money: ${w.intrinsic.toFixed(2)} on ${w.date}`
+          : '')
+  })()
   const lastPt = data.points[data.points.length - 1]
   const tail = lastPt && lastPt.dte > 0
     ? ` · the archive ends ${lastPt.date} with ${lastPt.dte}d still to run — the tail is missing data, not a quiet trade`
     : ' · followed to expiry'
   return (
-    `EXIT VIEW: ${opened} · ${nowPart} · ONE CONTRACT (×100); the % divides by ` +
-    `the strike as cash-secured buying power, the heatmap’s own denominator · ` +
-    `gaps are one-sided days${tail} · click the node again to close`
+    `EXIT VIEW: ${opened} · ${nowPart}${split} · ONE CONTRACT (×100); the % ` +
+    `divides by the strike as cash-secured buying power, the heatmap’s own ` +
+    `denominator · gaps are one-sided days${tail} · click the node again to close`
   )
 }
 

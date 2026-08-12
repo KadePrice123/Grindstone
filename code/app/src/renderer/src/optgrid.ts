@@ -242,6 +242,15 @@ export interface ExitPoint {
   date: string
   /** Cost to close at mid, per share — null on one-sided days (a gap). */
   mark: number | null
+  /** The part of `mark` that is REAL MONEYNESS: max(0, strike − spot) for a
+   *  put, max(0, spot − strike) for a call. It does not decay. null when the
+   *  underlying's close for this day is unknown — an unknown split is not a
+   *  zero split, and drawing 0 would claim the position was safely OTM. */
+  intrinsic: number | null
+  /** The rest: TIME VALUE, which decays to zero by expiry. This is what a
+   *  premium seller actually sold. Clamped at 0 — a mark below intrinsic is
+   *  a stale/one-sided quote, not negative time value. */
+  extrinsic: number | null
   /** P&L in dollars for ONE CONTRACT — credit received minus buy-back cost,
    *  times the multiplier. The headline number. */
   pnl: number | null
@@ -259,7 +268,15 @@ export interface ExitSeries {
   entry: { date: string; premium: number; credit: number; dte: number }
   points: ExitPoint[]
   /** The most recent day with a two-sided market, or null if none followed. */
-  latest: { date: string; mark: number; cost: number; pnl: number; pnlPct: number } | null
+  latest: {
+    date: string; mark: number; cost: number; pnl: number; pnlPct: number
+    intrinsic: number | null; extrinsic: number | null
+  } | null
+  /** The deepest the position ever went in the money, over the days whose
+   *  spot is known — the danger P&L cannot show, since a trade can end green
+   *  after a deep excursion. `intrinsic: 0` means it never crossed; null
+   *  means no day's underlying close was available to judge. */
+  worstIntrinsic: { date: string; intrinsic: number } | null
 }
 
 /** The exit view of one archived contract, from a clicked entry day.
@@ -275,9 +292,20 @@ export interface ExitSeries {
  *  caller reports that instead of charting from a made-up entry. Days after
  *  entry with no mid stay as GAPS (null mark/pnlPct), same as every other
  *  chart in this app — a missing quote is not a zero. */
+export function intrinsicOf(
+  spot: number | null | undefined, strike: number, right: 'P' | 'C'
+): number | null {
+  if (typeof spot !== 'number' || !Number.isFinite(spot)) return null
+  return Math.max(0, right === 'P' ? strike - spot : spot - strike)
+}
+
 export function exitSeries(
   rows: { date: string; mid: number | null; dte: number }[],
-  entryDate: string, side: LegSide, strike: number
+  entryDate: string, side: LegSide, strike: number,
+  /** The underlying's close per date, for the intrinsic/extrinsic split.
+   *  Optional: without it both come back null and the panel draws the mark
+   *  undecomposed, which is what it did before the split existed. */
+  spots?: Map<string, number>, right: 'P' | 'C' = 'P'
 ): ExitSeries | null {
   const capital = capitalFor(strike)
   if (capital === null) return null
@@ -291,9 +319,21 @@ export function exitSeries(
       // multiplier lands once, on the way out.
       const per = r.mid === null ? null
         : side === 'short' ? premium - r.mid : r.mid - premium
+      // THE SPLIT. Intrinsic is what the contract is worth on moneyness
+      // alone and does NOT decay; extrinsic is the time value that goes to
+      // zero by expiry. A premium seller sold the extrinsic — so "is the
+      // cost to close going to evaporate?" is exactly this decomposition.
+      // Both null without a spot: an unknown split must not read as 0
+      // intrinsic, which would claim the position was safely out of the money.
+      const intr = intrinsicOf(spots?.get(r.date), strike, right)
       return {
         date: r.date,
         mark: r.mid,
+        intrinsic: r.mid === null ? null : intr,
+        // Clamped: a mark below parity is a stale or one-sided quote, not
+        // negative time value, and a dip below zero here would draw the
+        // extrinsic band inverted.
+        extrinsic: r.mid === null || intr === null ? null : Math.max(0, r.mid - intr),
         pnl: per === null ? null : per * CONTRACT_MULTIPLIER,
         pnlPct: per === null ? null : (per / capital) * 100,
         dte: r.dte,
@@ -306,7 +346,19 @@ export function exitSeries(
         date: p.date, mark: p.mark,
         cost: p.mark * CONTRACT_MULTIPLIER,
         pnl: p.pnl, pnlPct: p.pnlPct,
+        intrinsic: p.intrinsic, extrinsic: p.extrinsic,
       }
+    }
+  }
+  // DID IT EVER GO IN THE MONEY? The excursion P&L hides: a position can
+  // finish green having been deep ITM and come back, and that is a different
+  // trade from one that never got close. Measured over days we actually know
+  // the spot for; null when we know none of them.
+  let worst: ExitSeries['worstIntrinsic'] = null
+  for (const p of points) {
+    if (p.intrinsic === null) continue
+    if (worst === null || p.intrinsic > worst.intrinsic) {
+      worst = { date: p.date, intrinsic: p.intrinsic }
     }
   }
   return {
@@ -317,6 +369,7 @@ export function exitSeries(
     },
     points,
     latest,
+    worstIntrinsic: worst,
   }
 }
 

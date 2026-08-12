@@ -21,6 +21,7 @@
  */
 import { useEffect, useRef } from 'react'
 import {
+  AreaSeries,
   ColorType,
   LineSeries,
   LineStyle,
@@ -377,6 +378,32 @@ export function ExitPanel({
       borderColor: C.grid,
       scaleMargins: { top: 0.12, bottom: 0.12 },
     })
+
+    // INTRINSIC, the floor under the buy-back line and the reason this panel
+    // has three series instead of two. The cost to close is intrinsic plus
+    // extrinsic, and the two behave oppositely: extrinsic is time value and
+    // decays to zero by expiry, intrinsic is real moneyness and does not.
+    // The gap between the two lines is therefore "what will evaporate on its
+    // own"; the filled area below is "what you would actually have to buy
+    // back". Measured on Kade's archive, 91% of contracts that start OTM
+    // never cross — so this area is usually flat at zero, and that flatness
+    // IS the reading: the position was never in danger.
+    //
+    // Drawn FIRST so the mark line sits on top of its own decomposition.
+    if (points.some((p) => p.intrinsic !== null)) {
+      const intr = chart.addSeries(AreaSeries, {
+        lineColor: C.down,
+        topColor: 'rgba(229, 72, 77, 0.28)',
+        bottomColor: 'rgba(229, 72, 77, 0.04)',
+        lineWidth: 1,
+        title: 'intrinsic',
+        priceLineVisible: false,
+        lastValueVisible: true,
+        priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+      })
+      intr.setData(points.map((p) =>
+        p.intrinsic === null ? { time: t(p.date) } : { time: t(p.date), value: p.intrinsic }))
+    }
 
     // The mark, the right axis: the QUOTE, per share, the way a chain prints
     // it — deliberately not multiplied, because this line is what you would
