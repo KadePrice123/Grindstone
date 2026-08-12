@@ -148,6 +148,14 @@ export const AppsIcon = () => (
   </Icon>
 )
 
+export const InsureIcon = () => (
+  <Icon label="Insure">
+    {/* a shield — selling puts is writing insurance, and the glyph says so */}
+    <path d="M12 3.5 L19 6.2 V11.5 C19 16 16.2 19.3 12 21 C7.8 19.3 5 16 5 11.5 V6.2 Z" />
+    <path d="M9 12 L11.2 14.2 L15.2 9.5" />
+  </Icon>
+)
+
 /** The page registry's keys (GET /api/pages, urls.ts PAGES) -> glyphs, shared
  *  by the favorite tiles and the apps launcher. Look up via pageIcon() so
  *  unmapped or future pages fall back to the generic page glyph. */
@@ -165,6 +173,7 @@ export const PAGE_ICONS: Record<string, () => React.JSX.Element> = {
   search: SearchMiniIcon,
   article: PageMiniIcon,
   help: PageMiniIcon,
+  insure: InsureIcon,
 }
 
 export function pageIcon(key: string): () => React.JSX.Element {

@@ -20,7 +20,7 @@ const TLD =
 
 /** Platform pages that are addressable by name. */
 const PAGES = ['home', 'accounts', 'data', 'settings', 'search', 'article', 'news',
-  'charts', 'help', 'backtest', 'opt', 'notepad'] as const
+  'charts', 'help', 'backtest', 'opt', 'notepad', 'insure'] as const
 
 /**
  * Bare words that are addresses in their own right. A browser bar navigates
@@ -41,6 +41,7 @@ const PAGE_ROUTES: Record<string, string> = {
   help: 'help',
   backtest: 'backtest',
   notepad: 'notepad',
+  insure: 'insure',
 }
 
 const BARE: Record<string, string> = {
@@ -59,6 +60,11 @@ const BARE: Record<string, string> = {
   notes: 'notepad',
   pad: 'notepad',
   clipboard: 'notepad',
+  // The Insure scanner's own vocabulary. "puts" is a word a put-seller
+  // actually types; it is not a ticker (no US listing), so the ambiguity
+  // that keeps "ai" out of this table does not apply.
+  insurance: 'insure',
+  puts: 'insure',
 }
 
 /** The route key for a page from the backend's registry, or null if that

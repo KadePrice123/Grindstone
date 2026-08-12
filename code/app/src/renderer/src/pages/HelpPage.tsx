@@ -25,6 +25,7 @@ export const HELP_SECTIONS = [
   'multi-charts',
   'data',
   'backtest-help',
+  'insurance',
   'settings-help',
   'troubleshooting',
 ] as const
@@ -431,6 +432,45 @@ const SECTIONS: Sec[] = [
           <li><strong>Data</strong>: the chain database (<code>spy_options.db</code>,
             multi-GB) does not ship with the app; the page says honestly whether it is
             present, and Settings holds its path.</li>
+        </ul>
+      </>
+    ),
+  },
+  {
+    id: 'insurance',
+    title: 'Insure: selling puts, priced like insurance',
+    body: (
+      <>
+        <p><code>insure.gs</code> scans your <strong>favorite symbols</strong> for
+          cash-secured puts and prices each one the way an actuary prices a policy:
+          the credit is premium income, assignment is the claim, and the archive of
+          recorded chains is the claims history. One graph answers the whole
+          question — <em>is the market paying more than this risk has actually
+          cost?</em></p>
+        <ul>
+          <li><strong>The insurance line</strong>: every dot is one candidate put.
+            Across is the <em>measured</em> cost of claims for its risk class
+            (what selling this insurance historically paid out); up is the credit
+            offered today, in the same unit. The 45° diagonal is fair — above it
+            the market overpays, and the dot&rsquo;s height above the line is the
+            edge. &ldquo;How much credit do I need&rdquo; is the dot&rsquo;s
+            x-coordinate.</li>
+          <li><strong>Assignment odds, two numbers, never blended</strong>: what the
+            market&rsquo;s delta claims, and how often that class actually finished
+            in the money across the archive&rsquo;s expirations. The gap between
+            them is the finding.</li>
+          <li><strong>Sample-size honesty</strong>: solid dots have ≥20 measured
+            expirations; hollow dots 8–19; thinner evidence is listed, never
+            plotted or ranked. A class with <em>zero</em> observed claims refuses
+            to quote a price — one year cannot price a tail it never saw.</li>
+          <li><strong>One regime</strong>: the archive is about a year of chains.
+            A window with no crash under-prices crashes, and the caption says so
+            on every scan.</li>
+          <li><strong>Measurement only</strong>: no orders, no positions —
+            clicking a dot opens the contract on the Opt page.</li>
+          <li>Early assignment is not modeled separately: for a cash-secured
+            seller its cost is ≈ intrinsic at that moment, the same quantity the
+            settlement measures.</li>
         </ul>
       </>
     ),

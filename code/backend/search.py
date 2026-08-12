@@ -46,6 +46,10 @@ PAGES = [
      "words": ["settings", "setting", "preferences", "theme", "web"], "ready": True},
     {"key": "help", "title": "Help", "words": ["help", "guide", "manual", "docs",
      "how", "tutorial"], "ready": True},
+    # Tight on purpose (the backtest note above): "puts" is not a US ticker,
+    # "csp" is cash-secured put in every option seller's vocabulary.
+    {"key": "insure", "title": "Insure", "words": ["insure", "insurance", "puts",
+     "premium", "credit", "csp", "scanner"], "ready": True},
 ]
 
 # Help SECTIONS are searchable destinations of their own (Kade's spec:
@@ -82,6 +86,9 @@ HELP_TOPICS = [
     {"section": "backtest-help", "title": "Backtesting",
      "words": ["backtest", "backtesting", "preset", "presets", "sweep", "verify",
                "calibrate", "calibration", "condor", "spread", "delta", "dte"]},
+    {"section": "insurance", "title": "Insure: selling puts, priced like insurance",
+     "words": ["insurance", "insure", "put", "puts", "premium", "assignment",
+               "actuarial", "claim", "edge"]},
     {"section": "settings-help", "title": "Settings explained",
      "words": ["configure", "boost", "engine", "theme", "depth"]},
     {"section": "troubleshooting", "title": "Troubleshooting",

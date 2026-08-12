@@ -7492,6 +7492,48 @@ ok('credit is the gain token, debit the loss token',
   }
 }
 
+// ---- THE INSURE ARITHMETIC: one unit, enforced by identity ----------------
+// The scanner's y-axis and the heatmap's cell must be THE SAME NUMBER for the
+// same inputs — that identity is what lets the two surfaces be read against
+// each other, and it holds because both go through annualise/tradingDaysTo.
+{
+  const near = (a, b, tol = 1e-9) => typeof a === 'number' && Math.abs(a - b) < tol
+  const from = '2026-08-06'
+  const exp = '2027-01-15'
+  const dteDays = Math.round(
+    (Date.parse(exp + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / 86400000)
+  const offered = 0.795 / 80  // the USO cell the two-panels check already pins
+  const pt = og.insurePoint(offered, 0.003, from, exp)
+  const heat = og.annualYieldOn(0.795, 80, from, dteDays)
+  ok('the insurance line quotes the heatmap number EXACTLY (one unit, one path)',
+     pt !== null && near(pt.y, heat * 100), `${pt && pt.y} vs ${heat * 100}`)
+  ok('edgeAnnual is literally y minus x', near(pt.edgeAnnual, pt.y - pt.x), pt.edgeAnnual)
+  ok('offered above required plots ABOVE the fair line',
+     og.insurePoint(0.005, 0.003, from, exp).edgeAnnual > 0, '')
+  // Refusals: no side invented, no date guessed.
+  ok('no offered price, no dot', og.insurePoint(null, 0.003, from, exp) === null, '')
+  ok('no required price, no dot', og.insurePoint(0.005, null, from, exp) === null, '')
+  ok('an unparseable expiration refuses', og.insurePoint(0.005, 0.003, from, 'junk') === null, '')
+
+  // requiredCreditPct: the zero-claims rule survives the wire.
+  ok('a measured class quotes its pure premium',
+     near(og.requiredCreditPct({ n_exp: 27, n_days: 100, expected_loss_pct: 0.0031 }), 0.0031), '')
+  ok('a zero-claims class has NO price, never a zero one',
+     og.requiredCreditPct({ n_exp: 58, n_days: 200, expected_loss_pct: null }) === null, '')
+  ok('edge propagates null instead of inventing zero',
+     og.edgePct(null, 0.003) === null && og.edgePct(0.005, null) === null &&
+     near(og.edgePct(0.0052, 0.0031), 0.0021), '')
+
+  // Confidence tiers and the claim ring: band edges pinned.
+  ok('20 expirations is solid, 19 and 8 are thin, 7 is nothing',
+     og.confidenceOf(20) === 'solid' && og.confidenceOf(19) === 'thin' &&
+     og.confidenceOf(8) === 'thin' && og.confidenceOf(7) === 'none', '')
+  ok('the claim ring steps at 10% and 25%, half-open',
+     og.claimRing(0.05) === 0 && og.claimRing(0.0999) === 0 &&
+     og.claimRing(0.10) === 1 && og.claimRing(0.25) === 1 &&
+     og.claimRing(0.2501) === 2 && og.claimRing(null) === 0, '')
+}
+
 // ---- PAYOFF: known-answer structures, checked against hand arithmetic -----
 const pf = await import('./src/renderer/src/payoff.ts')
 const PL = (side, right, strike, premium) => ({ side, right, strike, premium })
@@ -7767,7 +7809,7 @@ console.log(JSON.stringify(out))
     bad_r = [x for x in results if not x["cond"]]
     assert not bad_r, "the leg model is wrong:\n" + "\n".join(
         f"  - {x['name']} (got {x['detail']})" for x in bad_r)
-    assert len(results) >= 200, f"the probe lost assertions: only {len(results)} ran"
+    assert len(results) >= 211, f"the probe lost assertions: only {len(results)} ran"
 
 
 @check("chart constraints: lock removes DOF exactly, and says why it will not move")

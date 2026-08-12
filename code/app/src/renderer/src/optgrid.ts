@@ -413,6 +413,75 @@ export function exitSeries(
   }
 }
 
+// ---------------------------------------------------------------------------
+// THE INSURE PAGE'S ARITHMETIC (docs/INSURE.md). Appended HERE, not in a twin
+// file, so the annualisation convention cannot fork: the scanner's axes and
+// the heatmap's cells go through the same annualise/tradingDaysTo or they do
+// not compile.
+
+/** One risk class's measured history, as the scan endpoint returns it —
+ *  RAW FRACTIONS. Every %/yr on screen derives here, client-side. */
+export interface MeasuredClass {
+  n_exp: number
+  n_days: number
+  episodes?: number
+  claim_freq?: number
+  implied?: number | null
+  expected_loss_pct?: number | null
+  win_rate?: number | null
+  wl_ratio?: number | null
+  win_at_offer?: number | null
+  severity?: { mean: number; p95: number; worst: number; worst_date: string } | null
+  window?: { first: string; last: string }
+  zero_claims_reason?: string
+  rule_of_three?: number
+}
+
+/** The measured pure premium — the credit at which this insurance has
+ *  historically broken even. Null when the class saw zero claims: an
+ *  unobserved tail is unmeasurable, never free (the zero-claims rule). */
+export function requiredCreditPct(m: MeasuredClass | null | undefined): number | null {
+  if (!m || typeof m.expected_loss_pct !== 'number') return null
+  return m.expected_loss_pct
+}
+
+/** offered − required, same units. Null propagates: an edge that cannot be
+ *  computed is absent, never zero. */
+export function edgePct(offered: number | null, required: number | null): number | null {
+  if (offered === null || required === null) return null
+  return offered - required
+}
+
+/** How much a dot's measurement is worth: solid ≥20 expirations, thin 8–19,
+ *  below that nothing — a dot IS a claim of measurement. */
+export function confidenceOf(nExp: number): 'solid' | 'thin' | 'none' {
+  return nExp >= 20 ? 'solid' : nExp >= 8 ? 'thin' : 'none'
+}
+
+/** One dot on the insurance line: x = required, y = offered, both annualised
+ *  through the SAME scale factor — which is what makes the 45° diagonal the
+ *  fair price by construction. Refuses (null) when either side is missing or
+ *  the tenor cannot be counted. */
+export function insurePoint(
+  offeredPct: number | null, requiredPct: number | null,
+  today: string, expiration: string
+): { x: number; y: number; edgeAnnual: number } | null {
+  if (offeredPct === null || requiredPct === null) return null
+  const sessions = tradingDaysTo(today, expiration)
+  if (sessions === null) return null
+  const x = annualise(requiredPct, sessions)
+  const y = annualise(offeredPct, sessions)
+  if (x === null || y === null) return null
+  return { x: x * 100, y: y * 100, edgeAnnual: (y - x) * 100 }
+}
+
+/** The dot's ring: measured claim frequency in three discrete steps —
+ *  assignment risk visible on the plane without a second axis. */
+export function claimRing(claimFreq: number | null | undefined): 0 | 1 | 2 {
+  if (typeof claimFreq !== 'number' || claimFreq < 0.10) return 0
+  return claimFreq <= 0.25 ? 1 : 2
+}
+
 /** Build the grid from whatever contracts the filter returned.
  *
  *  Sparse on purpose: the endpoint returns the contracts inside the leg's

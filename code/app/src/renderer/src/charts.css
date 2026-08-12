@@ -620,6 +620,78 @@
   font-size: 10px;
   margin: -4px 0 12px 46px;
 }
+/* ---- Insure: the put-selling scanner (docs/INSURE.md) -------------------- */
+.insure-page {
+  max-width: none;
+  width: 100%;
+  padding: 24px 28px;
+}
+.insure-page .page-head {
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.insure-legend {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0;
+}
+.insure-plot .insure-tick {
+  font-size: 9px;
+  fill: var(--text-dim);
+}
+.insure-plot .insure-axis {
+  font-size: 10px;
+  fill: var(--text-dim);
+}
+.insure-plot .insure-fair {
+  font-size: 10px;
+  fill: var(--text-dim);
+  opacity: 0.8;
+}
+.insure-plot .insure-dot-label {
+  font-size: 10px;
+  font-weight: 600;
+}
+.insure-hover {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 8px 12px;
+  max-width: 320px;
+  pointer-events: none;
+}
+.insure-section {
+  margin-top: 18px;
+}
+.insure-section h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.insure-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.insure-table th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 400;
+  padding: 3px 10px 3px 0;
+  border-bottom: 1px solid var(--line);
+}
+.insure-table td {
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.insure-row {
+  cursor: pointer;
+}
+.insure-row:hover td {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
 /* The exit view's header row: what the sub-chart is showing, and the one
    dismissal that survives the primary chart unmounting. */
 .opt-exit-head {

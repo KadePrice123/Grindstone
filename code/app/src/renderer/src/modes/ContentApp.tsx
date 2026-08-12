@@ -17,6 +17,7 @@ import { NotepadPage } from '../pages/NotepadPage'
 import { DataPage } from '../pages/DataPage'
 import { ChartsPage } from '../pages/ChartsPage'
 import { OptPage } from '../pages/OptPage'
+import { InsurePage } from '../pages/InsurePage'
 import { HelpPage } from '../pages/HelpPage'
 import { Idle } from '../pages/Idle'
 import { NewsPage } from '../pages/NewsPage'
@@ -46,6 +47,8 @@ function meta(route: Route): { title: string; icon: string } {
       return { title: 'Backtest', icon: 'backtest' }
     case 'notepad':
       return { title: 'Notepad', icon: 'data' }
+    case 'insure':
+      return { title: 'Insure', icon: 'insure' }
     case 'help':
       return { title: 'Help', icon: 'page' }
     case 'article':
@@ -152,6 +155,8 @@ export function ContentApp({ initial }: { initial: Route }) {
         return <ChartsPage />
       case 'backtest':
         return <BacktestPage />
+      case 'insure':
+        return <InsurePage />
       case 'help':
         return <HelpPage section={route.section} />
       case 'article':
