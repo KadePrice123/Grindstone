@@ -57,6 +57,10 @@ interface ScanResponse {
   spot?: { price: number; date: string }
   chain?: { source: string; age_seconds?: number; reason?: string }
   expectancy: { status: string; computed_at?: string; reason?: string }
+  /** The measuring year's own confession: its return and worst drawdown. */
+  window_character?: {
+    return_pct: number; max_drawdown_pct: number; first: string; last: string
+  } | null
   candidates?: Candidate[]
   excluded?: { no_bid: number; zero_claim: number; thin: number }
 }
@@ -205,6 +209,20 @@ export function InsurePage() {
           : m?.zero_claims_reason ? 'tail unpriced' : '—'}</td>
         <td className={pt && pt.edgeAnnual >= 0 ? 'gain' : pt ? 'loss' : ''}>
           {pt ? `${pt.edgeAnnual >= 0 ? '+' : ''}${pt.edgeAnnual.toFixed(1)}%/yr` : '—'}
+          {/* THE BID EDGE, beside the mid edge: the fill you can hit without
+              negotiating. Measured on SPXL: crossing from mid to bid costs
+              0.3-0.8% of strike, which erases the smallest edges entirely —
+              a mid-only column was the flattering half of the truth. */}
+          {(() => {
+            if (!pt || !m || c.bid === null || c.bid <= 0) return null
+            const bp = insurePoint(c.bid / c.strike, requiredCreditPct(m),
+              today, c.expiration)
+            return bp ? (
+              <span className={`dim subtle${bp.edgeAnnual < 0 ? ' loss' : ''}`}>
+                {' '}· bid {bp.edgeAnnual >= 0 ? '+' : ''}{bp.edgeAnnual.toFixed(1)}
+              </span>
+            ) : null
+          })()}
         </td>
         <td>{m?.claim_freq !== undefined && m.n_exp
           ? `assigned ${((m.claim_freq ?? 0) * 100).toFixed(1)}%`
@@ -312,6 +330,20 @@ export function InsurePage() {
                 honesty.thin ? `${honesty.thin} too thin to plot` : '',
               ].filter(Boolean).join(', ')} — listed below`
             ) : null}
+            {/* The year confesses: a window in which the underlyings ROSE
+                makes every short put look brilliant, and that is the window
+                these edges were measured in. One number per symbol, no model. */}
+            {(() => {
+              const chars = Object.values(scans)
+                .filter((s): s is ScanResponse => !!s?.available && !!s.window_character)
+                .map((s) => `${s.symbol} ${s.window_character!.return_pct >= 0 ? '+' : ''}` +
+                  `${(s.window_character!.return_pct * 100).toFixed(0)}% ` +
+                  `(worst dip ${(s.window_character!.max_drawdown_pct * 100).toFixed(0)}%)`)
+              return chars.length
+                ? ` · THE WINDOW'S CHARACTER: ${chars.join(' · ')} — a rising year
+                   flatters every put; the fair line has never seen a crash`
+                : null
+            })()}
           </div>
         </div>
       ) : scanned > 0 ? (

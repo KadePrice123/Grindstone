@@ -1174,11 +1174,35 @@ def create_app(state: State) -> FastAPI:
                 "edge_pct": edge,
                 "tier": tier,
             })
+        # THE WINDOW'S CHARACTER, in two measured numbers. Every edge on this
+        # page was earned inside one specific year, and "everything looks
+        # good" is what a rising year does to short puts — so the year states
+        # its return and its worst drawdown next to the numbers it produced,
+        # and the reader discounts accordingly.
+        character = None
+        win = expectancy.get("window")
+        if win and closes:
+            span = sorted(d for d in closes if win["first"] <= d <= win["last"])
+            if len(span) >= 2:
+                first_c, last_c = closes[span[0]], closes[span[-1]]
+                peak = dd = 0.0
+                run_peak = closes[span[0]]
+                for d_ in span:
+                    c_ = closes[d_]
+                    run_peak = max(run_peak, c_)
+                    dd = min(dd, c_ / run_peak - 1.0)
+                    peak = run_peak
+                character = {
+                    "return_pct": (last_c / first_c - 1.0),
+                    "max_drawdown_pct": dd,
+                    "first": span[0], "last": span[-1],
+                }
         return {
             "symbol": symbol, "available": True,
             "spot": {"price": spot, "date": spot_date},
             "chain": {"source": chain_src, "age_seconds": chain_age},
             "expectancy": {k: v for k, v in expectancy.items() if k != "classes"},
+            "window_character": character,
             "candidates": out,
             "excluded": excluded,
         }
