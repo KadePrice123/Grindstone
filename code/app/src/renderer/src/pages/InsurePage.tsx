@@ -272,7 +272,12 @@ export function InsurePage() {
           {symbols.map((sym, i) => (
             <button key={sym} type="button"
               className={`seg-btn${hidden.has(sym) ? '' : ' on'}`}
-              style={{ borderColor: SYMBOL_INK[i % SYMBOL_INK.length] }}
+              // A swatch, not just a border: the 'on' state paints the whole
+              // chip, which hid the very colour the chip is there to teach.
+              style={{
+                borderColor: SYMBOL_INK[i % SYMBOL_INK.length],
+                borderLeft: `10px solid ${SYMBOL_INK[i % SYMBOL_INK.length]}`,
+              }}
               onClick={() => setHidden((cur) => {
                 const next = new Set(cur)
                 if (next.has(sym)) next.delete(sym)
@@ -287,7 +292,9 @@ export function InsurePage() {
 
       {dots.length > 0 ? (
         <div className="opt-card">
-          <InsureScatter dots={dots} hidden={hidden} height={400}
+          {/* `order` is the legend's own list, so a chip and its dots can
+              never disagree about what a colour means. */}
+          <InsureScatter dots={dots} hidden={hidden} order={symbols} height={400}
             onPick={(d) => d.occ && openOpt(d.symbol, d.occ)} />
           <div className="dim subtle opt-note">
             each dot is one candidate put · across: the measured cost of claims

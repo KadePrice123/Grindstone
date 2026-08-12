@@ -45,11 +45,20 @@ export const SYMBOL_INK = [
 ]
 
 export function InsureScatter({
-  dots, hidden, onPick, height = 380,
+  dots, hidden, order, onPick, height = 380,
 }: {
   dots: InsureDot[]
   /** Symbols toggled off via the legend chips — the page owns that state. */
   hidden: Set<string>
+  /** THE COLOUR ORDER, owned by the page (favorites order) and passed in.
+   *
+   *  This was derived here from the dots' own arrival order, and that is a
+   *  bug with two faces: the legend chips colour from favorites order, so
+   *  chip and dot disagreed; and scans resolve 4-wide with per-symbol sweep
+   *  times, so the arrival order — and therefore every dot's hue — CHANGED
+   *  between refreshes. A colour that means "SPXL" one minute and "SPY" the
+   *  next is worse than no colour at all. */
+  order: string[]
   onPick?: (d: InsureDot) => void
   height?: number
 }) {
@@ -71,8 +80,12 @@ export function InsureScatter({
   const px = (v: number) => PAD.l + (v / max) * side
   const py = (v: number) => PAD.t + side - (v / max) * side
 
-  const symbols = [...new Set(dots.map((d) => d.symbol))]
-  const ink = (sym: string) => SYMBOL_INK[symbols.indexOf(sym) % SYMBOL_INK.length]
+  // A symbol the page did not list still gets a stable slot after the known
+  // ones, rather than colliding on index -1 with whatever sorts first.
+  const ink = (sym: string) => {
+    const i = order.indexOf(sym)
+    return SYMBOL_INK[(i >= 0 ? i : order.length + sym.charCodeAt(0)) % SYMBOL_INK.length]
+  }
 
   // Top three by edge carry standing labels; the rest speak on hover.
   const labeled = [...drawn].sort((a, b) => b.edgeAnnual - a.edgeAnnual).slice(0, 3)
