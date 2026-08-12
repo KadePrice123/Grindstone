@@ -346,12 +346,19 @@ export function BacktestPage() {
         <div className="card">
           <h2>Data</h2>
           <div className="subtle" style={{ marginBottom: 10 }}>
-            {status.source === 'workspace' ? (
+            {status.source === 'deep' || status.source.startsWith('legacy') ? (
               <>
                 Reading this machine's chain database (
                 {status.options_db.size_mb.toLocaleString()} MB at{' '}
                 <code>{status.options_db.path}</code>). Recording still works alongside
                 it — the app keeps its own store for machines without this file.
+                {status.source.startsWith('legacy') ? (
+                  <strong>
+                    {' '}This file is in the LEGACY location — run{' '}
+                    <code>python tools/consolidate.py --apply</code> to move it
+                    into the uniform data tree.
+                  </strong>
+                ) : null}
               </>
             ) : status.source === 'custom' ? (
               <>

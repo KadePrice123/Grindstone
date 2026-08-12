@@ -30,10 +30,10 @@ from pathlib import Path
 
 CODE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(CODE))
-from backend import insurance  # noqa: E402
+from backend import datapaths, insurance  # noqa: E402
+from backend.db import data_dir  # noqa: E402
 
-APP_DATA = CODE.parent / "data"
-DB_PATH = APP_DATA / "options_history.db"
+DB_PATH = data_dir() / "options_history.db"
 CHUNK = 250_000
 
 
@@ -65,13 +65,24 @@ def parity_spots(con: sqlite3.Connection) -> dict[str, float]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--store", type=Path, default=CODE.parent.parent / "spy_options.db",
-                    help="deep chain store (default ../../spy_options.db)")
+    ap.add_argument("--store", type=Path, default=None,
+                    help="deep chain store (default: the uniform data tree via "
+                         "backend.datapaths, with a labeled legacy fallback)")
     ap.add_argument("--symbol", default="SPY")
     ap.add_argument("--db", type=Path, default=DB_PATH,
                     help="options_history.db to bake into")
     args = ap.parse_args()
     sym = args.symbol.upper()
+
+    if args.store is None:
+        found, where = datapaths.resolve_deep_options(sym)
+        if found is None:
+            sys.exit(f"no deep store for {sym} in {datapaths.deep_dir()} (or the "
+                     f"legacy workspace) — run tools/consolidate.py, or pass --store")
+        if where == "legacy":
+            print(f"NOTE: reading the LEGACY location {found} — run "
+                  f"tools/consolidate.py --apply to move it into the uniform tree")
+        args.store = found
 
     if not args.store.exists():
         sys.exit(f"no deep store at {args.store}")

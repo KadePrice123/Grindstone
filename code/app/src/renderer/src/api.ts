@@ -280,7 +280,9 @@ export interface BacktestStatus {
   bars_db: { path: string; present: boolean }
   vix_csv: { present: boolean }
   calibration: { references: string[]; mapped: string[] }
-  source: 'workspace' | 'recorded' | 'custom'
+  /** 'deep' = the uniform data tree; a string starting with 'legacy' names
+   *  the migration (tools/consolidate.py) and is shown verbatim. */
+  source: 'deep' | 'recorded' | 'custom' | (string & {})
   underlying: string
   recorded: BacktestRecordedStats
   reason: string

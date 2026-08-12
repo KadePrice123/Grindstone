@@ -39,12 +39,18 @@ from collections import defaultdict
 from pathlib import Path
 
 CODE = Path(__file__).resolve().parent.parent
-APP_DATA = CODE.parent / "data"
-VAULT = CODE.parent.parent / "data" / "data"
+sys.path.insert(0, str(CODE))
+from backend import datapaths  # noqa: E402
+from backend.db import data_dir  # noqa: E402
+
+# The vault resolves through datapaths — the uniform tree first, the legacy
+# <workspace>/data/data second (labeled, so consolidation actually happens).
+_VAULT, _VAULT_WHERE = datapaths.resolve_vault_dir()
+VAULT = _VAULT if _VAULT is not None else datapaths.vault_dir()
 ARCHIVE = VAULT / "archive.zip"
 NEW_DIR = VAULT / "options_archive_new"
 
-DB_PATH = APP_DATA / "options_history.db"
+DB_PATH = data_dir() / "options_history.db"
 
 # |delta| buckets — "similar contracts" for the band. Delta is the archive's own
 # similarity measure (moneyness would need the underlying close, which the
@@ -207,6 +213,9 @@ def main() -> None:
 
     if not ARCHIVE.exists() and not NEW_DIR.exists():
         sys.exit(f"no archive at {ARCHIVE} and no {NEW_DIR}")
+    if _VAULT_WHERE == "legacy":
+        print(f"NOTE: reading the LEGACY vault at {VAULT} — run "
+              f"tools/consolidate.py --apply to move it into the uniform tree")
 
     con = sqlite3.connect(args.db)
     con.executescript(SCHEMA)

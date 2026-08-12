@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import btdata
+from . import datapaths
 from .bt import spec as bt_spec
 from .bt import tastyio
 from .bt.expr import RuleError
@@ -71,7 +72,9 @@ def engine_paths(user_settings: dict[str, Any] | None = None,
     """Where the engine's inputs live, most explicit first:
 
     1. a Settings-supplied path (the user said exactly where),
-    2. the workspace layout (this machine's multi-GB spy_options.db),
+    2. the deep store in the uniform data tree (data/deep/<SYM>_options.db,
+       resolved through datapaths — with a labeled legacy-workspace fallback
+       until tools/consolidate.py has run on this machine),
     3. the app-owned recorded-data store (data/backtest_data/<SYM>.db) —
        created by the app, filled by the recorder via btdata.sync, and the
        only option a fresh install ever needs to think about.
@@ -81,20 +84,23 @@ def engine_paths(user_settings: dict[str, Any] | None = None,
     would read from."""
     s = user_settings or {}
     u = underlying.upper()
-    workspace = data_dir().parent.parent  # <workspace>/<project>/data -> <workspace>
     app_db = str(btdata.data_db_path(u))
     explicit_opt = s.get("backtest_options_db") or None
     explicit_bars = s.get("backtest_bars_db") or None
-    ws_opt = workspace / "spy_options.db"
-    ws_bars = workspace / "spy_bars.db"
+    # The deep stores resolve through datapaths — ONE layout, with a labeled
+    # read-only fallback to the legacy workspace files so nothing breaks
+    # between pulling this code and running tools/consolidate.py. The label
+    # is the nudge: a 'legacy' source on the Data card means "run it".
+    deep_opt, opt_where = datapaths.resolve_deep_options(u)
+    deep_bars_p, _bars_where = datapaths.resolve_deep_bars(u)
     if explicit_opt:
         source = "custom"
         options_db = explicit_opt
-        bars_db = explicit_bars or (str(ws_bars) if ws_bars.is_file() else app_db)
-    elif u == "SPY" and ws_opt.is_file():
-        source = "workspace"
-        options_db = str(ws_opt)
-        bars_db = explicit_bars or str(ws_bars)
+        bars_db = explicit_bars or (str(deep_bars_p) if deep_bars_p else app_db)
+    elif deep_opt is not None:
+        source = "deep" if opt_where == "uniform" else "legacy workspace — run tools/consolidate.py"
+        options_db = str(deep_opt)
+        bars_db = explicit_bars or (str(deep_bars_p) if deep_bars_p else app_db)
     else:
         source = "recorded"
         options_db = app_db

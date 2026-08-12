@@ -6568,6 +6568,124 @@ def _insurance_engine():
         assert miss["available"] is False and "no archived chains" in miss["reason"]
 
 
+@check("data layout: one tree, legacy is labeled, the consolidator never destroys")
+def _data_layout():
+    """Every data file resolves through backend/datapaths — ONE tree under
+    data/, with a labeled read-only legacy fallback that exists only so the
+    app works between pulling the update and running tools/consolidate.py.
+
+    The consolidator's contract, each clause mutation-tested: dry-run by
+    default (touches NOTHING), same-volume move on --apply, idempotent second
+    run, a damaged database is skipped by quick_check, and an existing
+    destination is NEVER overwritten."""
+    import os
+    import sqlite3
+    import subprocess
+    import tempfile
+
+    from backend import datapaths
+
+    # ---- resolution order: uniform beats legacy, and legacy is NAMED -------
+    real = os.environ.get("GRINDSTONE_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp) / "ws"
+        dd = ws / "proj" / "data"
+        os.environ["GRINDSTONE_DATA_DIR"] = str(dd)
+        try:
+            def mkdb(p: Path) -> None:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                con = sqlite3.connect(p)
+                con.execute("CREATE TABLE t (x)")
+                con.commit(); con.close()
+
+            assert datapaths.deep_options("spy") == dd / "deep" / "SPY_options.db"
+            assert datapaths.workspace() == ws
+            p, where = datapaths.resolve_deep_options("SPY")
+            assert p is None and where == "absent", (p, where)
+            mkdb(ws / "spy_options.db")
+            p, where = datapaths.resolve_deep_options("SPY")
+            assert where == "legacy" and p == ws / "spy_options.db", (p, where)
+            mkdb(dd / "deep" / "SPY_options.db")
+            p, where = datapaths.resolve_deep_options("SPY")
+            assert where == "uniform" and p == dd / "deep" / "SPY_options.db", \
+                "the uniform tree must beat the legacy fallback"
+
+            # engine_paths surfaces the layout: uniform reads as 'deep',
+            # legacy NAMES the consolidator, absent falls back to recorded.
+            from backend import backtests as bt_mod
+            got = bt_mod.engine_paths({}, "SPY")
+            assert got["source"] == "deep", got["source"]
+            (dd / "deep" / "SPY_options.db").unlink()
+            got = bt_mod.engine_paths({}, "SPY")
+            assert "legacy" in got["source"] and "consolidate" in got["source"], (
+                "a legacy read must NAME the migration, or it becomes the "
+                f"fourth permanent layout: {got['source']}")
+            (ws / "spy_options.db").unlink()
+            got = bt_mod.engine_paths({}, "SPY")
+            assert got["source"] == "recorded", got["source"]
+
+            # ---- the consolidator, end to end -------------------------------
+            mkdb(ws / "spy_options.db")
+            mkdb(ws / "uso_bars.db")
+            vault = ws / "data" / "data"
+            vault.mkdir(parents=True)
+            (vault / "archive.zip").write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+            env = {**os.environ, "GRINDSTONE_DATA_DIR": str(dd)}
+            tool = str(ROOT / "code" / "tools" / "consolidate.py")
+
+            def run(*flags: str) -> str:
+                r = subprocess.run([sys.executable, tool, *flags],
+                                   capture_output=True, text=True, env=env,
+                                   timeout=120)
+                assert r.returncode == 0, r.stdout + r.stderr
+                return r.stdout
+
+            out = run()  # DRY RUN
+            assert "DRY RUN" in out and (ws / "spy_options.db").is_file(), \
+                "the dry run moved something"
+            assert not (dd / "deep" / "SPY_options.db").exists()
+
+            out = run("--apply")
+            assert (dd / "deep" / "SPY_options.db").is_file(), out
+            assert (dd / "deep" / "USO_bars.db").is_file(), out
+            assert (dd / "vault" / "archive.zip").is_file(), out
+            assert not (ws / "spy_options.db").exists(), "moved, not copied"
+
+            out = run("--apply")  # idempotent
+            assert "nothing to consolidate" in out, out
+
+            # a DAMAGED database is skipped with its reason, never moved
+            (ws / "spxl_options.db").write_bytes(b"not a database at all")
+            out = run("--apply")
+            assert "quick_check" in out and (ws / "spxl_options.db").is_file(), out
+            assert not (dd / "deep" / "SPXL_options.db").exists()
+            (ws / "spxl_options.db").unlink()
+
+            # an EXISTING destination is reported, never overwritten
+            mkdb(ws / "spy_options.db")
+            before = (dd / "deep" / "SPY_options.db").stat().st_mtime_ns
+            out = run("--apply")
+            assert "never overwritten" in out, out
+            assert (ws / "spy_options.db").is_file(), "the source must survive a skip"
+            assert (dd / "deep" / "SPY_options.db").stat().st_mtime_ns == before
+        finally:
+            if real is None:
+                os.environ.pop("GRINDSTONE_DATA_DIR", None)
+            else:
+                os.environ["GRINDSTONE_DATA_DIR"] = real
+
+    # ---- no caller keeps a private opinion of the layout --------------------
+    bt_src = (ROOT / "code" / "backend" / "backtests.py").read_text(encoding="utf-8")
+    body = py_member_body(bt_src, "def engine_paths(")
+    assert "datapaths.resolve_deep_options" in body, \
+        "engine_paths stopped resolving through datapaths"
+    assert '"spy_options.db"' not in body and "'spy_options.db'" not in body, \
+        "engine_paths grew a private path literal again"
+    for tool_name in ("bakeexpectancy.py", "loadhist.py"):
+        src = (ROOT / "code" / "tools" / tool_name).read_text(encoding="utf-8")
+        assert "datapaths" in src, f"{tool_name} no longer resolves through datapaths"
+
+
 @check("option legs: expiration is the primitive, hosts drive, snapshots survive")
 def _chart_legs():
     """A leg is a point (expiration, strike) with an acceptance window, drawn
