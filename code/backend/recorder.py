@@ -12,8 +12,10 @@ Honesty rules baked in:
   keys anywhere).
 - Chain snapshots on the free feed are INDICATIVE quotes; rows are stored with
   the feed name so later research can weigh them accordingly.
-- Futures/index recording is rejected at creation with the real reason (no
-  connected source carries them yet) rather than accepted and silently empty.
+- Futures option chains record through an enrolled TastyTrade account
+  (bounded snapshots, greeks honestly NULL — the REST quote carries none).
+  Futures bars and all index recording are still rejected at creation with
+  the real reason rather than accepted and silently empty.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ from . import backfill, btdata, chainimport, coverage, newsstore, onclick, opthi
 from .logs import LOG
 from .brokers.alpaca_data import AlpacaData
 from .brokers.base import BrokerError
+from .brokers.tastytrade import TastyTradeAdapter
 
 TICK_SECONDS = 15
 PRUNE_EVERY = dt.timedelta(hours=6)
@@ -46,6 +49,18 @@ TIMEFRAMES = {"1Min": 60, "5Min": 300, "15Min": 900, "1Hour": 3600, "1Day": 8640
 CHAIN_INTERVALS = (60, 300, 900, 3600, 86400)
 MIN_INTERVAL = 60
 
+# Bounds for a futures option-chain snapshot. A full /ES nested chain is ~56
+# expirations of ~300 in-band strikes each — quoting all of it every interval
+# is ~120 requests per snapshot (measured live 2026-08-14). The recorded
+# slice is the tradeable neighbourhood: every expiration inside the near
+# window (short-tenor structure lives in the dailies/weeklies), only
+# monthly/quarterly expirations beyond it, strikes within the band. The band
+# stays wide enough to cover the workspace's 7-10% cushion strategies.
+FUTURE_CHAIN_MAX_DTE = 95
+FUTURE_CHAIN_NEAR_DTE = 21        # weeklies/dailies recorded only inside this
+FUTURE_CHAIN_STRIKE_BAND = 0.15   # ±15% of the underlying future's mark
+FUTURE_QUOTE_BATCH = 90           # /market-data/by-type 414s near ~200 symbols
+
 CredsProvider = Callable[[int], dict[str, str] | None]
 #: user_id -> that user's settings. Injected, so this module never imports
 #: the settings store or opens app.db itself.
@@ -61,15 +76,29 @@ def _iso(t: dt.datetime) -> str:
 
 
 def validate_job(kind: str, symbol: str, timeframe: str, interval_seconds: int,
-                 retention_days: int, asset_class: str | None) -> str | None:
-    """Returns an error string, or None if valid."""
+                 retention_days: int, asset_class: str | None,
+                 has_tasty: bool = False) -> str | None:
+    """Returns an error string, or None if valid.
+
+    `has_tasty` = a TastyTrade account is enrolled: it is what makes futures
+    CHAIN snapshots possible. Futures BARS stay rejected either way —
+    TastyTrade has no OHLC history REST endpoint (REQUIREMENTS.md 6.9), and
+    manufacturing bars from quote snapshots would be exactly the dishonest
+    number this validator exists to refuse."""
     if kind not in ("bars", "chain", "news"):
         return f"unknown kind {kind!r}"
     if kind in ("bars", "chain") and not symbol:
         return "symbol required"
-    if asset_class in ("future", "index") and kind in ("bars", "chain"):
-        return (f"{symbol}: no connected data source carries {asset_class} data yet — "
-                "arrives with the TastyTrade adapter (REQUIREMENTS.md 6.9)")
+    if asset_class == "future" and kind == "chain" and not has_tasty:
+        return (f"{symbol}: futures option chains record through TastyTrade — "
+                "add a TastyTrade account (Accounts page) first")
+    if asset_class == "future" and kind == "bars":
+        return (f"{symbol}: no source sells futures OHLC history — TastyTrade "
+                "is stream-only (DXLink candle replay arrives in a later "
+                "milestone, REQUIREMENTS.md 6.9)")
+    if asset_class == "index" and kind in ("bars", "chain"):
+        return (f"{symbol}: no connected data source carries index {kind} yet — "
+                "index recording arrives with a later milestone (REQUIREMENTS.md 6.9)")
     if asset_class == "crypto" and kind in ("bars", "chain"):
         return (f"{symbol}: crypto recording isn't wired yet — crypto bars use a "
                 "different Alpaca endpoint (v1beta3) and crypto has no options chain")
@@ -103,9 +132,14 @@ def _backfill_window(years: str, now: dt.datetime) -> tuple[dt.date, dt.date]:
 
 class Recorder:
     def __init__(self, con: sqlite3.Connection, creds_provider: CredsProvider,
-                 settings_provider: SettingsProvider | None = None) -> None:
+                 settings_provider: SettingsProvider | None = None,
+                 tasty_creds_provider: CredsProvider | None = None) -> None:
         self._con = con                      # owned by the recorder thread
         self._creds = creds_provider
+        # TastyTrade creds, injected exactly like the Alpaca ones. The
+        # unattended recorder passes nothing here — its system key is
+        # Alpaca-shaped — so futures jobs honestly report locked there.
+        self._tasty = tasty_creds_provider or (lambda _uid: None)
         # INJECTED like the credentials, for the same reason: settings live in
         # app.db and this class must not know that. The unattended process in
         # particular has to stay clear of anything vault-shaped.
@@ -166,6 +200,23 @@ class Recorder:
         return (now - t).total_seconds() >= job["interval_seconds"]
 
     def _run_job(self, job: dict[str, Any], now: dt.datetime) -> None:
+        # Futures roots ('/ES') record through TastyTrade; everything else is
+        # the Alpaca path. Symbol shape is the router because the job table
+        # has no asset_class column and the leading slash IS the class marker
+        # in the universe (universe.py SUPPLEMENT).
+        if job["kind"] == "chain" and str(job["symbol"]).startswith("/"):
+            tasty = self._tasty(job["user_id"])
+            if tasty is None:
+                self._finish(job, now, 0, "locked — sign in to record (TastyTrade)")
+                return
+            try:
+                rows = self._collect_future_chain(tasty, job, now)
+                self._finish(job, now, rows, "ok")
+            except BrokerError as e:
+                self._finish(job, now, 0, str(e)[:200])
+            except Exception as e:  # noqa: BLE001
+                self._finish(job, now, 0, f"internal: {e.__class__.__name__}"[:200])
+            return
         creds = self._creds(job["user_id"])
         if creds is None:
             self._finish(job, now, 0, "locked — sign in to record")
@@ -241,6 +292,71 @@ class Recorder:
             # but it says so, because a silent miss here is the bug above.
             LOG.exception("archive append failed for %s", job["symbol"])
         return len(contracts)
+
+    @staticmethod
+    def select_future_contracts(chain: dict[str, Any],
+                                mark: float | None) -> list[dict[str, Any]]:
+        """The bounded slice of a nested futures chain worth quoting: every
+        expiration within FUTURE_CHAIN_NEAR_DTE, only non-weekly expirations
+        (monthlies/quarterlies) out to FUTURE_CHAIN_MAX_DTE, strikes within
+        FUTURE_CHAIN_STRIKE_BAND of the mark (all strikes when no mark is
+        available — off-hours must degrade to wider, never to nothing).
+        Pure, so the gate can test the bounding on a canned chain."""
+        out: list[dict[str, Any]] = []
+        for oc in chain.get("chains", []):
+            for exp in oc.get("expirations", []):
+                dte = exp.get("days_to_expiration")
+                if not isinstance(dte, (int, float)) or dte > FUTURE_CHAIN_MAX_DTE:
+                    continue
+                if dte > FUTURE_CHAIN_NEAR_DTE and exp.get("expiration_type") == "Weekly":
+                    continue
+                for s in exp.get("strikes", []):
+                    strike = s.get("strike")
+                    if strike is None:
+                        continue
+                    if mark and abs(strike - mark) > FUTURE_CHAIN_STRIKE_BAND * mark:
+                        continue
+                    for right, sym in (("C", s.get("call")), ("P", s.get("put"))):
+                        if sym:
+                            out.append({
+                                "symbol": sym, "right": right, "strike": strike,
+                                "expiration": exp.get("expiration_date"),
+                            })
+        return out
+
+    def _collect_future_chain(self, tasty: dict[str, str], job: dict[str, Any],
+                              now: dt.datetime) -> int:
+        """One bounded snapshot of a futures option chain, quoted through
+        /market-data/by-type. Greeks/IV are NULL on purpose: the REST quote
+        carries none (they are DXLink stream events), and rec_chain rows must
+        hold what the feed said, not a locally invented number."""
+        adapter = TastyTradeAdapter(tasty["client_secret"], tasty["refresh_token"])
+        chain = adapter.nested_future_chain(job["symbol"])
+        try:
+            mark = adapter.future_snapshot(job["symbol"]).get("price")
+        except BrokerError:
+            mark = None  # wider slice beats no snapshot
+        wanted = self.select_future_contracts(chain, mark)
+        quotes: dict[str, dict[str, Any]] = {}
+        for i in range(0, len(wanted), FUTURE_QUOTE_BATCH):
+            batch = [w["symbol"] for w in wanted[i:i + FUTURE_QUOTE_BATCH]]
+            for q in adapter.quotes({"future-option": batch}):
+                if q.get("symbol"):
+                    quotes[q["symbol"]] = q
+        ts = now.strftime("%Y-%m-%dT%H:%M:00Z")  # bucket to the minute
+        with self._con:
+            self._con.executemany(
+                "INSERT OR REPLACE INTO rec_chain (underlying, ts, occ_symbol, expiration,"
+                " strike, right, bid, ask, last, iv, delta, gamma, theta, vega, rho,"
+                " volume, open_interest)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(job["symbol"], ts, w["symbol"], w["expiration"], w["strike"],
+                  w["right"], q.get("bid"), q.get("ask"), q.get("last"),
+                  None, None, None, None, None, None, q.get("day_volume"), None)
+                 for w in wanted
+                 for q in [quotes.get(w["symbol"], {})]],
+            )
+        return len(wanted)
 
     def _collect_news(self, client: AlpacaData, job: dict[str, Any]) -> int:
         symbols = [job["symbol"]] if job["symbol"] else None

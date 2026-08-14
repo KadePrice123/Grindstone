@@ -157,6 +157,12 @@ Decided in §6; summarized here so the requirements below have a spine:
   the feed they came from; futures/index jobs are rejected with the real
   reason until a source exists (§6.9). *(Delivered early with the search
   milestone.)*
+  *(2026-08-14: the TastyTrade adapter landed — futures option CHAINS now
+  record through an enrolled TastyTrade account as bounded snapshots (near
+  expirations + monthlies/quarterlies to 95 DTE, strikes within ±15% of the
+  mark, greeks honestly NULL — the REST snapshot feed carries none). Futures
+  BARS and index recording still refuse with the reason: no OHLC source
+  exists until DXLink candle streaming lands.)*
 - **FR-DATA-6 Keyless fallback.** Users without any data API still get
   delayed quotes and daily history from Yahoo Finance, always labeled
   *delayed* and never used to price orders. Provider policy per instrument:

@@ -50,27 +50,35 @@ def _existing(con: sqlite3.Connection, user_id: int, kind: str, symbol: str,
     return {"id": r[0], "enabled": r[1]} if r else None
 
 
-def recordability(symbol: str, asset_class: str | None,
-                  known: bool) -> tuple[bool, str]:
+def recordability(symbol: str, asset_class: str | None, known: bool,
+                  has_tasty: bool = False) -> tuple[bool, str]:
     """Can this symbol be recorded at all, and if not, why not — in the words
     the user should see. Pure, so the gate can table-test every asset class
-    without a database or a network."""
+    without a database or a network.
+
+    ANY-of-PLAN semantics, not all-of: a futures root with a TastyTrade
+    account can record its option chain but never bars (no OHLC source), and
+    refusing the possible half because the impossible half exists would leave
+    futures unrecordable forever."""
     if not known:
         return False, (f"{symbol} is not in the synced universe yet, so there "
                        f"is nothing to record against — sync the universe and "
                        f"it will start on its own")
+    errors: list[str] = []
     for spec in PLAN:
         err = recorder_mod.validate_job(
             spec["kind"], symbol, spec["timeframe"], spec["interval_seconds"],
-            spec["retention_days"], asset_class)
-        if err:
-            return False, err
-    return True, ""
+            spec["retention_days"], asset_class, has_tasty=has_tasty)
+        if err is None:
+            return True, ""
+        if err not in errors:
+            errors.append(err)
+    return False, "; ".join(errors)
 
 
 def on_favorite_added(con: sqlite3.Connection, user_id: int, symbol: str,
                       asset_class: str | None, known: bool,
-                      enabled: bool) -> dict[str, Any]:
+                      enabled: bool, has_tasty: bool = False) -> dict[str, Any]:
     """Star -> record. Returns what happened, always; the caller shows it.
 
     Never raises for an unrecordable symbol: the favourite itself is valid and
@@ -80,13 +88,19 @@ def on_favorite_added(con: sqlite3.Connection, user_id: int, symbol: str,
     if not enabled:
         return {"recording": False, "reason": "", "jobs": []}
     symbol = symbol.upper().strip()
-    ok, why = recordability(symbol, asset_class, known)
+    ok, why = recordability(symbol, asset_class, known, has_tasty=has_tasty)
     if not ok:
         # STARRED, BUT NOT RECORDABLE, AND WHY (DS-18).
         return {"recording": False, "reason": why, "jobs": []}
 
     created: list[dict[str, Any]] = []
     for spec in PLAN:
+        # Per-spec validation: recordability said SOME plan entry works, not
+        # all of them — a futures root records chains, never bars.
+        if recorder_mod.validate_job(
+                spec["kind"], symbol, spec["timeframe"], spec["interval_seconds"],
+                spec["retention_days"], asset_class, has_tasty=has_tasty):
+            continue
         have = _existing(con, user_id, spec["kind"], symbol, spec["timeframe"])
         if have:
             # Already recording. Re-enable if the user (or a previous
@@ -138,7 +152,7 @@ def on_favorite_removed(con: sqlite3.Connection, user_id: int, symbol: str,
 
 def sync_all(con: sqlite3.Connection, user_id: int, symbols: list[str],
              classify: Callable[[str], tuple[str | None, bool]],
-             enabled: bool) -> dict[str, Any]:
+             enabled: bool, has_tasty: bool = False) -> dict[str, Any]:
     """Bring every current favourite into line — what turning the setting ON
     should do, rather than only affecting symbols starred from then on. A
     setting that silently applies to future actions only is a setting the
@@ -150,7 +164,8 @@ def sync_all(con: sqlite3.Connection, user_id: int, symbols: list[str],
     skipped: list[dict[str, str]] = []
     for sym in symbols:
         asset_class, known = classify(sym)
-        r = on_favorite_added(con, user_id, sym, asset_class, known, True)
+        r = on_favorite_added(con, user_id, sym, asset_class, known, True,
+                              has_tasty=has_tasty)
         if r["recording"]:
             started.append(sym.upper())
         else:

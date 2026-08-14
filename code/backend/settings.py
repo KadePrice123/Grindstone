@@ -69,9 +69,10 @@ SPEC: dict[str, dict[str, Any]] = {
         "help": "Starring a symbol starts recording its daily bars and option "
                 "chains; un-starring STOPS the recording but never deletes "
                 "what was already recorded — chain history cannot be "
-                "re-fetched once the provider's window moves past it. Some "
-                "symbols cannot be recorded at all (indices and futures have "
-                "no connected source yet); those stay starred and say why. "
+                "re-fetched once the provider's window moves past it. Futures "
+                "roots record their option chain when a TastyTrade account is "
+                "enrolled (bars have no source); indices cannot be recorded "
+                "yet — those stay starred and say why. "
                 "Off by default because it spends API budget without asking.",
     },
     "backfill_enabled": {

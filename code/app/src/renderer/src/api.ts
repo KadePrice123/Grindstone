@@ -297,8 +297,12 @@ export interface TestResult {
   status?: string
   equity?: number
   buying_power?: number
-  options_level?: number
+  options_level?: number | string
   account_last4?: string
   kind?: string
   detail?: string
+  // tastytrade
+  accounts?: number
+  futures_approved?: boolean
+  margin_or_cash?: string
 }

@@ -46,7 +46,6 @@ class BrokerAdapter:
 
 def not_supported(broker: str) -> dict[str, Any]:
     reasons = {
-        "tastytrade": "TastyTrade adapter lands in a later milestone.",
         "webull": "Webull needs an approved OpenAPI application first (REQUIREMENTS.md 7.3).",
         "fidelity": "Fidelity has no retail trading API; read-only import lands later (7.4).",
     }

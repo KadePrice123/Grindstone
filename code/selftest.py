@@ -316,6 +316,249 @@ def _alpaca_readonly():
             "trading milestone deliberately, with its own gate checks")
 
 
+@check("tastytrade: parsers handle real, partial, and garbage payloads")
+def _tastytrade_parsers():
+    sys.path.insert(0, str(CODE))
+    from backend.brokers.base import BrokerError
+    from backend.brokers.tastytrade import (
+        parse_accounts, parse_future_contracts, parse_nested_future_chain,
+        parse_quotes, parse_token)
+
+    # Shapes captured live 2026-08-14 (values are fixtures, not credentials).
+    tok = parse_token({"access_token": "fixture-token-0001",
+                       "expires_in": 900, "token_type": "Bearer"})
+    assert tok["expires_in"] == 900.0
+    assert parse_token({"access_token": "x"})["expires_in"] == 900.0  # default
+    for garbage in ({}, {"expires_in": 900}, None, []):
+        try:
+            parse_token(garbage)
+            raise AssertionError(f"garbage token accepted: {garbage!r}")
+        except BrokerError:
+            pass
+
+    accounts = parse_accounts({"data": {"items": [
+        {"account": {"account-number": "5WJ00000", "nickname": "Individual",
+                     "margin-or-cash": "Margin", "is-futures-approved": True,
+                     "suitable-options-level": "No Restrictions",
+                     "day-trader-status": False, "is-closed": False},
+         "authority-level": "owner"},
+        {"not-an-account": True},  # tolerated, skipped
+    ]}})
+    assert len(accounts) == 1
+    a = accounts[0]
+    assert a["account_last4"] == "0000" and a["futures_approved"] is True
+    assert "account_number" not in a, "full account number must never leave the parser"
+    for garbage in ({}, {"data": {}}, {"data": {"items": "no"}}, None):
+        try:
+            parse_accounts(garbage)
+            raise AssertionError(f"garbage accounts accepted: {garbage!r}")
+        except BrokerError:
+            pass
+
+    # Quotes: numbers arrive as STRINGS; price prefers last, falls back to
+    # mark then mid; change math needs prev-close and degrades to None.
+    q = parse_quotes({"data": {"items": [
+        {"symbol": "/ESU6", "instrument-type": "Future", "last": "7802.5",
+         "bid": "7802.0", "ask": "7802.5", "mark": "7802.5", "mid": "7802.25",
+         "prev-close": "7822.5", "volume": "841815.0", "open": "7825.0",
+         "day-high-price": "7831.75", "day-low-price": "7796.5",
+         "updated-at": "2026-08-14T21:38:46.750Z"},
+        {"symbol": "./ESZ6 EW2V6 261009C2100", "instrument-type": "Future Option",
+         "mark": 5725.02, "bid": None, "ask": None, "last": None},
+        {"symbol": "SPX", "instrument-type": "Index", "last": "not-a-number"},
+    ]}})
+    assert q[0]["price"] == 7802.5 and q[0]["bid"] == 7802.0
+    assert abs(q[0]["change_pct"] - 100.0 * (7802.5 - 7822.5) / 7822.5) < 1e-9
+    assert q[1]["price"] == 5725.02, "mark must back up a missing last"
+    assert q[1]["change_pct"] is None, "no prev-close must mean no change math"
+    assert q[2]["price"] is None, "unparseable numbers degrade to None"
+
+    futs = parse_future_contracts({"data": {"items": [
+        {"symbol": "/ESU6", "product-code": "ES", "active-month": True,
+         "expiration-date": "2026-09-18", "streamer-symbol": "/ESU26:XCME",
+         "tick-size": "0.25"}]}})
+    assert futs[0]["active_month"] is True and futs[0]["tick_size"] == 0.25
+
+    chain = parse_nested_future_chain({"data": {
+        "futures": [{"symbol": "/ESU6", "root-symbol": "/ES", "active-month": True}],
+        "option-chains": [{"root-symbol": "/ES", "underlying-symbol": "/ES",
+                           "exercise-style": "American", "expirations": [
+            {"underlying-symbol": "/ESZ6", "option-root-symbol": "EW2",
+             "expiration-date": "2026-10-09", "days-to-expiration": 56,
+             "expiration-type": "Weekly", "settlement-type": "PM",
+             "notional-value": "0.5", "display-factor": "0.01",
+             "strikes": [{"strike-price": "2100.0",
+                          "call": "./ESZ6 EW2V6 261009C2100",
+                          "put": "./ESZ6 EW2V6 261009P2100"}]}]}]}})
+    exp = chain["chains"][0]["expirations"][0]
+    assert exp["settlement_type"] == "PM", "settlement type is load-bearing (6.4)"
+    assert exp["strikes"][0]["strike"] == 2100.0
+    for garbage in ({}, {"data": {}}, {"data": {"futures": [], "option-chains": []}}):
+        try:
+            parse_nested_future_chain(garbage)
+            raise AssertionError(f"garbage chain accepted: {garbage!r}")
+        except BrokerError:
+            pass
+
+
+@check("tastytrade module is read-only and its declared fields carry no hint")
+def _tastytrade_readonly():
+    sys.path.insert(0, str(CODE))
+    from backend.brokers.base import CREDENTIAL_FIELDS
+
+    src = (CODE / "backend" / "brokers" / "tastytrade.py").read_text(encoding="utf-8")
+    for banned in ("/orders", "complex-orders", "httpx.put", "httpx.delete",
+                   "httpx.patch", ".exercise"):
+        assert banned not in src, (
+            f"tastytrade.py contains {banned!r} — order entry must arrive via "
+            "the trading milestone deliberately, with its own gate checks")
+    # The ONE permitted POST is the OAuth token mint. A second POST anywhere
+    # in this module is a write surface arriving without its gate.
+    posts = [ln for ln in src.splitlines() if "httpx.post" in ln]
+    assert len(posts) == 1 and "TOKEN_URL" in posts[0], (
+        f"expected exactly one httpx.post (the token mint), found: {posts}")
+    # /customers/me returns home address, income, employer. The adapter must
+    # ask for the accounts list instead — nothing in the app needs that PII.
+    assert '"/customers/me"' not in src and "'/customers/me'" not in src, (
+        "adapter fetches /customers/me — PII the app must not touch; "
+        "use /customers/me/accounts")
+
+    spec = CREDENTIAL_FIELDS["tastytrade"]
+    assert spec["fields"] == ["client_secret", "refresh_token"]
+    assert spec["hint_last4"] is None, (
+        "both tastytrade fields are secrets — a plaintext hint would leak "
+        "credential material into a cloud-synced DB")
+
+
+@check("futures routing: quotes/jobs go through tastytrade, honestly labeled")
+def _tastytrade_routing():
+    sys.path.insert(0, str(CODE))
+    from backend import autorecord, market, recorder
+
+    # No TastyTrade account: futures quotes say what to do, never fake.
+    q = market.quote_for("/ES", "future", creds=None, tasty=None)
+    assert q["available"] is False and "TastyTrade" in q["reason"]
+
+    st = market.provider_status(has_alpaca=False, has_tasty=False)
+    assert "tastytrade" not in st["futures"], st["futures"]
+    st = market.provider_status(has_alpaca=False, has_tasty=True)
+    assert st["futures"] == "tastytrade" and st["index"] == "tastytrade"
+    assert st["futures_options"] == "tastytrade"
+
+    # Job validation matrix: futures chains need the account; futures bars
+    # and all index recording stay impossible with the real reason.
+    v = recorder.validate_job
+    assert v("chain", "/ES", "", 900, 365, "future") is not None
+    assert v("chain", "/ES", "", 900, 365, "future", has_tasty=True) is None
+    err = v("bars", "/ES", "1Day", 3600, 365, "future", has_tasty=True)
+    assert err is not None and "OHLC" in err, err
+    assert v("chain", "SPX", "", 900, 365, "index", has_tasty=True) is not None
+    assert v("chain", "SPY", "", 900, 365, "us_equity") is None
+
+    # Autorecord: ANY-of-PLAN — a futures root records chains, skips bars.
+    ok, why = autorecord.recordability("/ES", "future", True, has_tasty=True)
+    assert ok, why
+    ok, why = autorecord.recordability("/ES", "future", True, has_tasty=False)
+    assert not ok and "TastyTrade" in why
+    ok, _ = autorecord.recordability("SPY", "us_equity", True)
+    assert ok
+
+    # Chain snapshot bounding: DTE cap, weekly-far exclusion, strike band,
+    # and the no-mark degrade (wider slice, never an empty snapshot).
+    chain = {"chains": [{"expirations": [
+        {"days_to_expiration": 30, "expiration_type": "Regular",
+         "expiration_date": "2026-09-13", "strikes": [
+            {"strike": 5000.0, "call": "C1", "put": "P1"},
+            {"strike": 8000.0, "call": "C2", "put": "P2"}]},
+        {"days_to_expiration": 30, "expiration_type": "Weekly",
+         "expiration_date": "2026-09-13", "strikes": [
+            {"strike": 8000.0, "call": "CW", "put": "PW"}]},
+        {"days_to_expiration": 7, "expiration_type": "Weekly",
+         "expiration_date": "2026-08-21", "strikes": [
+            {"strike": 8000.0, "call": "CN", "put": "PN"}]},
+        {"days_to_expiration": 400, "expiration_type": "Regular",
+         "expiration_date": "2027-09-13", "strikes": [
+            {"strike": 8000.0, "call": "C3", "put": "P3"}]},
+    ]}]}
+    sel = recorder.Recorder.select_future_contracts(chain, mark=7800.0)
+    syms = {s["symbol"] for s in sel}
+    # C2/P2: regular inside band. CN/PN: near weekly. CW/PW dropped (weekly
+    # beyond the near window), C1/P1 dropped (band), C3/P3 dropped (DTE cap).
+    assert syms == {"C2", "P2", "CN", "PN"}, f"bounding failed: {syms}"
+    sel = recorder.Recorder.select_future_contracts(chain, mark=None)
+    assert {s["symbol"] for s in sel} == {"C1", "P1", "C2", "P2", "CN", "PN"}, \
+        "no mark must widen the slice, not empty it"
+
+
+@check("credential re-entry: re-encrypts, validates fields, leaks nothing")
+def _tastytrade_rekey():
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from fastapi.testclient import TestClient
+
+    from backend.app import State, create_app
+
+    fixture_secret = "fixture-client-secret-not-real-0001"
+    fixture_rt = "fixture-refresh-token-not-real-0002"
+    fixture_rt2 = "fixture-refresh-token-not-real-0003"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        state = State("boot-token-for-tests", db_path=Path(tmp) / "app.db")
+        client = TestClient(create_app(state), base_url="http://127.0.0.1")
+        B = {"X-App-Token": "boot-token-for-tests"}
+        r = client.post("/api/auth/setup", headers=B,
+                        json={"username": "t", "password": "longenough1"})
+        A = {**B, "Authorization": f"Bearer {r.json()['token']}"}
+
+        r = client.post("/api/accounts", headers=A, json={
+            "broker": "tastytrade", "kind": "data", "nickname": "TT",
+            "credentials": {"client_secret": fixture_secret,
+                            "refresh_token": fixture_rt}})
+        assert r.status_code == 200, r.text
+        acct_id = r.json()["id"]
+
+        # Both fields are secrets: the row must carry NO hint at all.
+        listed = client.get("/api/accounts", headers=A).json()
+        assert listed[0]["key_hints"] == {}, listed[0]["key_hints"]
+
+        # The sandbox kind is refused with the reason, offline, as a 422.
+        r = client.post("/api/accounts/test", headers=A, json={
+            "broker": "tastytrade", "kind": "paper",
+            "credentials": {"client_secret": "x", "refresh_token": "y"}})
+        assert r.status_code == 422 and "sandbox" in r.json()["detail"]
+
+        # Re-enter the refresh token; the stored blob must change and the
+        # client secret must survive untouched.
+        with state.db() as db:
+            before = {row["field"]: bytes(row["blob"]) for row in db.execute(
+                "SELECT field, blob FROM secrets WHERE account_id=?", (acct_id,))}
+        r = client.put(f"/api/accounts/{acct_id}/credentials", headers=A,
+                       json={"credentials": {"refresh_token": fixture_rt2}})
+        assert r.status_code == 200 and r.json()["updated"] == ["refresh_token"]
+        with state.db() as db:
+            after = {row["field"]: bytes(row["blob"]) for row in db.execute(
+                "SELECT field, blob FROM secrets WHERE account_id=?", (acct_id,))}
+        assert after["refresh_token"] != before["refresh_token"], "blob unchanged"
+        assert after["client_secret"] == before["client_secret"], \
+            "updating one field must not disturb the other"
+
+        # Guard rails: unknown field, empty value, empty body, foreign account.
+        for body, why in ((({"credentials": {"nonsense": "x"}}), "unknown field"),
+                          (({"credentials": {"refresh_token": "  "}}), "empty value"),
+                          (({"credentials": {}}), "empty body")):
+            r = client.put(f"/api/accounts/{acct_id}/credentials", headers=A, json=body)
+            assert r.status_code == 422, f"{why} returned {r.status_code}"
+        r = client.put("/api/accounts/9999/credentials", headers=A,
+                       json={"credentials": {"refresh_token": "z"}})
+        assert r.status_code == 404
+
+        # Nothing plaintext on disk — same standard as account creation.
+        raw = (Path(tmp) / "app.db").read_bytes()
+        for needle in (fixture_secret, fixture_rt, fixture_rt2):
+            assert needle.encode() not in raw, "plaintext credential in DB file"
+
+
 @check("sessions: idle expiry, revocation wipe, and no shared-buffer race")
 def _sessions():
     sys.path.insert(0, str(CODE))
@@ -574,8 +817,9 @@ def _recorder_logic():
     assert not Recorder.is_due({"last_run_at": "2026-08-02T11:59:30Z", "interval_seconds": 60}, now)
 
     assert validate_job("chain", "/ES", "", 300, 90, "future") is not None, \
-        "futures must be rejected with a reason, not accepted and empty"
-    assert "TastyTrade" in validate_job("chain", "SPX", "", 300, 90, "index")
+        "futures without a TastyTrade account must be rejected with a reason"
+    assert validate_job("chain", "SPX", "", 300, 90, "index") is not None, \
+        "index recording has no source and must be rejected with a reason"
     assert validate_job("bars", "SPY", "2Min", 300, 90, "us_equity") is not None
     assert validate_job("bars", "SPY", "1Min", 30, 90, "us_equity") is not None, "interval floor"
     assert validate_job("chain", "SPY", "", 900, 90, "us_equity") is None

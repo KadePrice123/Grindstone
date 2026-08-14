@@ -389,7 +389,8 @@ export function DataPage() {
         <div className="subtle" style={{ marginBottom: 10 }}>
           Jobs run while you are signed in (your keys stay in the encrypted vault — recording
           pauses when locked). Options chains use Alpaca's indicative feed and are labeled as such.
-          Futures recording arrives with the TastyTrade adapter.
+          Futures option chains (e.g. /ES) record through a TastyTrade account — greeks are blank
+          on those rows because the snapshot feed carries none. Futures bars have no source yet.
         </div>
         {jobs === null ? (
           <div className="dim">Loading…</div>

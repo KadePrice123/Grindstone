@@ -53,6 +53,7 @@ from .logs import LOG
 from .brokers import base as brokers_base
 from .brokers.alpaca import PAPER_URL, AlpacaAdapter
 from .brokers.alpaca_data import AlpacaData
+from .brokers.tastytrade import TastyTradeAdapter
 from .db import connect
 from . import marketdb
 from .marketdb import connect_market
@@ -102,6 +103,26 @@ class State:
             return None
         with self.db() as db:
             return market.alpaca_creds_for(db, user_id, snap.dek)
+
+    def tasty_creds_for(self, user_id: int) -> dict[str, str] | None:
+        """TastyTrade OAuth creds, same vault path and locking rules as
+        creds_for — the futures/index quote source and the futures recorder's
+        way in. None while locked or unenrolled."""
+        snap = self.sessions.any_for_user(user_id)
+        if snap is None:
+            return None
+        with self.db() as db:
+            return market.tasty_creds_for(db, user_id, snap.dek)
+
+    def has_tasty_account(self, user_id: int) -> bool:
+        """Enrollment check only — no vault, no DEK. Validation questions
+        ("can a futures chain job exist?") are about enrollment, not about
+        whether the vault happens to be unlocked this second."""
+        with self.db() as db:
+            return db.execute(
+                "SELECT 1 FROM accounts WHERE user_id=? AND broker='tastytrade'"
+                " AND enabled=1 LIMIT 1", (user_id,),
+            ).fetchone() is not None
 
     def settings_for(self, user_id: int) -> dict[str, Any]:
         """This user's settings, for the recorder's backfill gate.
@@ -205,6 +226,10 @@ class AccountIn(BaseModel):
 class TestIn(BaseModel):
     broker: str
     kind: str
+    credentials: dict[str, str] = Field(default_factory=dict)
+
+
+class RekeyIn(BaseModel):
     credentials: dict[str, str] = Field(default_factory=dict)
 
 
@@ -427,6 +452,16 @@ def create_app(state: State) -> FastAPI:
             if missing:
                 raise HTTPException(422, f"alpaca needs {', '.join(missing)}")
             return AlpacaAdapter(creds["key_id"], creds["secret_key"], kind)
+        if broker == "tastytrade":
+            missing = [f for f in ("client_secret", "refresh_token") if not creds.get(f)]
+            if missing:
+                raise HTTPException(422, f"tastytrade needs {', '.join(missing)}")
+            try:
+                return TastyTradeAdapter(creds["client_secret"],
+                                         creds["refresh_token"], kind)
+            except brokers_base.BrokerError as e:
+                # 'paper' kind — the adapter's message explains the sandbox
+                raise HTTPException(422, str(e)) from None
         return None
 
     @app.get("/api/accounts")
@@ -489,6 +524,44 @@ def create_app(state: State) -> FastAPI:
         # until the NEXT login (observed live).
         state.kick_market_refresh(s.user_id)
         return {"id": account_id, "ok": True}
+
+    @app.put("/api/accounts/{account_id}/credentials")
+    def accounts_rekey(account_id: int, body: RekeyIn,
+                       s=Depends(current_session)) -> dict[str, Any]:
+        """Re-enter one or more credential fields on a saved account —
+        re-encrypted on save (FR-ACCT-3). Built for the TastyTrade refresh
+        token, which gets re-entered whenever the grant is regenerated; works
+        for any broker's declared fields. Partial on purpose: updating the
+        token must not require re-typing the client secret."""
+        if not body.credentials:
+            raise HTTPException(422, "no credential fields to update")
+        with state.db() as db:
+            acct = db.execute(
+                "SELECT id, broker FROM accounts WHERE id=? AND user_id=?",
+                (account_id, s.user_id),
+            ).fetchone()
+            if acct is None:
+                raise HTTPException(404, "no such account")
+            spec = brokers_base.CREDENTIAL_FIELDS[acct["broker"]]
+            unknown = [f for f in body.credentials if f not in spec["fields"]]
+            if unknown:
+                raise HTTPException(
+                    422, f"{acct['broker']} has no field {', '.join(sorted(unknown))}")
+            empty = [f for f, v in body.credentials.items() if not v.strip()]
+            if empty:
+                raise HTTPException(
+                    422, f"empty value for {', '.join(sorted(empty))}")
+            for f, value in body.credentials.items():
+                hint = value[-4:] if f == spec["hint_last4"] and len(value) >= 8 else ""
+                db.execute(
+                    "INSERT INTO secrets (account_id, field, blob, hint)"
+                    " VALUES (?,?,?,?) ON CONFLICT (account_id, field)"
+                    " DO UPDATE SET blob=excluded.blob, hint=excluded.hint",
+                    (account_id, f,
+                     security.encrypt_secret(s.dek, value, s.user_id, account_id, f),
+                     hint),
+                )
+        return {"ok": True, "updated": sorted(body.credentials)}
 
     @app.delete("/api/accounts/{account_id}")
     def accounts_delete(account_id: int, s=Depends(current_session)) -> dict[str, Any]:
@@ -631,7 +704,8 @@ def create_app(state: State) -> FastAPI:
             con = state.market()
             try:
                 out["autorecord"] = autorecord_mod.sync_all(
-                    con, s.user_id, symbols, classify, True)
+                    con, s.user_id, symbols, classify, True,
+                    has_tasty=state.has_tasty_account(s.user_id))
             finally:
                 con.close()
             LOG.info("autorecord enabled: %d started, %d skipped",
@@ -688,7 +762,8 @@ def create_app(state: State) -> FastAPI:
                 try:
                     rec = autorecord_mod.on_favorite_added(
                         con, s.user_id, sym,
-                        (entry or {}).get("asset_class"), entry is not None, True)
+                        (entry or {}).get("asset_class"), entry is not None, True,
+                        has_tasty=state.has_tasty_account(s.user_id))
                 finally:
                     con.close()
         return {"favorite": fav, "autorecord": rec}
@@ -774,10 +849,12 @@ def create_app(state: State) -> FastAPI:
         if not syms:
             return {"quotes": {}}
         creds = state.creds_for(s.user_id)
+        tasty = state.tasty_creds_for(s.user_id)
 
         def one(sym: str) -> tuple[str, dict[str, Any]]:
             entry = state.universe.exact(sym)
-            q = market.quote_for(sym, (entry or {}).get("asset_class", "us_equity"), creds)
+            q = market.quote_for(sym, (entry or {}).get("asset_class", "us_equity"),
+                                 creds, tasty)
             return sym, {
                 "available": bool(q.get("available")),
                 "price": q.get("price"),
@@ -1343,7 +1420,8 @@ def create_app(state: State) -> FastAPI:
         symbol = symbol.upper()
         entry = state.universe.exact(symbol)
         creds = state.creds_for(s.user_id)
-        quote = market.quote_for(symbol, (entry or {}).get("asset_class", "us_equity"), creds)
+        quote = market.quote_for(symbol, (entry or {}).get("asset_class", "us_equity"),
+                                 creds, state.tasty_creds_for(s.user_id))
         con = state.market()
         try:
             news = newsstore.latest(con, symbols=[symbol], limit=12)
@@ -1430,7 +1508,8 @@ def create_app(state: State) -> FastAPI:
 
     @app.get("/api/providers/status")
     def providers_status(s=Depends(current_session)) -> dict[str, Any]:
-        return market.provider_status(state.creds_for(s.user_id) is not None)
+        return market.provider_status(state.creds_for(s.user_id) is not None,
+                                      state.tasty_creds_for(s.user_id) is not None)
 
     # ----------------------------------------------------- data management
     @app.get("/api/datamgmt/jobs")
@@ -1451,6 +1530,7 @@ def create_app(state: State) -> FastAPI:
         err = recorder_mod.validate_job(
             body.kind, symbol, body.timeframe, body.interval_seconds,
             body.retention_days, (entry or {}).get("asset_class") if entry else None,
+            has_tasty=state.has_tasty_account(s.user_id),
         )
         if err:
             raise HTTPException(422, err)
@@ -1754,7 +1834,8 @@ def create_app(state: State) -> FastAPI:
                         continue
                     err = recorder_mod.validate_job(
                         kind, symbol, timeframe, interval, retention,
-                        (entry or {}).get("asset_class") if entry else None)
+                        (entry or {}).get("asset_class") if entry else None,
+                        has_tasty=state.has_tasty_account(s.user_id))
                     if err:
                         raise HTTPException(422, err)
                     con.execute(
