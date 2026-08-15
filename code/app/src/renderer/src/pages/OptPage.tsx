@@ -572,11 +572,19 @@ export function OptPage({
   // The underlying, for the history view's indicator only: past closes share
   // a timeline with the contract's past prices. (On the term structure the x
   // axis is days-to-expiry — a different axis, so it has no place there.)
+  //
+  // DEPTH IS NOT COSMETIC HERE. HistoryPanel projects the option series ONTO
+  // this timeline, so an underlying day that is missing DELETES that day's
+  // option point. The hardcoded limit=1000 was therefore a hard 1,000-session
+  // cap on visible history — with the purchased backfill loaded, the archive
+  // reached 2020-01 while the chart still began at Sep 2022, and it looked
+  // like missing data rather than a clipped axis. limit=0 means "as
+  // configured" (Settings -> Candles per chart, default ALL).
   useEffect(() => {
     if (tab !== 'history' || bars.length > 0) return
     let alive = true
     api<{ bars: { ts: string; close: number }[] }>(
-      'GET', `/api/symbols/${encodeURIComponent(symbol)}/bars?timeframe=1Day&limit=1000`)
+      'GET', `/api/symbols/${encodeURIComponent(symbol)}/bars?timeframe=1Day&limit=0`)
       .then((r) => {
         if (!alive) return
         setBars(r.bars ?? [])

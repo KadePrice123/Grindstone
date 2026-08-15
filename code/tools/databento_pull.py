@@ -44,6 +44,22 @@ OPT_ROOTS = ["MES", "EX", "EX2", "EX3",        # micro S&P family
 # SPXL options: the COVID window, ending where the vault's coverage begins.
 SPXL_START, SPXL_END = "2020-01-01", "2024-11-01"
 
+# ---- quotes (added 2026-08-15, Kade: "that's a major hole") ---------------
+# TBBO is the bid/ask AT EACH TRADE. The continuous quote feeds price out at
+# $12.4k (bbo-1m) and $18.9k (mbp-1) for these same roots, so this is the only
+# affordable real spread — and it covers exactly the contracts that actually
+# traded, which is the population a fill can be assumed in anyway.
+# ONLY THE DAYS WE LACK: the recorder has been capturing live two-sided
+# quotes since it started, so each range ends where our own coverage begins.
+QUOTE_PULLS = [
+    # (dataset, symbols, schema, start, end)
+    ("GLBX.MDP3", ["MES", "EX", "EX2", "EX3", "MCO", "MW2", "MW3", "OMG", "G1M"],
+     "tbbo", "2010-06-06", "2026-08-13"),
+    # OPRA carries NO quotes before 2023-03-28 at any price — the COVID window
+    # simply has none to buy — and our own recorder took over 2025-07-30.
+    ("OPRA.PILLAR", ["SPXL"], "tcbbo", "2023-03-28", "2025-07-30"),
+]
+
 
 def key() -> str:
     for line in ENV.read_text().splitlines():
@@ -57,9 +73,16 @@ def main() -> int:
     ap.add_argument("--cap", type=float, default=180.0,
                     help="hard spend ceiling in USD (abort before exceeding; "
                          "$125 credits + card cover it, plan is ~$167)")
+    ap.add_argument("--quotes", action="store_true",
+                    help="also pull the trade-time bid/ask (QUOTE_PULLS)")
+    ap.add_argument("--only-quotes", action="store_true",
+                    help="pull ONLY QUOTE_PULLS — everything else is already "
+                         "on disk and must not be re-priced or re-bought")
     ap.add_argument("--dry-run", action="store_true",
                     help="price every slice, download nothing")
     args = ap.parse_args()
+    if args.only_quotes:
+        args.quotes = True
 
     auth = (key(), "")
     RAW.mkdir(parents=True, exist_ok=True)
@@ -192,12 +215,13 @@ def main() -> int:
 
     # 1) futures daily bars, per root — the combined 11-parent request 504s
     # (measured); one root over 16 years answers in seconds.
-    for root in FUT_ROOTS:
-        pull(f"{root}.FUT", "ohlcv-1d", f"{START_YEAR}-06-06", END,
-             RAW / f"{root}_fut_ohlcv-1d.csv.zst")
+    if not args.only_quotes:
+        for root in FUT_ROOTS:
+            pull(f"{root}.FUT", "ohlcv-1d", f"{START_YEAR}-06-06", END,
+                 RAW / f"{root}_fut_ohlcv-1d.csv.zst")
 
     # 2) option families: per root x schema x year (resumable slices)
-    for root in OPT_ROOTS:
+    for root in (() if args.only_quotes else OPT_ROOTS):
         for schema in ("definition", "statistics"):
             for year in range(START_YEAR, 2027):
                 s = f"{year}-01-01" if year > START_YEAR else f"{year}-06-06"
@@ -207,7 +231,7 @@ def main() -> int:
 
     # 3) SPXL options through COVID (OPRA), per-year slices
     opra_end = min(SPXL_END, ends["OPRA.PILLAR"])
-    for schema in ("definition", "ohlcv-1d", "statistics"):
+    for schema in (() if args.only_quotes else ("definition", "ohlcv-1d", "statistics")):
         for year in range(2020, 2025):
             s = max(f"{year}-01-01", SPXL_START)
             e = min(f"{year + 1}-01-01", opra_end)
@@ -215,6 +239,20 @@ def main() -> int:
                 continue
             pull("SPXL.OPT", schema, s, e,
                  RAW / f"SPXL_{schema}_{year}.csv.zst", dataset="OPRA.PILLAR")
+
+    # 4) quotes, per root x year (resumable, and only where we lack our own)
+    if args.quotes:
+        for dataset, roots, schema, q0, q1 in QUOTE_PULLS:
+            q1 = min(q1, ends[dataset])
+            for root in roots:
+                y0, y1 = int(q0[:4]), int(q1[:4])
+                for year in range(y0, y1 + 1):
+                    s = max(f"{year}-01-01", q0)
+                    e = min(f"{year + 1}-01-01", q1)
+                    if s >= e:
+                        continue
+                    pull(f"{root}.OPT", schema, s, e,
+                         RAW / f"{root}_{schema}_{year}.csv.zst", dataset=dataset)
 
     print(f"\nDONE: pulled {pulled}, skipped-existing {skipped}, empty {empty}, "
           f"TOTAL SPENT ${spent:.2f} (cap ${args.cap:.2f})", flush=True)
