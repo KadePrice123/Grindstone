@@ -68,13 +68,27 @@ def iter_rows(path: Path):
         yield from csv.DictReader(f)
 
 
-def load_definitions(roots: list[str]) -> dict[str, dict]:
-    """instrument_id -> {strike, expiration, right}. Later files win (a
-    contract's definition is republished daily; the spec fields never change
-    in a way we read)."""
-    out: dict[str, dict] = {}
+def load_definitions(roots: list[str]) -> dict[str, list[tuple[str, dict]]]:
+    """instrument_id -> [(published_on, contract), ...] sorted by date.
+
+    POINT IN TIME, NOT LAST-WINS. The first version of this collapsed every
+    definition into one dict where later files overwrote earlier ones, on the
+    assumption that a republished definition says the same thing. CME REUSES
+    instrument_ids: measured on this archive, 74 MES option ids (0.4%) name
+    two entirely different contracts across 2020-2026 — id 339201 is a
+    2020-12-18 3770 put and later a 2023-03-17 3390 call.
+
+    The damage was not proportional to that 0.4%. Rebuilding 2024-03-05 from
+    the raw files with point-in-time definitions yields ZERO puts for the
+    2024-07-12 expiration, while the last-wins import wrote 27 — a chain with
+    a 6900 put at 0.15 and a 4720 put at 1143.50 against a 5088 future. Whole
+    groups were mislabelled, not stray rows, because a price is only as
+    correct as the contract it is attached to.
+    """
+    out: dict[str, list[tuple[str, dict]]] = defaultdict(list)
     for root in roots:
         for path in sorted(RAW.glob(f"{root}_definition_*.csv.zst")):
+            seen: set[tuple[str, str]] = set()
             for r in iter_rows(path):
                 if r.get("instrument_class") not in ("C", "P"):
                     continue
@@ -83,13 +97,38 @@ def load_definitions(roots: list[str]) -> dict[str, dict]:
                 except (KeyError, ValueError):
                     continue
                 exp = (r.get("expiration") or "")[:10]
-                if not exp:
+                iid = r.get("instrument_id")
+                when = (r.get("ts_event") or "")[:10]
+                if not exp or not iid or not when:
                     continue
-                out[r["instrument_id"]] = {
-                    "strike": strike, "expiration": exp,
-                    "right": r["instrument_class"],
-                }
-    return out
+                # One row per (id, day): definitions republish every session
+                # and only the first of a day carries new information.
+                if (iid, when) in seen:
+                    continue
+                seen.add((iid, when))
+                out[iid].append((when, {"strike": strike, "expiration": exp,
+                                        "right": r["instrument_class"]}))
+    for v in out.values():
+        v.sort(key=lambda t: t[0])
+    return dict(out)
+
+
+def definition_on(defs: dict[str, list[tuple[str, dict]]], iid: str,
+                  date: str) -> dict | None:
+    """The contract this id named ON THAT DAY — the latest definition
+    published at or before it, else the earliest known (a price can precede
+    the first definition snapshot we hold, and that is still the same
+    contract; what must never happen is borrowing a LATER id's meaning)."""
+    hist = defs.get(iid)
+    if not hist:
+        return None
+    best = None
+    for when, meta in hist:
+        if when <= date:
+            best = meta
+        else:
+            break
+    return best if best is not None else hist[0][1]
 
 
 def weekday(date: str) -> bool:
@@ -109,7 +148,9 @@ def import_family(underlying: str, roots: list[str], targets: set[str],
             n = 0
             for r in iter_rows(path):
                 iid = r.get("instrument_id")
-                if iid not in defs:
+                date0 = (r.get("ts_event") or "")[:10]
+                meta = definition_on(defs, iid, date0)
+                if meta is None:
                     continue  # futures/spreads share the stat stream
                 st = r.get("stat_type")
                 if st not in (STAT_SETTLEMENT, STAT_OI):
@@ -118,6 +159,10 @@ def import_family(underlying: str, roots: list[str], targets: set[str],
                 if not date or not weekday(date):
                     continue
                 slot = days[date].setdefault(iid, {})
+                # THE CONTRACT IS RESOLVED HERE, where the date is known, and
+                # travels with the row. Looking it up again at emit time is
+                # what re-introduces the last-wins bug by the back door.
+                slot["meta"] = meta
                 if st == STAT_SETTLEMENT:
                     try:
                         slot["settle"] = float(r.get("price") or "")
@@ -135,12 +180,14 @@ def import_family(underlying: str, roots: list[str], targets: set[str],
         for path in sorted(RAW.glob(f"{root}_ohlcv-1d_*.csv.zst")):
             for r in iter_rows(path):
                 iid = r.get("instrument_id")
-                if iid not in defs:
-                    continue
                 date = (r.get("ts_event") or "")[:10]
                 if not date or not weekday(date):
                     continue
+                meta = definition_on(defs, iid, date)
+                if meta is None:
+                    continue
                 slot = days[date].setdefault(iid, {})
+                slot["meta"] = meta
                 try:
                     slot["settle"] = float(r.get("close") or "")
                 except ValueError:
@@ -161,7 +208,9 @@ def import_family(underlying: str, roots: list[str], targets: set[str],
             for iid, vals in days[date].items():
                 if "settle" not in vals:
                     continue  # OI without a price is not a quotable row
-                m = defs[iid]
+                m = vals.get("meta")
+                if m is None:
+                    continue
                 contracts.append({
                     "right": m["right"], "strike": m["strike"],
                     "expiration": m["expiration"],

@@ -165,6 +165,50 @@ def mark_of(row: dict[str, Any]) -> float | None:
     return None
 
 
+#: How far above BOTH neighbours a mark may sit before it is treated as a bad
+#: print. Generous on purpose — this is meant to catch arbitrage violations
+#: (a 1700 mark between two 400s), never to shave a real smile.
+SPIKE_FACTOR = 1.25
+
+
+def suspect_marks(rows: list[dict[str, Any]]) -> set[int]:
+    """Indices whose mark is a NO-ARBITRAGE VIOLATION against its neighbours.
+
+    Within one expiration and right, option prices are monotone in strike —
+    puts rise with strike, calls fall — so an INTERIOR price above both of its
+    neighbours cannot exist in either direction. It is a bad settlement print.
+
+    Measured, not theorised: the /MES archive settles the 2025-11-21 6690 put
+    at 1700.25 sitting between a 6650 at 374.00 and a 6700 at 407.75. Left in,
+    it does real damage twice over — the inflated premium implies a ~102% vol
+    against a 13% neighbourhood, and the delta that falls out (-0.41) lands
+    squarely inside a Δ0.42 match window, so the matcher PREFERS the broken
+    row and the history chart spikes to 25% of strike.
+
+    Only interior rows are testable; an end of the ladder has nothing to be
+    out of order with.
+    """
+    by_group: dict[tuple[str, str], list[tuple[float, float, int]]] = defaultdict(list)
+    for i, r in enumerate(rows):
+        m = mark_of(r)
+        k = r.get("strike")
+        rt = r.get("right")
+        if m is None or k is None or rt not in ("C", "P"):
+            continue
+        by_group[(str(r.get("expiration") or "")[:10], rt)].append((float(k), m, i))
+
+    bad: set[int] = set()
+    for items in by_group.values():
+        items.sort()
+        for j in range(1, len(items) - 1):
+            _, m_prev, _ = items[j - 1]
+            _, m_here, idx = items[j]
+            _, m_next, _ = items[j + 1]
+            if m_here > max(m_prev, m_next) * SPIKE_FACTOR:
+                bad.add(idx)
+    return bad
+
+
 def solve_expiration(rows: list[dict[str, Any]], asof: dt.date,
                      forward: float | None = None) -> int:
     """Fill iv/delta IN PLACE for one expiration's rows. Returns how many were
@@ -246,6 +290,14 @@ def solve_chain(rows: list[dict[str, Any]], asof: dt.date | None = None,
     the model is the fallback, never an override."""
     asof = asof or dt.date.today()
     need = [r for r in rows if r.get("delta") is None]
+    if not need:
+        return 0
+    # DROP THE BAD PRINTS FIRST. Solving one produces a delta that looks
+    # ordinary and then wins matches it should never have entered.
+    bad = suspect_marks(need)
+    for i in bad:
+        need[i]["mark_suspect"] = True
+    need = [r for i, r in enumerate(need) if i not in bad]
     if not need:
         return 0
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
