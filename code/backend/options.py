@@ -19,6 +19,7 @@ Shape of the service:
 from __future__ import annotations
 
 import datetime as dt
+from collections import defaultdict
 import sqlite3
 import threading
 import time
@@ -268,7 +269,30 @@ def futures_contracts(tasty: dict[str, str], underlying: str,
     ad = TastyTradeAdapter(tasty["client_secret"], tasty["refresh_token"])
     chain = ad.nested_future_chain(underlying)
 
-    wanted: list[dict[str, Any]] = []
+    # ONE LISTING PER EXPIRATION DATE. A futures option chain can list the
+    # same DATE twice under different roots, written on DIFFERENT underlying
+    # futures — measured on /MES: 2026-09-18 is root MES on /MESU6 AND root
+    # EX3 on /MESZ6, and 2026-12-18 is MES on /MESZ6 and EX3 on /MESH7. They
+    # are not interchangeable: a different underlying is a different forward,
+    # so the same strike carries a genuinely different premium, and feeding
+    # both to a term structure drew two points at one DTE joined by a
+    # vertical jump.
+    #
+    # The one to keep is the natural pairing: the option settles into the
+    # NEAREST future expiring on or after it. Anything else quietly compares
+    # a September option against a December future.
+    trimmed_note: str | None = None
+    fut_exp = {f.get("symbol"): (f.get("expiration_date") or "")[:10]
+               for f in chain.get("futures", []) if f.get("symbol")}
+
+    def pairing_rank(exp_row: dict[str, Any], e: str) -> tuple[int, str]:
+        u = exp_row.get("underlying_symbol") or ""
+        ue = fut_exp.get(u, "")
+        if not ue:
+            return (2, u)          # unknown underlying: least preferred
+        return (0 if ue >= e else 1, ue)   # nearest future on/after the option
+
+    best_for_date: dict[str, tuple[tuple[int, str], dict[str, Any]]] = {}
     for oc in chain.get("chains", []):
         for exp in oc.get("expirations", []):
             e = (exp.get("expiration_date") or "")[:10]
@@ -280,17 +304,67 @@ def futures_contracts(tasty: dict[str, str], underlying: str,
                 continue
             if d < d_from or d > d_to:
                 continue
-            for st in exp.get("strikes", []):
-                k = st.get("strike")
-                if k is None or not (strike_lo <= k <= strike_hi):
+            rank = pairing_rank(exp, e)
+            cur = best_for_date.get(e)
+            if cur is None or rank < cur[0]:
+                best_for_date[e] = (rank, exp)
+
+    wanted: list[dict[str, Any]] = []
+    for e, (_rank, exp) in best_for_date.items():
+        under = exp.get("underlying_symbol") or ""
+        for st in exp.get("strikes", []):
+            k = st.get("strike")
+            if k is None or not (strike_lo <= k <= strike_hi):
+                continue
+            for rt, sym in (("C", st.get("call")), ("P", st.get("put"))):
+                if not sym or (right is not None and rt != right):
                     continue
-                for rt, sym in (("C", st.get("call")), ("P", st.get("put"))):
-                    if not sym or (right is not None and rt != right):
-                        continue
-                    wanted.append({"occ_symbol": sym, "expiration": e,
-                                   "strike": float(k), "right": rt})
+                wanted.append({"occ_symbol": sym, "expiration": e,
+                               "strike": float(k), "right": rt,
+                               "underlying_future": under})
     if not wanted:
         return []
+
+    # FAIR TRUNCATION ACROSS EXPIRATIONS. The row cap is applied downstream to
+    # a flat list, and a near-dated futures expiration lists FAR more strikes
+    # than a far-dated one — /MES at 6 DTE lists 360 strikes across a wide
+    # window while 16 DTE lists 40. Emitted expiration-by-expiration, the
+    # front month ate the entire 400-row budget and every later expiration
+    # arrived EMPTY: the heatmap showed two columns of prices and hatching
+    # everywhere else, which reads as "these contracts do not exist" when in
+    # fact they were never asked for.
+    #
+    # So the budget is shared: each expiration contributes in turn, nearest
+    # the middle of the requested window first — that is the leg's own strike,
+    # and the neighbourhood a trader is actually reading. Trimming BEFORE the
+    # quote round-trips also stops us pricing rows we are about to discard.
+    if len(wanted) > MAX_ROWS:
+        centre = 0.5 * (strike_lo + strike_hi)
+        by_exp: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for w in wanted:
+            by_exp[w["expiration"]].append(w)
+        for v in by_exp.values():
+            v.sort(key=lambda w: (abs(w["strike"] - centre), w["strike"], w["right"]))
+        order = sorted(by_exp)
+        picked: list[dict[str, Any]] = []
+        depth = 0
+        while len(picked) < MAX_ROWS:
+            added = False
+            for e in order:
+                rows_e = by_exp[e]
+                if depth < len(rows_e):
+                    picked.append(rows_e[depth])
+                    added = True
+                    if len(picked) >= MAX_ROWS:
+                        break
+            if not added:
+                break
+            depth += 1
+        wanted = picked
+        trimmed_note = (
+            f"showing the {MAX_ROWS} contracts nearest your strike, shared "
+            f"evenly across {len(order)} expirations — widen the window less, "
+            f"or narrow the strike range, to see further out")
 
     quotes: dict[str, dict[str, Any]] = {}
     for i in range(0, len(wanted), FUT_QUOTE_BATCH):
@@ -331,7 +405,7 @@ def futures_contracts(tasty: dict[str, str], underlying: str,
                       solved, len(out), underlying)
     except Exception:  # noqa: BLE001 — a chain without greeks still renders
         LOG.info("greek solve failed for %s", underlying, exc_info=True)
-    return out
+    return out, trimmed_note
 
 
 def fetch(creds: dict[str, str] | None, underlying: str,
@@ -387,15 +461,17 @@ def fetch(creds: dict[str, str] | None, underlying: str,
                     "reason": "futures option chains come through TastyTrade — "
                               "add a TastyTrade account on the Accounts page"}
         try:
-            rows = futures_contracts(tasty, underlying, d_from, d_to,
-                                     strike_lo, strike_hi, right)
+            rows, trim_note = futures_contracts(tasty, underlying, d_from, d_to,
+                                                strike_lo, strike_hi, right)
         except BrokerError as e:
             return {"underlying": underlying, "available": False, "contracts": [],
                     "total": 0, "truncated": False, "expirations": [],
                     "source": "none", "reason": str(e)}
+        clamp_note = ("window clamped to today — expired contracts are not "
+                      "shown" if clamped else None)
         return _answer(underlying, rows, "tastytrade",
-                       reason=("window clamped to today — expired contracts "
-                               "are not shown" if clamped else None))
+                       reason=" · ".join(x for x in (clamp_note, trim_note) if x)
+                       or None)
 
     if asset_class:
         refusal = NO_CHAIN_CLASSES.get(asset_class.lower())
