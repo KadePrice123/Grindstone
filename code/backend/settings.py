@@ -75,6 +75,20 @@ SPEC: dict[str, dict[str, Any]] = {
                 "yet — those stay starred and say why. "
                 "Off by default because it spends API budget without asking.",
     },
+    "deep_history": {
+        "group": "Data",
+        "kind": "bool", "default": False,
+        "label": "Keep full history for every symbol I open",
+        "help": "Opening a symbol's chart starts keeping its daily history "
+                "permanently, as far back as the sources reach — your broker "
+                "for the years it covers, the keyless daily feed for the "
+                "decades before that, each stretch labelled with where it "
+                "came from. Come back a week later and only the missing days "
+                "are fetched, not the whole history again. Your starred "
+                "symbols are filled the moment you turn this on. The fill "
+                "runs in the background: charts never wait for it, and this "
+                "store is never used to price a backtest.",
+    },
     "backfill_enabled": {
         "group": "Data",
         "kind": "bool", "default": False,

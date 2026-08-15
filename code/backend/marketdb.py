@@ -54,6 +54,37 @@ CREATE TABLE IF NOT EXISTS bar_cache (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS bar_cache_age ON bar_cache (fetched_at);
 
+-- PERMANENT chart history ("Keep every symbol I open", settings.deep_history).
+-- A THIRD table on purpose. bar_cache is volatile by design (its retention
+-- sweep is the whole point) and rec_bars is the user's own recording, which
+-- btdata promotes into the BACKTEST store — putting a delayed keyless candle
+-- in either one would quietly change what a backtest is priced from. This
+-- table is only ever read by charts, and every row names the feed it came
+-- from so a spliced series can say where each segment starts.
+CREATE TABLE IF NOT EXISTS bar_hist (
+    symbol    TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    ts        TEXT NOT NULL,
+    o REAL, h REAL, l REAL, c REAL, v REAL,
+    src_id    INTEGER NOT NULL,
+    PRIMARY KEY (symbol, timeframe, ts)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS bar_hist_src (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+-- What has already been reached, so a re-load fetches only the difference.
+-- `deep_at` is stamped once the deepest available source has been walked back
+-- to its own horizon; until then a load knows there is still head to find.
+CREATE TABLE IF NOT EXISTS bar_hist_meta (
+    symbol    TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    deep_at   TEXT,
+    tail_at   TEXT,
+    note      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (symbol, timeframe)
+) WITHOUT ROWID;
+
 CREATE VIRTUAL TABLE IF NOT EXISTS news_fts USING fts5(
     headline, summary, tokenize='trigram'
 );
@@ -222,6 +253,14 @@ def bar_cache_store(con: sqlite3.Connection, symbol: str, timeframe: str,
             " (symbol, timeframe, ts, o, h, l, c, v, fetched_at)"
             " VALUES (?,?,?,?,?,?,?,?,?)", rows)
         if keep_days is not None:
+            # DELIBERATELY GLOBAL, and the gate pins it (_bar_cache inserts an
+            # 'OLD' symbol and requires a store of a DIFFERENT symbol to sweep
+            # it). This bounds the whole cache by recency of USE, which is the
+            # right rule for a volatile convenience layer whose every row is
+            # re-fetchable. It does mean a symbol left alone past the window
+            # loses its cached bars — that is not the layer that promises
+            # permanence. `bar_hist` is (see the deep_history setting), and it
+            # has no sweep at all.
             cutoff = (now - dt.timedelta(days=keep_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
             con.execute("DELETE FROM bar_cache WHERE fetched_at < ?", (cutoff,))
     return len(rows)
@@ -245,11 +284,102 @@ def bar_cache_read(con: sqlite3.Connection, symbol: str, timeframe: str,
 
 
 
+def _src_id(con: sqlite3.Connection, name: str) -> int:
+    con.execute("INSERT OR IGNORE INTO bar_hist_src (name) VALUES (?)", (name,))
+    return con.execute("SELECT id FROM bar_hist_src WHERE name=?",
+                       (name,)).fetchone()[0]
+
+
+def bar_hist_store(con: sqlite3.Connection, symbol: str, timeframe: str,
+                   bars: list[dict], source: str) -> int:
+    """Keep bars FOREVER, tagged with the feed that produced them.
+
+    No retention sweep exists here and none should: this table is the answer
+    to "save every symbol's data as far back as possible", and a deleter is
+    exactly what that promise excludes. Size is governed by which symbols the
+    user opens, which is the control they actually chose.
+    """
+    rows = [b for b in bars if b.get("ts")]
+    if not rows:
+        return 0
+    with con:
+        sid = _src_id(con, source)
+        con.executemany(
+            "INSERT OR REPLACE INTO bar_hist"
+            " (symbol, timeframe, ts, o, h, l, c, v, src_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            [(symbol, timeframe, b["ts"], b.get("open"), b.get("high"),
+              b.get("low"), b.get("close"), b.get("volume"), sid)
+             for b in rows])
+    return len(rows)
+
+
+def bar_hist_read(con: sqlite3.Connection, symbol: str, timeframe: str,
+                  limit: int) -> tuple[list[dict], list[dict]]:
+    """The newest `limit` permanent bars, plus one segment per contiguous run
+    of a single source — so the caller can say WHERE each stretch came from
+    instead of collapsing a splice into one unprovable sentence."""
+    rows = con.execute(
+        "SELECT b.ts, b.o, b.h, b.l, b.c, b.v, s.name FROM bar_hist b"
+        " JOIN bar_hist_src s ON s.id = b.src_id"
+        " WHERE b.symbol=? AND b.timeframe=? ORDER BY b.ts DESC LIMIT ?",
+        (symbol, timeframe, limit)).fetchall()
+    if not rows:
+        return [], []
+    rows = list(reversed(rows))
+    bars = [{"ts": r[0], "open": r[1], "high": r[2], "low": r[3],
+             "close": r[4], "volume": r[5]} for r in rows]
+    segments: list[dict] = []
+    for r in rows:
+        if segments and segments[-1]["source"] == r[6]:
+            segments[-1]["to"] = r[0][:10]
+        else:
+            segments.append({"source": r[6], "from": r[0][:10], "to": r[0][:10]})
+    return bars, segments
+
+
+def bar_hist_span(con: sqlite3.Connection, symbol: str,
+                  timeframe: str) -> dict:
+    """What is already held, and how far the deepening has got. This is the
+    subtraction an incremental load runs against: anything older than `lo` is
+    head still to find (unless `deep_at` says the horizon was reached), and
+    anything after `hi` is tail."""
+    r = con.execute(
+        "SELECT MIN(ts), MAX(ts), COUNT(*) FROM bar_hist"
+        " WHERE symbol=? AND timeframe=?", (symbol, timeframe)).fetchone()
+    m = con.execute(
+        "SELECT deep_at, tail_at, note FROM bar_hist_meta"
+        " WHERE symbol=? AND timeframe=?", (symbol, timeframe)).fetchone()
+    return {"lo": r[0], "hi": r[1], "n": r[2] or 0,
+            "deep_at": m[0] if m else None,
+            "tail_at": m[1] if m else None,
+            "note": (m[2] if m else "") or ""}
+
+
+def bar_hist_mark(con: sqlite3.Connection, symbol: str, timeframe: str,
+                  deep_at: str | None = None, tail_at: str | None = None,
+                  note: str | None = None) -> None:
+    """Record progress WITHOUT clobbering the other fields — COALESCE on the
+    excluded value, so marking a tail never erases the deep marker."""
+    with con:
+        # `note` is NOT NULL, so the INSERT half coalesces to '' while the
+        # UPDATE half keeps whatever was there — passing NULL straight in
+        # violated the constraint on a first mark that carried no note.
+        con.execute(
+            "INSERT INTO bar_hist_meta (symbol, timeframe, deep_at, tail_at, note)"
+            " VALUES (?,?,?,?,COALESCE(?,'')) ON CONFLICT (symbol, timeframe)"
+            " DO UPDATE SET"
+            " deep_at=COALESCE(excluded.deep_at, bar_hist_meta.deep_at),"
+            " tail_at=COALESCE(excluded.tail_at, bar_hist_meta.tail_at),"
+            " note=COALESCE(?, bar_hist_meta.note)",
+            (symbol, timeframe, deep_at, tail_at, note, note))
+
+
 def market_path() -> Path:
     return data_dir() / "market.db"
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Additive migrations, applied in order for databases created before the
 # current SCHEMA_VERSION. Keep them idempotent-safe: the guard is
@@ -269,6 +399,9 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     # 7: insure_expectancy — a new table, created by the _SCHEMA executescript
     # on the version mismatch; the bump is what delivers it to existing
     # installs (the chain_cover lesson).
+    # 8: bar_hist / bar_hist_src / bar_hist_meta — new tables, created by
+    # the _SCHEMA executescript on the version mismatch. The bump is what
+    # delivers them to existing installs; see the chain_cover lesson above.
     # 5: data_cover — likewise a new table, delivered by the executescript.
     # Listed here only so the version history reads as a history; the bump
     # itself is what makes an existing market.db receive it. (chain_cover was

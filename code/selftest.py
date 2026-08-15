@@ -721,6 +721,81 @@ def _futures_seams():
         "favorites.ts symbol rule no longer accepts futures roots"
 
 
+@check("deep history: keeps what you open, fetches only the difference")
+def _deep_history():
+    import datetime as dt
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from backend import depth, marketdb, settings as settings_mod
+
+    # The plan is the whole contract: what a visit still needs.
+    now = dt.date(2026, 8, 15)
+    p = depth.plan({"n": 0}, "us_equity", now)
+    assert p["head"] and p["tail_from"] is None, p
+    p = depth.plan({"n": 9, "lo": "1993-01-29T00:00:00Z",
+                    "hi": "2026-08-01T00:00:00Z", "deep_at": "yes"},
+                   "us_equity", now)
+    assert p["head"] is False and p["tail_from"] == "2026-08-02", p
+    p = depth.plan({"n": 9, "lo": "1993-01-29T00:00:00Z",
+                    "hi": "2026-08-15T00:00:00Z", "deep_at": "yes"},
+                   "us_equity", now)
+    assert p["head"] is False and p["tail_from"] is None, \
+        "a same-day revisit must not re-poll"
+    assert depth.plan({"n": 0}, "crypto", now)["head"] is False, \
+        "a class with no bar source must not schedule work forever"
+    # TastyTrade sells no OHLC history, so index/future depth is keyless-only.
+    assert "alpaca" not in depth.providers_for("index")
+    assert "alpaca" not in depth.providers_for("future")
+
+    with tempfile.TemporaryDirectory() as td:
+        con = marketdb.connect_market(Path(td) / "m.db")
+        try:
+            old = [{"ts": "2008-11-05T00:00:00Z", "open": 1, "high": 2,
+                    "low": 1, "close": 2, "volume": 5}]
+            new = [{"ts": "2026-08-14T00:00:00Z", "open": 3, "high": 4,
+                    "low": 3, "close": 4, "volume": 6}]
+            marketdb.bar_hist_store(con, "SPXL", "1Day", old, "yahoo (delayed)")
+            marketdb.bar_hist_store(con, "SPXL", "1Day", new, "alpaca (IEX)")
+            bars, segs = marketdb.bar_hist_read(con, "SPXL", "1Day", 100)
+            assert len(bars) == 2 and bars[0]["ts"] < bars[1]["ts"], bars
+            # PER-SEGMENT PROVENANCE: a spliced series must be able to say
+            # which feed covered which stretch, not one blanket sentence.
+            assert [x["source"] for x in segs] == ["yahoo (delayed)", "alpaca (IEX)"], segs
+            assert segs[0]["from"] == "2008-11-05" and segs[1]["to"] == "2026-08-14"
+
+            # Re-storing the same bar must not duplicate it (a revisit is free).
+            marketdb.bar_hist_store(con, "SPXL", "1Day", old, "yahoo (delayed)")
+            assert marketdb.bar_hist_span(con, "SPXL", "1Day")["n"] == 2
+
+            # Marking one field must never erase the other.
+            marketdb.bar_hist_mark(con, "SPXL", "1Day", deep_at="D1")
+            marketdb.bar_hist_mark(con, "SPXL", "1Day", tail_at="T1")
+            sp = marketdb.bar_hist_span(con, "SPXL", "1Day")
+            assert sp["deep_at"] == "D1" and sp["tail_at"] == "T1", sp
+            assert sp["lo"][:10] == "2008-11-05" and sp["hi"][:10] == "2026-08-14"
+
+            # THE PERMANENT STORE HAS NO SWEEP — that is the whole difference
+            # from bar_cache, whose retention delete is deliberately global
+            # (see _bar_cache). A symbol left alone for a year must still be
+            # here, or "as far back as possible" is not a promise the app
+            # keeps across the exact gap Kade described.
+            con.execute(
+                "INSERT INTO bar_cache (symbol, timeframe, ts, o, h, l, c, v,"
+                " fetched_at) VALUES ('OTHER','1Day','2020-01-02',1,1,1,1,1,"
+                "'1999-01-01T00:00:00Z')")
+            con.commit()
+            marketdb.bar_cache_store(con, "SPXL", "1Day", new, keep_days=30)
+            assert marketdb.bar_hist_span(con, "SPXL", "1Day")["n"] == 2, \
+                "a bar_cache sweep reached into the permanent store"
+        finally:
+            con.close()
+
+    assert settings_mod.SPEC["deep_history"]["default"] is False, \
+        "keeping every symbol forever must be opt-in"
+    assert settings_mod.SPEC["deep_history"]["group"] == "Data"
+
+
 @check("sessions: idle expiry, revocation wipe, and no shared-buffer race")
 def _sessions():
     sys.path.insert(0, str(CODE))

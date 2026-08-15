@@ -43,6 +43,7 @@ from . import options as options_mod
 from . import opthist as opthist_mod
 from . import insurance as insurance_mod
 from . import favorites as favorites_mod
+from . import depth as depth_mod
 from . import market, newsstore, recorder as recorder_mod, search as search_mod
 from . import security
 from . import settings as settings_mod
@@ -72,6 +73,9 @@ class State:
         self.db_path = db_path
         self.market_path = market_path
         self.universe = Universe()
+        #: Background deep-history filler; built in main.py once the
+        #: universe is loaded, so it can classify what it is filling.
+        self.deepener: depth_mod.Deepener | None = None
         self.recorder = None  # set by main.py; tests may leave it None
         #: Held for the process lifetime when this process owns recording.
         #: Kept on State so the socket is not garbage-collected, which would
@@ -681,11 +685,17 @@ def create_app(state: State) -> FastAPI:
         # is broken.
         try:
             with state.db() as db:
-                was_on = bool(settings_mod.get_all(db, s.user_id)
-                              .get(autorecord_mod.SETTING, False))
+                before = settings_mod.get_all(db, s.user_id)
+                was_on = bool(before.get(autorecord_mod.SETTING, False))
+                deep_was = bool(before.get("deep_history", False))
                 values = settings_mod.put(db, s.user_id, body)
                 now_on = bool(values.get(autorecord_mod.SETTING, False))
-                favs = favorites_mod.list_(db, s.user_id) if now_on and not was_on else []
+                deep_now = bool(values.get("deep_history", False))
+                # Both switches sweep the same favourites list on their own
+                # rising edge, so read it once if EITHER of them just came on.
+                favs = (favorites_mod.list_(db, s.user_id)
+                        if (now_on and not was_on) or (deep_now and not deep_was)
+                        else [])
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
 
@@ -711,6 +721,18 @@ def create_app(state: State) -> FastAPI:
             LOG.info("autorecord enabled: %d started, %d skipped",
                      len(out["autorecord"]["started"]),
                      len(out["autorecord"]["skipped"]))
+
+        # DEEP HISTORY, same rising-edge rule and the same reason: switching
+        # it on has to fill the symbols already starred, or it looks broken.
+        # ENQUEUED, never fetched here — this runs inside the PUT handler, and
+        # a settings save must not block on twenty backfills.
+        if deep_now and not deep_was and state.deepener is not None:
+            queued = [str(f.get("key", "")) for f in favs
+                      if f.get("kind") == "symbol"]
+            n = sum(1 for sym in queued
+                    if state.deepener.submit(s.user_id, sym))
+            out["deep_history"] = {"queued": n, "favourites": len(queued)}
+            LOG.info("deep history enabled: queued %d favourite(s)", n)
         return out
 
     # ------------------------------------------------------------ favorites
@@ -1359,6 +1381,43 @@ def create_app(state: State) -> FastAPI:
             return older + bars, f"{source} + yahoo (delayed) before {first}"
 
         entry = state.universe.exact(symbol)
+        asset_class = (entry or {}).get("asset_class", "us_equity")
+
+        # KEEPING WHAT WE OPEN. The setting is read per request (it is one
+        # cheap indexed row) so flipping it takes effect on the next chart
+        # rather than the next launch. submit() is deduplicated and returns
+        # immediately: the fill happens on the deepener's own thread, and a
+        # chart NEVER waits for a provider round-trip it did not ask for.
+        deep_on = False
+        try:
+            with state.db() as db:
+                deep_on = bool(settings_mod.get_all(db, s.user_id)
+                               .get("deep_history", False))
+        except Exception:  # noqa: BLE001 — a settings read must not cost a chart
+            LOG.debug("deep: settings unavailable", exc_info=True)
+        if deep_on and timeframe == depth_mod.DEEP_TIMEFRAME and state.deepener:
+            state.deepener.submit(s.user_id, symbol)
+
+        # THE PERMANENT STORE ANSWERS FIRST when it is deeper than the window
+        # asked for. It is the only source that spans providers, so preferring
+        # it is what makes "as far back as possible" survive a reload — and it
+        # carries per-segment provenance, so the answer can say which feed
+        # covered which stretch instead of one unprovable sentence.
+        if deep_on and timeframe == depth_mod.DEEP_TIMEFRAME:
+            con = state.market()
+            try:
+                stored, segments = marketdb.bar_hist_read(
+                    con, symbol, timeframe, limit)
+            finally:
+                con.close()
+            if stored and (want_all or len(stored) >= limit):
+                pending = state.deepener.pending() if state.deepener else 0
+                return {"symbol": symbol, "timeframe": timeframe,
+                        "bars": stored, "segments": segments,
+                        "source": " + ".join(
+                            dict.fromkeys(x["source"] for x in segments)),
+                        "filling": bool(pending)}
+
         # Index and futures bars never come from Alpaca, but DAILY history has
         # a keyless source — Yahoo maps SPX→^GSPC and /ES→ES=F — so those
         # classes skip the broker branch and ride the cache/yahoo tail below.

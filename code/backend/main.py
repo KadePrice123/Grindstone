@@ -109,6 +109,16 @@ def main() -> int:
         state.recorder = Recorder(connect_market(), state.creds_for,
                                   state.settings_for,
                                   tasty_creds_provider=state.tasty_creds_for)
+        # The deep-history filler rides the same instance lock as the
+        # recorder: two processes filling the same symbols would double every
+        # provider request against a shared rate limit for identical rows.
+        # It opens a SHORT-LIVED connection per symbol (connect_market, not a
+        # held handle) because it runs on its own thread.
+        from backend import depth as depth_mod
+        state.deepener = depth_mod.Deepener(
+            connect_market, state.creds_for,
+            lambda sym: (state.universe.exact(sym) or {}).get("asset_class"))
+        state.deepener.start()
         state.recorder.start()
     else:
         LOG.info("an unattended recorder owns this data directory — the app "
