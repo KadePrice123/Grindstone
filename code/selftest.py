@@ -435,9 +435,15 @@ def _tastytrade_routing():
     sys.path.insert(0, str(CODE))
     from backend import autorecord, market, recorder
 
-    # No TastyTrade account: futures quotes say what to do, never fake.
-    q = market.quote_for("/ES", "future", creds=None, tasty=None)
-    assert q["available"] is False and "TastyTrade" in q["reason"]
+    # No TastyTrade account AND no Yahoo (stubbed — the fallback would answer
+    # live with ES=F): futures quotes say what to do, never fake.
+    _old_y = market.YahooProvider
+    market.YahooProvider = None
+    try:
+        q = market.quote_for("/ES", "future", creds=None, tasty=None)
+        assert q["available"] is False and "TastyTrade" in q["reason"]
+    finally:
+        market.YahooProvider = _old_y
 
     st = market.provider_status(has_alpaca=False, has_tasty=False)
     assert "tastytrade" not in st["futures"], st["futures"]
@@ -666,6 +672,49 @@ def _futures_seams():
             "kind": "chain", "symbol": "/ZZ", "timeframe": "",
             "interval_seconds": 3600, "retention_days": 365})
         assert r.status_code == 422 and "built-in futures" in r.json()["detail"], r.text
+
+        # THE SLASH IN THE PATH. encodeURIComponent('/MES') reaches uvicorn,
+        # which decodes %2F back to '/' before routing — a plain {symbol}
+        # param can never match, so every futures symbol page 404'd (seen
+        # live). The routes carry :path now; prove it stays that way, with
+        # the providers stubbed so this asserts routing, not networks.
+        from backend import market as market_mod
+
+        class _StubTasty:
+            def __init__(self, *a, **k) -> None:
+                pass
+
+            def future_snapshot(self, root):
+                return {"symbol": root, "price": 5000.0, "change_pct": 1.0}
+
+            def index_snapshot(self, sym):
+                return {"symbol": sym, "price": 1000.0}
+
+        old_t = market_mod.TastyTradeAdapter
+        old_y = market_mod.YahooProvider
+        market_mod.TastyTradeAdapter = _StubTasty  # type: ignore[assignment]
+        market_mod.YahooProvider = None  # type: ignore[assignment]
+        try:
+            r = client.get("/api/symbols/%2FES/summary", headers=A)
+            assert r.status_code == 200, \
+                f"slash-in-path summary route broke again: {r.status_code}"
+            j = r.json()
+            assert j["asset_class"] == "future" and j["quote"]["available"], j
+            # daily bars: route matches and the answer is honest (yahoo is
+            # stubbed out, so 'no data source' with the reason — never a 404)
+            r = client.get("/api/symbols/%2FES/bars?timeframe=1Day", headers=A)
+            assert r.status_code == 200 and r.json()["source"] == "none", r.text
+            # intraday futures: refused with the real reason, not a 404
+            r = client.get("/api/symbols/%2FES/bars?timeframe=1Min", headers=A)
+            assert r.status_code == 200 and "daily" in r.json()["reason"], r.text
+        finally:
+            market_mod.TastyTradeAdapter = old_t  # type: ignore[assignment]
+            market_mod.YahooProvider = old_y  # type: ignore[assignment]
+
+    # Yahoo symbology: futures roots ride the continuous front month.
+    from backend.providers.yahoo import YahooProvider as _Y
+    assert _Y._map("/ES") == "ES=F" and _Y._map("/MES") == "MES=F"
+    assert _Y._map("SPX") == "^GSPC" and _Y._map("SPY") == "SPY"
     ts_src = (CODE / "app" / "src" / "renderer" / "src" / "favorites.ts"
               ).read_text(encoding="utf-8")
     assert "^\\/?(?=.*[A-Z0-9])" in ts_src, \
@@ -1204,11 +1253,18 @@ def _providers():
     assert len(series) == 2, f"null padding leaked into the series: {series}"
     assert all(b["close"] > 0 for b in series)
 
-    # An index has no Alpaca feed but does have a keyless one, so it must not
-    # be refused outright any more.
-    from backend.market import quote_for
-    assert quote_for("ES", "future", None)["available"] is False, \
-        "futures have no source and must say so"
+    # Futures now have BOTH a broker source (TastyTrade) and a keyless one
+    # (Yahoo's continuous front month, 2026-08-14) — so the honest-refusal
+    # state only exists with both stubbed away. Assert that designed state
+    # without letting either answer live.
+    import backend.market as _mkt
+    _oy = _mkt.YahooProvider
+    _mkt.YahooProvider = None
+    try:
+        assert _mkt.quote_for("/ES", "future", None)["available"] is False, \
+            "with no source at all, futures must say so, not fake a number"
+    finally:
+        _mkt.YahooProvider = _oy
 
     st = provider_status(has_alpaca=False)
     assert st["yahoo_fallback"] is True and "delayed" in st["equities"]

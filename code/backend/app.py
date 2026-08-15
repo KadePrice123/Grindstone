@@ -883,7 +883,7 @@ def create_app(state: State) -> FastAPI:
             out.setdefault(sym, {"available": False, "price": None, "change_pct": None})
         return {"quotes": out}
 
-    @app.get("/api/symbols/{symbol}/options")
+    @app.get("/api/symbols/{symbol:path}/options")
     def symbol_options(symbol: str, exp_from: str, exp_to: str,
                        strike_from: float, strike_to: float, right: str = "",
                        s=Depends(current_session)) -> dict[str, Any]:
@@ -919,7 +919,7 @@ def create_app(state: State) -> FastAPI:
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
 
-    @app.get("/api/symbols/{symbol}/options/history")
+    @app.get("/api/symbols/{symbol:path}/options/history")
     def symbol_option_history(symbol: str, expiration: str, strike: float,
                               right: str, s=Depends(current_session)) -> dict[str, Any]:
         """One contract's archived daily rows — price/spread through its life.
@@ -933,7 +933,7 @@ def create_app(state: State) -> FastAPI:
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
 
-    @app.get("/api/symbols/{symbol}/options/serieshistory")
+    @app.get("/api/symbols/{symbol:path}/options/serieshistory")
     def symbol_option_series(symbol: str, right: str, dte: int,
                              delta: float | None = None,
                              strike: float | None = None,
@@ -965,7 +965,7 @@ def create_app(state: State) -> FastAPI:
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
 
-    @app.get("/api/symbols/{symbol}/options/fanchart")
+    @app.get("/api/symbols/{symbol:path}/options/fanchart")
     def symbol_option_fanchart(symbol: str, expiration: str, strike: float,
                                right: str, s=Depends(current_session)) -> dict[str, Any]:
         """The fan chart: this contract's spread path against the archive-wide
@@ -1292,7 +1292,7 @@ def create_app(state: State) -> FastAPI:
             "excluded": excluded,
         }
 
-    @app.get("/api/symbols/{symbol}/bars")
+    @app.get("/api/symbols/{symbol:path}/bars")
     def symbol_bars(symbol: str, timeframe: str = "1Day", limit: int = 0,
                     s=Depends(current_session)) -> dict[str, Any]:
         """Chart data, in the order the code actually tries them: the live
@@ -1327,12 +1327,19 @@ def create_app(state: State) -> FastAPI:
             limit = max(10, min(limit, 5000))
 
         entry = state.universe.exact(symbol)
-        if entry and entry["asset_class"] in ("index", "future"):
+        # Index and futures bars never come from Alpaca, but DAILY history has
+        # a keyless source — Yahoo maps SPX→^GSPC and /ES→ES=F — so those
+        # classes skip the broker branch and ride the cache/yahoo tail below.
+        # Intraday genuinely has no source until DXLink candle streaming.
+        brokerless = bool(entry and entry["asset_class"] in ("index", "future"))
+        if brokerless and timeframe != "1Day":
             return {"symbol": symbol, "timeframe": timeframe, "bars": [],
                     "source": "none",
-                    "reason": f"no connected source carries {entry['asset_class']} bars yet"}
+                    "reason": f"only daily history has a source for "
+                              f"{entry['asset_class']} symbols — intraday "
+                              "arrives with candle streaming (TastyTrade)"}
 
-        creds = state.creds_for(s.user_id)
+        creds = None if brokerless else state.creds_for(s.user_id)
         if creds:
             # Fetch windows sized to fill the requested depth; "all" reaches
             # back as far as the feed does (Alpaca IEX starts 2016; a single
@@ -1415,7 +1422,7 @@ def create_app(state: State) -> FastAPI:
                 "reason": "no data source available — add an Alpaca account, "
                           "or record bars from Data management"}
 
-    @app.get("/api/symbols/{symbol}/summary")
+    @app.get("/api/symbols/{symbol:path}/summary")
     def symbol_summary(symbol: str, s=Depends(current_session)) -> dict[str, Any]:
         symbol = symbol.upper()
         entry = state.universe.exact(symbol)

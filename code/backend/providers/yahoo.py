@@ -128,10 +128,13 @@ class YahooProvider:
 
     @staticmethod
     def _map(symbol: str) -> str:
-        # Platform symbology -> Yahoo symbology for the indices we list.
-        return {"SPX": "^GSPC", "NDX": "^NDX", "VIX": "^VIX", "XSP": "^XSP"}.get(
-            symbol.upper(), symbol.upper()
-        )
+        # Platform symbology -> Yahoo symbology. Indices are a hand map; a
+        # futures root ('/ES') is Yahoo's continuous front-month ('ES=F') —
+        # holds for every root in the universe supplement (MES=F, ZN=F, …).
+        s = symbol.upper()
+        if s.startswith("/"):
+            return s[1:] + "=F"
+        return {"SPX": "^GSPC", "NDX": "^NDX", "VIX": "^VIX", "XSP": "^XSP"}.get(s, s)
 
     def _chart(self, symbol: str, rng: str, interval: str) -> dict[str, Any] | None:
         def work():

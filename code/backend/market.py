@@ -75,6 +75,7 @@ def quote_for(symbol: str, asset_class: str, creds: dict[str, str] | None,
               tasty: dict[str, str] | None = None) -> dict[str, Any]:
     """One quote, honestly labeled with its source. Never raises."""
     if asset_class == "future":
+        fut_err = None
         if tasty is not None:
             try:
                 q = TastyTradeAdapter(tasty["client_secret"],
@@ -82,9 +83,20 @@ def quote_for(symbol: str, asset_class: str, creds: dict[str, str] | None,
                 return {**q, "available": q.get("price") is not None,
                         "source": "tastytrade"}
             except BrokerError as e:
-                return {"symbol": symbol, "available": False, "reason": str(e)}
+                fut_err = str(e)
+        # Keyless fallback, same as equities: Yahoo's continuous front month
+        # (/ES → ES=F), honestly labeled delayed — a real number beats an
+        # instruction when no TastyTrade account is enrolled yet.
+        if YahooProvider is not None:
+            try:
+                q = YahooProvider().quote(symbol)
+                if q is not None and q.get("price") is not None:
+                    return {**q, "available": True, "source": "yahoo (delayed)"}
+            except Exception:  # noqa: BLE001 — fallback of a fallback stays quiet
+                pass
         return {"symbol": symbol, "available": False,
-                "reason": "futures quotes need a TastyTrade account (Accounts page)"}
+                "reason": fut_err or
+                "futures quotes need a TastyTrade account (Accounts page)"}
     # An index prefers TastyTrade (a real quote with bid/ask); Alpaca has no
     # index feed at all, and the keyless Yahoo fallback (verified 2026-08-02:
     # SPX/NDX/VIX/XSP all answer) remains the last resort, labeled delayed.
