@@ -795,6 +795,23 @@ def _deep_history():
         "keeping every symbol forever must be opt-in"
     assert settings_mod.SPEC["deep_history"]["group"] == "Data"
 
+    # FUTURES OPTION SYMBOLS ARE A DIFFERENT ALPHABET. The Opt page restores a
+    # leg's persisted pick by parsing its symbol; the equity-only OCC regex
+    # returned null for "./MESU6EX3Q6 260821P7610", so /MES Opt opened empty
+    # with a contract already chosen. Pinned at the source, since a tidy-up
+    # that "simplifies" the parser back to one regex would silently restore it.
+    src = (CODE / "app" / "src" / "renderer" / "src" / "pages" / "OptPage.tsx"
+           ).read_text(encoding="utf-8")
+    body = src.split("function parseOcc", 1)[1].split("\n}", 1)[0]
+    assert body.count("exec(") >= 2, \
+        "parseOcc no longer has a futures branch — /MES picks will not restore"
+    assert "\\.\\/" in body, "the futures form must anchor on the './' prefix"
+    # And the backend must not have quietly re-refused the class the page now
+    # depends on (the recorder and the panel share one adapter).
+    from backend import options as options_mod
+    assert "future" not in options_mod.NO_CHAIN_CLASSES, \
+        "futures chains are served by TastyTrade; refusing them here strands /MES"
+
 
 @check("sessions: idle expiry, revocation wipe, and no shared-buffer race")
 def _sessions():

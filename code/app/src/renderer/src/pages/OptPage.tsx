@@ -176,14 +176,33 @@ function ageWords(s: number | undefined): string {
 /** An OCC symbol back into (strike, expiration, right) — what lets a leg's
  *  persisted pick select itself when the page opens. */
 function parseOcc(occ: string): Sel | null {
+  // Equity OCC: ROOT + YYMMDD + C|P + an 8-digit strike in 1/1000.
   const m = /^[A-Z.]{1,6}(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(occ)
-  if (!m) return null
-  return {
-    occ,
-    expiration: `20${m[1]}-${m[2]}-${m[3]}`,
-    right: m[4] as 'P' | 'C',
-    strike: Number(m[5]) / 1000,
+  if (m) {
+    return {
+      occ,
+      expiration: `20${m[1]}-${m[2]}-${m[3]}`,
+      right: m[4] as 'P' | 'C',
+      strike: Number(m[5]) / 1000,
+    }
   }
+  // FUTURES OPTIONS are a different alphabet: "./MESU6EX3Q6 260821P7610" —
+  // a './' prefix, space-separated series tokens, and a trailing YYMMDD +
+  // right + PLAIN strike (no 1/1000 scaling). Returning null for these meant
+  // a futures leg's persisted pick could never be restored, so /MES Opt
+  // opened on "pick a contract on the right" with a contract already picked
+  // — the chain loaded, the heatmap priced every cell, and the chart stayed
+  // empty. Anchored on './' so it can never reinterpret an equity symbol.
+  const f = /^\.\/.*?(\d{2})(\d{2})(\d{2})([CP])(\d+(?:\.\d+)?)$/.exec(occ.trim())
+  if (f) {
+    return {
+      occ,
+      expiration: `20${f[1]}-${f[2]}-${f[3]}`,
+      right: f[4] as 'P' | 'C',
+      strike: Number(f[5]),
+    }
+  }
+  return null
 }
 
 export function OptPage({
