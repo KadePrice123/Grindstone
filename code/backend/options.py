@@ -24,6 +24,7 @@ import threading
 import time
 from typing import Any
 
+from . import greeks
 from .brokers.alpaca_data import AlpacaData
 from .brokers.base import BrokerError
 from .logs import LOG
@@ -307,6 +308,29 @@ def futures_contracts(tasty: dict[str, str], underlying: str,
                             else q.get("mark"),
                     "iv": None, "delta": None, "gamma": None,
                     "theta": None, "vega": None, "rho": None})
+
+    # SOLVE THE GREEKS THIS FEED DOES NOT PUBLISH. Not a nicety: the Opt
+    # page's constant-shape history matches on |delta| and falls back to the
+    # STRIKE when none is known — and a fixed futures strike only exists near
+    # the money, so /MES history at strike 7820 began in 2025 while the
+    # archive held 1,499 delta-matched points back to 2020. The same solver
+    # the purchased history used (backend/greeks.py), so one contract cannot
+    # carry two different deltas depending on which surface asked.
+    try:
+        # The future's own mark is the Black-76 forward for options written on
+        # it — and the only usable one here, since a one-right window has no
+        # call/put pairs to extract it from.
+        fwd = None
+        try:
+            fwd = ad.future_snapshot(underlying).get("price")
+        except BrokerError:
+            pass
+        solved = greeks.solve_chain(out, forward=fwd)
+        if solved:
+            LOG.debug("solved greeks for %d/%d %s contracts",
+                      solved, len(out), underlying)
+    except Exception:  # noqa: BLE001 — a chain without greeks still renders
+        LOG.info("greek solve failed for %s", underlying, exc_info=True)
     return out
 
 

@@ -812,6 +812,81 @@ def _deep_history():
     assert "future" not in options_mod.NO_CHAIN_CLASSES, \
         "futures chains are served by TastyTrade; refusing them here strands /MES"
 
+    # SOLVED GREEKS ARE WHAT MAKE FUTURES HISTORY REACHABLE. The Opt page
+    # matches its constant-shape series on |delta| and falls back to the
+    # STRIKE when none is known — and a futures strike only exists near the
+    # money, so /MES at 7820 had history from 2025 while the archive held
+    # 1,499 delta-matched points back to 2020. Offline, on canned rows.
+    import datetime as _d
+
+    from backend import greeks as greeks_mod
+    asof = _d.date(2026, 8, 15)
+    exp = "2026-09-18"
+    # One right only — the window the page actually asks for, and the case
+    # that solved nothing until the forward fallback existed.
+    puts = [{"expiration": exp, "strike": k, "right": "P",
+             "bid": b, "ask": b + 1.0, "delta": None}
+            for k, b in ((7600.0, 40.0), (7650.0, 55.0), (7700.0, 75.0))]
+    n = greeks_mod.solve_chain(puts, asof=asof, forward=7802.0)
+    assert n == 3, f"a one-right window solved {n}/3 — the forward fallback is gone"
+    for r in puts:
+        assert r["delta"] is not None and -1.0 < r["delta"] < 0.0, r
+        assert r.get("greeks_solved") is True, "solved greeks must be labelled"
+    # Deeper strikes must carry more delta — a sanity check no sign error survives.
+    assert abs(puts[2]["delta"]) > abs(puts[0]["delta"]), \
+        [r["delta"] for r in puts]
+    # A feed that DOES publish a greek always wins; the model never overrides.
+    given = [{"expiration": exp, "strike": 7650.0, "right": "P",
+              "bid": 55.0, "ask": 56.0, "delta": -0.42}]
+    assert greeks_mod.solve_chain(given, asof=asof, forward=7802.0) == 0
+    assert given[0]["delta"] == -0.42, "a solved delta overwrote the feed's own"
+    # No forward and no pairs is an honest blank, never an invented number.
+    lone = [{"expiration": exp, "strike": 7650.0, "right": "P",
+             "bid": 55.0, "ask": 56.0, "delta": None}]
+    assert greeks_mod.solve_chain(lone, asof=asof) == 0
+    assert lone[0]["delta"] is None
+
+    # TWO COPIES OF THE MATHS, PINNED EQUAL. greeks.py is pure `math` because
+    # the sidecar may not import numpy (the tripwire in _backtests_api — a
+    # heavy import holds the GIL in a single-process backend), while
+    # bt.pricing is the engine's numpy copy. They must never disagree: the
+    # same contract would otherwise carry two deltas depending on whether a
+    # chart or a backtest asked.
+    #
+    # IN A SUBPROCESS, deliberately. Comparing them here would import numpy
+    # into THIS process, and that tripwire is a plain `sys.modules` check —
+    # so an inline comparison would silently disarm the very guard that makes
+    # the pure-Python copy necessary. (It did: the gate went red on
+    # _backtests_api, not here.)
+    import subprocess
+    probe = (
+        "import math,random,sys;"
+        f"sys.path.insert(0,{str(CODE)!r});"
+        "from backend import greeks as g;"
+        "from backend.bt import pricing as bp;"
+        "random.seed(7);wi=wd=0.0\n"
+        "for _ in range(200):\n"
+        " F=random.uniform(50,9000);K=F*random.uniform(0.6,1.5)\n"
+        " T=random.uniform(0.01,2.0);v=random.uniform(0.05,1.2)\n"
+        " c=random.random()<0.5;px=bp.black76(F,K,T,v,c)\n"
+        " a=g.implied_vol(px,F,K,T,c);b=bp.implied_vol(px,F,K,T,c)\n"
+        " if not (math.isfinite(a) and math.isfinite(b)): continue\n"
+        " wi=max(wi,abs(a-b))\n"
+        " wd=max(wd,abs(g.black76_greeks(F,K,T,a,c)['delta']"
+        "-bp.black76_greeks(F,K,T,b,c)['delta']))\n"
+        "ks=[7500+25*i for i in range(20)]\n"
+        "cs=[bp.black76(7802,k,0.1,0.2,True) for k in ks]\n"
+        "ps=[bp.black76(7802,k,0.1,0.2,False) for k in ks]\n"
+        "fa=g.forward_and_discount(ks,cs,ps)[0];fb=bp.forward_and_discount(ks,cs,ps)[0]\n"
+        "print(wi,wd,abs(fa-fb))\n")
+    r = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                       text=True, timeout=120)
+    assert r.returncode == 0, f"greeks equivalence probe failed: {r.stderr[-400:]}"
+    d_iv, d_delta, d_fwd = (float(x) for x in r.stdout.split())
+    assert d_iv < 1e-12, f"the two IV solvers drifted: {d_iv:g}"
+    assert d_delta < 1e-12, f"the two delta models drifted: {d_delta:g}"
+    assert d_fwd < 1e-9, f"the two forward estimators drifted: {d_fwd:g}"
+
 
 @check("sessions: idle expiry, revocation wipe, and no shared-buffer race")
 def _sessions():
