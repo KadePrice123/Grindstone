@@ -1575,8 +1575,9 @@ def create_app(state: State) -> FastAPI:
                 raise HTTPException(422, f"interval must be at least {recorder_mod.MIN_INTERVAL}s")
             sets.append("interval_seconds=?"); vals.append(body.interval_seconds)
         if body.retention_days is not None:
-            if not 1 <= body.retention_days <= 3650:
-                raise HTTPException(422, "retention must be 1..3650 days")
+            if not 1 <= body.retention_days <= recorder_mod.FOREVER_DAYS:
+                raise HTTPException(422, f"retention must be 1..{recorder_mod.FOREVER_DAYS}"
+                                         f" days ({recorder_mod.FOREVER_DAYS} = keep forever)")
             sets.append("retention_days=?"); vals.append(body.retention_days)
         if not sets:
             raise HTTPException(422, "nothing to change")
@@ -1831,9 +1832,10 @@ def create_app(state: State) -> FastAPI:
         # every tick — visible, fixable, harmless.
         entry = state.universe.exact(symbol)
         wanted = [
-            # kind, timeframe, interval, retention_days
-            ("chain", "", 3600, 1825),
-            ("bars", "1Day", 86400, 1825),
+            # kind, timeframe, interval, retention_days (forever — recorded
+            # chains are irreplaceable once the provider windows move on)
+            ("chain", "", 3600, recorder_mod.FOREVER_DAYS),
+            ("bars", "1Day", 86400, recorder_mod.FOREVER_DAYS),
         ]
         con = state.market()
         created = []

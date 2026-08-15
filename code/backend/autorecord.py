@@ -35,10 +35,13 @@ SETTING = "autorecord_favorites"
 # chart useful immediately. Deliberately conservative: this fires without the
 # user choosing anything per-symbol, so it must not be the aggressive option.
 PLAN: tuple[dict[str, Any], ...] = (
+    # Retention is keep-forever (Kade, 2026-08-15): recorded chains cannot be
+    # re-fetched once the provider windows move past them, so aging them out
+    # deletes the only copy of something irreplaceable.
     {"kind": "bars", "timeframe": "1Day", "interval_seconds": 3600,
-     "retention_days": 3650},
+     "retention_days": recorder_mod.FOREVER_DAYS},
     {"kind": "chain", "timeframe": "", "interval_seconds": 900,
-     "retention_days": 365},
+     "retention_days": recorder_mod.FOREVER_DAYS},
 )
 
 

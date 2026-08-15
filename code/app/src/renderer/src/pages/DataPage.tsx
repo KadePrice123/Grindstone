@@ -409,8 +409,8 @@ export function DataPage() {
               </strong>
               <span className="subtle">
                 {INTERVALS.find((i) => i.s === j.interval_seconds)?.label ?? `${j.interval_seconds}s`}
-                {' · keep '}
-                {j.retention_days}d
+                {' · '}
+                {j.retention_days >= 36500 ? 'keep forever' : `keep ${j.retention_days}d`}
               </span>
               <span
                 className="subtle"

@@ -48,6 +48,11 @@ CHAIN_DAYS_PER_CYCLE = 3
 TIMEFRAMES = {"1Min": 60, "5Min": 300, "15Min": 900, "1Hour": 3600, "1Day": 86400}
 CHAIN_INTERVALS = (60, 300, 900, 3600, 86400)
 MIN_INTERVAL = 60
+# "Keep forever" is a 100-year retention, NOT a 0-sentinel: prune() computes
+# a plain cutoff from this number in every shipped version, so a job set to
+# it is safe even under an older running sidecar — where a 0 meaning
+# "forever" in new code would mean "delete everything" in old code.
+FOREVER_DAYS = 36500
 
 # Bounds for a futures option-chain snapshot. A full /ES nested chain is ~56
 # expirations of ~300 in-band strikes each — quoting all of it every interval
@@ -107,8 +112,8 @@ def validate_job(kind: str, symbol: str, timeframe: str, interval_seconds: int,
     if interval_seconds < MIN_INTERVAL:
         return (f"interval must be at least {MIN_INTERVAL}s — provider rate "
                 "limits are shared with your live charts")
-    if not 1 <= retention_days <= 3650:
-        return "retention must be 1..3650 days"
+    if not 1 <= retention_days <= FOREVER_DAYS:
+        return f"retention must be 1..{FOREVER_DAYS} days ({FOREVER_DAYS} = keep forever)"
     return None
 
 
