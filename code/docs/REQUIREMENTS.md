@@ -1033,6 +1033,18 @@ beside it, written before the code so each is built against a decided shape:
 6. **Futures/index history vendor:** Databento (CME) / Polygon (indices) paid
    plan for deep /ES and SPX history, or ship v1 with DXLink candle-replay
    depth only (§6.9)?
+   *Priced live 2026-08-15 via Databento's free cost API (key in
+   `env/databento.env`), all 11 supplement roots, full available depth
+   (CME floor is 2010-06-06 — nothing reaches 2000; Yahoo's free continuous
+   dailies already cover 2000→2010, and no retail vendor sells CME options
+   that far back): futures ohlcv-1d $11 · ohlcv-1h $103 · ohlcv-1m $538 ·
+   futures statistics (settlement/OI) $10. Futures OPTIONS: definitions $40 ·
+   ohlcv-1d $45 · statistics (per-contract daily settlement + OI = a 16-year
+   EOD chain archive) $100 · tbbo (bid/ask at every trade) $79. Core
+   research bundle ≈ $286; +hourly futures bars ≈ $389. Futures tbbo ($15.3k)
+   and per-minute options BBO (~$1.4k/yr) are priced out. OPRA equity
+   options: ohlcv-1d floor 2013-04, SPY alone ~$263/yr — not the cheap path;
+   equities stay on OnclickMedia + recorded chains.*
 7. **Alpaca data tier:** stay free (IEX + indicative options) or add Algo
    Trader Plus $99/mo (SIP + real-time OPRA) for accurate option mids (§7.1)?
 8. **macOS:** pay the $99/yr Apple Developer fee for signing/notarization when

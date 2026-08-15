@@ -264,6 +264,7 @@ isotropic), and a dimension from a drawing to itself.
 | P3 | Regenerate an Alpaca paper key and add it via Accounts — the old one was deleted with `env/` | trivial |
 | P4 | Order entry — every adapter is `order_entry: False`; the trading milestone flips it | large |
 | P5 | **e2e flake, cause unknown**: selecting the trend line mid-span failed 1 run in 6 (all seven `fanClick` offsets missed on an 8435-bar chart). A retry now absorbs it, but the underlying race is not understood — suspect the crosshair not having resolved when the click lands. Worth a real diagnosis before trusting a single green e2e run. | small |
+| P6 | **e2e legs→persist cascade (2026-08-15, filed as its own session)**: "clicking a leg zone opens its editor" stopped selecting sometime in the Insure/datapaths merge window (passed Aug 10-11), and because the suite shares one app session, its debris pollutes the persist family — proven by "count=11 want=5" with a leftover condor leg + three duplicate h-lines in the dumped doc. Prime suspect: 3d8354b per-symbol chart memory changes what is on the chart when the click-fan fires. Also: the standing-red hues=2 check (undecided product call) fronts every run and buries real regressions; three same-day runs failed in DIFFERENT families while builds/recorder bursts ran concurrently — do not judge the suite on a loaded machine. Unrelated to the TastyTrade line (gate 74/74 green throughout). | medium |
 
 Roadmap-level work (AI layer, session restore, sidebar rail) is
 REQUIREMENTS.md §10, not this list. (The TastyTrade adapter left this
