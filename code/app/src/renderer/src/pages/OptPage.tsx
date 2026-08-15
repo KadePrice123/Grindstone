@@ -65,6 +65,12 @@ interface ChainResponse {
 interface SeriesRow {
   date: string
   mid: number | null
+  /** What to PLOT: the mid when the archive holds a two-sided quote, else the
+   *  official settlement. `mark_src` says which — settlement-only days (the
+   *  purchased backfill, whose feed publishes no bid/ask) have no mid at all,
+   *  and plotting only mids is what hid six years of history. */
+  mark?: number | null
+  mark_src?: 'mid' | 'settle' | null
   bid: number | null
   ask: number | null
   spread: number | null
@@ -622,13 +628,13 @@ export function OptPage({
   const plotted = useMemo(
     () => (series?.rows ?? []).map((r) => ({
       date: r.date,
-      value: r.mid === null || !r.used_strike ? null
-        : unit === 'usd' ? r.mid
+      value: (r.mark ?? r.mid) === null || !r.used_strike ? null
+        : unit === 'usd' ? (r.mark ?? r.mid)!
         // Annualising uses THAT DAY's own tenor: the series holds the shape
         // fixed at ~157 DTE, but "nearest listed" lands on 154-158, and a
         // day matched at 154 earns its premium over four fewer days.
-        : unit === 'annual' ? annualPct(r.mid, r.used_strike, r.date, r.used_dte)
-        : (r.mid / r.used_strike) * 100,
+        : unit === 'annual' ? annualPct((r.mark ?? r.mid)!, r.used_strike, r.date, r.used_dte)
+        : ((r.mark ?? r.mid)! / r.used_strike) * 100,
     })),
     [series, unit]
   )
@@ -1226,6 +1232,17 @@ function seriesCaption(
     ? 'asked for the Δ-matched trade, but this contract carries no delta in ' +
       'the feed, so this is the STRIKE match instead · '
     : ''
+  // THE SPAN IS COMPUTED, NEVER ASSUMED. This said "the last year" as a
+  // constant, which stopped being true the day the purchased backfill landed
+  // and the series started reaching 2020 — a caption that misstates its own
+  // window is exactly the kind of quiet lie this page refuses elsewhere.
+  const spanNote = (() => {
+    const ds = series.rows.map((r) => r.date).filter(Boolean).sort()
+    if (!ds.length) return 'day by day'
+    const y0 = ds[0].slice(0, 4)
+    const y1 = ds[ds.length - 1].slice(0, 4)
+    return y0 === y1 ? `day by day through ${y0}` : `day by day, ${y0}–${y1}`
+  })()
   if (series.mode === 'delta' && series.target?.delta != null) {
     // The strike WALKS with the market in this mode — that is the whole point,
     // and the caption owns it so nobody reads the line as one contract.
@@ -1233,7 +1250,7 @@ function seriesCaption(
     return (
       verdict + unitNote +
       `what THE Δ${series.target.delta.toFixed(2)} ${kind} at ~${dte} DTE has cost, ` +
-      `day by day over the last year — same risk shape, whatever the strike ` +
+      `${spanNote} — same risk shape, whatever the strike ` +
       `(it walked ${Math.min(...strikes).toFixed(0)}–${Math.max(...strikes).toFixed(0)} ` +
       `as ${symbol} moved) · matched at ${range} · each node is one archived ` +
       `contract · ${symbol} BLUE on the left axis`
@@ -1247,7 +1264,7 @@ function seriesCaption(
   return (
     verdict + unitNote + fellBack +
     `what a ~${dte}-DTE ${symbol} ${sel.strike.toFixed(0)} ${kind} has cost, ` +
-    `day by day over the last year — THE STRIKE held fixed` +
+    `${spanNote} — THE STRIKE held fixed` +
     (drift > 0.01 ? ` (±$1, so it ranged ${Math.min(...strikes).toFixed(0)}–` +
       `${Math.max(...strikes).toFixed(0)})` : '') +
     `, so its moneyness walks as ${symbol} moves · matched at ${range} · ` +

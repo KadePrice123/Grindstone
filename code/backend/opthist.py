@@ -85,11 +85,13 @@ def history(underlying: str, expiration: str, strike: float,
         day = dt.date.fromisoformat(r["date"])
         bid, ask = r["bid"], r["ask"]
         two_sided = bid is not None and ask is not None and bid > 0 and ask >= bid
+        mark, mark_src = _mark(bid, ask, r["last"], two_sided)
         out.append({
             "date": r["date"],
             "dte": (exp - day).days,
             "bid": bid, "ask": ask, "last": r["last"],
             "mid": round((bid + ask) / 2, 4) if two_sided else None,
+            "mark": mark, "mark_src": mark_src,
             "spread": round(ask - bid, 4) if two_sided else None,
             "iv": r["iv"], "delta": r["delta"],
             "volume": r["volume"], "open_interest": r["open_interest"],
@@ -218,6 +220,21 @@ def resolve_tolerances(dte: int, strike: float | None,
     return d, s
 
 
+def _mark(bid, ask, last, two_sided: bool):
+    """What to PLOT, and what it actually is. A two-sided quote gives a mid
+    (the standing mid-fill rule). Settlement-only rows — the Databento
+    backfill, whose feed publishes no bid/ask at all — would otherwise plot
+    NOTHING, which is how six years of imported SPXL history stayed invisible
+    after its greeks were solved. The settlement IS the official mark for
+    those days, so it is returned WITH its provenance rather than quietly
+    passed off as a mid."""
+    if two_sided:
+        return round((bid + ask) / 2, 4), "mid"
+    if last is not None and float(last) > 0:
+        return round(float(last), 4), "settle"
+    return None, None
+
+
 def series_history(underlying: str, right: str, dte: int,
                    delta: float | None = None, strike: float | None = None,
                    dte_tol: int = MIN_DTE_TOL, delta_tol: float = 0.08,
@@ -258,7 +275,7 @@ def series_history(underlying: str, right: str, dte: int,
     try:
         if adelta is not None:
             rows = con.execute(
-                "SELECT date, expiration, strike, bid, ask, iv, delta"
+                "SELECT date, expiration, strike, bid, ask, last, iv, delta"
                 " FROM hist_chain WHERE underlying=? AND right=?"
                 " AND delta IS NOT NULL AND ABS(ABS(delta) - ?) <= ?"
                 # The DTE window in SQL keeps the scan proportional to the
@@ -269,7 +286,7 @@ def series_history(underlying: str, right: str, dte: int,
             ).fetchall()
         else:
             rows = con.execute(
-                "SELECT date, expiration, strike, bid, ask, iv, delta"
+                "SELECT date, expiration, strike, bid, ask, last, iv, delta"
                 " FROM hist_chain WHERE underlying=? AND right=?"
                 " AND strike BETWEEN ? AND ?"
                 " AND julianday(expiration) - julianday(date) BETWEEN ? AND ?",
@@ -324,9 +341,11 @@ def series_history(underlying: str, right: str, dte: int,
         bid, ask = r["bid"], r["ask"]
         two_sided = bid is not None and ask is not None and bid > 0 and ask >= bid
         d = (dt.date.fromisoformat(r["expiration"]) - dt.date.fromisoformat(date)).days
+        mark, mark_src = _mark(bid, ask, r["last"], two_sided)
         out.append({
             "date": date,
             "mid": round((bid + ask) / 2, 4) if two_sided else None,
+            "mark": mark, "mark_src": mark_src,
             "bid": bid, "ask": ask,
             "spread": round(ask - bid, 4) if two_sided else None,
             "used_dte": d, "used_strike": r["strike"],
