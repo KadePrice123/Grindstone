@@ -927,7 +927,8 @@ def create_app(state: State) -> FastAPI:
                 exp_from, exp_to, strike_from, strike_to,
                 right.upper() if right else None,
                 con=state.market(), ttl_minutes=ttl,
-                asset_class=(known or {}).get("asset_class"))
+                asset_class=(known or {}).get("asset_class"),
+                tasty=state.tasty_creds_for(s.user_id))
             # A REFUSAL IS A 200 HERE, by design — the panel renders the
             # reason instead of throwing. That also makes it invisible in the
             # access log: "GET /options -> 200" reads identically whether the

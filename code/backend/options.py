@@ -200,11 +200,11 @@ def filter_contracts(rows: list[dict[str, Any]], exp_from: dt.date, exp_to: dt.d
 # recorder's refusals intentionally diverge for futures now (2026-08-14): it
 # RECORDS futures chains through TastyTrade, while this leg-window endpoint
 # still reads only the Alpaca live path — hence the honest pointer below.
+#: /market-data/by-type 414s past ~200 symbols (measured live).
+FUT_QUOTE_BATCH = 90
+
 NO_CHAIN_CLASSES = {
     "index": "an index has no listed options chain of its own — trade the ETF or the index options product",
-    "future": "futures option chains come through TastyTrade — the recorder "
-              "captures snapshots (Data management page); live chain browsing "
-              "here lands in a later milestone",
     "crypto": "crypto has no options chain",
 }
 
@@ -245,10 +245,76 @@ def _answer(underlying: str, rows: list[dict[str, Any]], source: str, *,
     return out
 
 
+def futures_contracts(tasty: dict[str, str], underlying: str,
+                      d_from: dt.date, d_to: dt.date,
+                      strike_lo: float, strike_hi: float,
+                      right: str | None) -> list[dict[str, Any]]:
+    """One leg's futures-option contracts, live from TastyTrade.
+
+    The nested chain gives the tradeable STRUCTURE (every listed expiration
+    and strike, with the exchange's own contract symbols); /market-data/by-type
+    then prices only the ones inside the window. Filtering before quoting is
+    the whole trick — a full /ES chain is ~10k contracts and the quote endpoint
+    414s past ~200 symbols (measured), so quoting the window is both correct
+    and the only thing that fits.
+
+    Greeks come back empty because this feed publishes none; they are left
+    NULL rather than modelled here, exactly as the recorder stores them. The
+    Opt page solves its own when it needs them.
+    """
+    from .brokers.tastytrade import TastyTradeAdapter
+
+    ad = TastyTradeAdapter(tasty["client_secret"], tasty["refresh_token"])
+    chain = ad.nested_future_chain(underlying)
+
+    wanted: list[dict[str, Any]] = []
+    for oc in chain.get("chains", []):
+        for exp in oc.get("expirations", []):
+            e = (exp.get("expiration_date") or "")[:10]
+            if not e:
+                continue
+            try:
+                d = dt.date.fromisoformat(e)
+            except ValueError:
+                continue
+            if d < d_from or d > d_to:
+                continue
+            for st in exp.get("strikes", []):
+                k = st.get("strike")
+                if k is None or not (strike_lo <= k <= strike_hi):
+                    continue
+                for rt, sym in (("C", st.get("call")), ("P", st.get("put"))):
+                    if not sym or (right is not None and rt != right):
+                        continue
+                    wanted.append({"occ_symbol": sym, "expiration": e,
+                                   "strike": float(k), "right": rt})
+    if not wanted:
+        return []
+
+    quotes: dict[str, dict[str, Any]] = {}
+    for i in range(0, len(wanted), FUT_QUOTE_BATCH):
+        batch = [w["occ_symbol"] for w in wanted[i:i + FUT_QUOTE_BATCH]]
+        for q in ad.quotes({"future-option": batch}):
+            if q.get("symbol"):
+                quotes[q["symbol"]] = q
+
+    out = []
+    for w in wanted:
+        q = quotes.get(w["occ_symbol"], {})
+        out.append({**w,
+                    "bid": q.get("bid"), "ask": q.get("ask"),
+                    "last": q.get("last") if q.get("last") is not None
+                            else q.get("mark"),
+                    "iv": None, "delta": None, "gamma": None,
+                    "theta": None, "vega": None, "rho": None})
+    return out
+
+
 def fetch(creds: dict[str, str] | None, underlying: str,
           exp_from: str, exp_to: str, strike_lo: float, strike_hi: float,
           right: str | None, con: sqlite3.Connection | None = None,
-          ttl_minutes: float = 0.0, asset_class: str | None = None) -> dict[str, Any]:
+          ttl_minutes: float = 0.0, asset_class: str | None = None,
+          tasty: dict[str, str] | None = None) -> dict[str, Any]:
     """One leg's contracts, or an honest reason there are none.
 
     Raises ValueError on malformed parameters (the route turns that into 422);
@@ -285,6 +351,28 @@ def fetch(creds: dict[str, str] | None, underlying: str,
     # so the user retunes a window that was never going to match. An unknown
     # symbol passes through: the universe is not exhaustive, and refusing on
     # absence would block every ticker it has not heard of.
+    # FUTURES GO TO TASTYTRADE, which lists them. This used to sit in
+    # NO_CHAIN_CLASSES saying the panel could not browse them — while the
+    # recorder was already pulling the very same chains through the very same
+    # adapter, so the app refused data it was demonstrably able to fetch.
+    if (asset_class or "").lower() == "future":
+        if tasty is None:
+            return {"underlying": underlying, "available": False, "contracts": [],
+                    "total": 0, "truncated": False, "expirations": [],
+                    "source": "none",
+                    "reason": "futures option chains come through TastyTrade — "
+                              "add a TastyTrade account on the Accounts page"}
+        try:
+            rows = futures_contracts(tasty, underlying, d_from, d_to,
+                                     strike_lo, strike_hi, right)
+        except BrokerError as e:
+            return {"underlying": underlying, "available": False, "contracts": [],
+                    "total": 0, "truncated": False, "expirations": [],
+                    "source": "none", "reason": str(e)}
+        return _answer(underlying, rows, "tastytrade",
+                       reason=("window clamped to today — expired contracts "
+                               "are not shown" if clamped else None))
+
     if asset_class:
         refusal = NO_CHAIN_CLASSES.get(asset_class.lower())
         if refusal:
