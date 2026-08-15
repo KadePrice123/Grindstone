@@ -35,6 +35,10 @@ no spec.
 Providers do not all serve all kinds, and the ragged edges are not incidental —
 they are the whole reason OnclickMedia exists in this codebase at all.
 
+*(2026-08-14: a **TastyTrade** column joined this matrix in code — futures and
+index quotes: yes; futures option chains: yes, bounded snapshot, no greeks;
+bars/history: no. See `brokers/tastytrade.py` and `recorder.py`.)*
+
 | Kind | Alpaca | Yahoo | OnclickMedia | Local |
 |---|---|---|---|---|
 | Daily bars | yes (IEX from 2016) | yes | **no** | `bar_cache`, `rec_bars` |
@@ -329,7 +333,10 @@ unrelated click is never acceptable) — it stops the job and says so.
 
 **Requirement DS-18 — the legal domains differ.** Favourites accept
 `kind in ('symbol','page','web')` with no asset filter, but `recorder.validate_job`
-refuses index and future outright, refuses crypto for bars and chains, and
+refuses index outright, refuses futures bars always and futures chains only
+without a TastyTrade account *(amended 2026-08-14 — autorecord now has
+ANY-of-PLAN semantics: a futures root records its chain and skips bars)*,
+refuses crypto for bars and chains, and
 `jobs_create` 422s any symbol the universe has not synced. So the toggle must be
 able to report **"starred, but not recordable, and why"** rather than failing
 silently or refusing the favourite.

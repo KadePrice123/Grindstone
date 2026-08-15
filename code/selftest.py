@@ -559,6 +559,119 @@ def _tastytrade_rekey():
             assert needle.encode() not in raw, "plaintext credential in DB file"
 
 
+@check("futures seams: paths stay home, dead providers refuse, ANY-of records")
+def _futures_seams():
+    import os
+    import tempfile
+
+    sys.path.insert(0, str(CODE))
+    from fastapi.testclient import TestClient
+
+    from backend import autorecord, datajobs
+    from backend.app import State, create_app
+    from backend.marketdb import connect_market
+
+    # A rooted right side of a path join DISCARDS the left (d / '/ES.db' is
+    # the drive root). The store must contain everything it names.
+    old = os.environ.get("GRINDSTONE_DATA_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["GRINDSTONE_DATA_DIR"] = td
+        try:
+            import importlib
+
+            from backend import btdata
+            importlib.reload(btdata)
+            store = Path(td) / "backtest_data"
+            p = btdata.data_db_path("/ES")
+            assert p.parent == store.resolve() and p.name == "FUT-ES.db", p
+            assert btdata.data_db_path("SPY").name == "SPY.db"
+            for evil in ("..", "../x", "//", "a/b"):
+                try:
+                    btdata.data_db_path(evil)
+                    raise AssertionError(f"path escape accepted: {evil!r}")
+                except ValueError:
+                    pass
+        finally:
+            if old is None:
+                os.environ.pop("GRINDSTONE_DATA_DIR", None)
+            else:
+                os.environ["GRINDSTONE_DATA_DIR"] = old
+            importlib.reload(btdata)
+
+    # OnclickMedia never carried futures: the pull refuses by name, and the
+    # backfill chain pass skips '/' roots instead of cycling forever.
+    ok, msg = datajobs.DataJobs().start_pull(["/ES"], "2026-01-02", "2026-01-03")
+    assert not ok and "futures" in msg.lower(), msg
+    src = (CODE / "backend" / "recorder.py").read_text(encoding="utf-8")
+    chain_pass = src.split("---- CHAINS, from OnclickMedia", 1)[1]
+    assert 'startswith("/")' in chain_pass.split("def _backfill_chains")[0], \
+        "the chain backfill pass lost its futures guard"
+    # The futures collector must archive like the equity one — rec_chain rows
+    # die at retention, and the archive is the permanent copy.
+    collector = src.split("def _collect_future_chain", 1)[1].split("def ", 1)[0]
+    assert "opthist.append_day" in collector, \
+        "_collect_future_chain no longer archives to options history"
+
+    # ANY-of-PLAN everywhere: a futures root records the possible half.
+    with tempfile.TemporaryDirectory() as td:
+        con = connect_market(Path(td) / "m.db")
+        try:
+            r = autorecord.on_favorite_added(con, 1, "/ES", "future", True,
+                                             True, has_tasty=True)
+            assert r["recording"] and [j["kind"] for j in r["jobs"]] == ["chain"], r
+            iv = con.execute("SELECT interval_seconds FROM record_jobs"
+                             " WHERE symbol='/ES'").fetchone()[0]
+            assert iv >= 3600, \
+                f"futures chain interval {iv}s — a snapshot is ~89 requests"
+        finally:
+            con.close()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        state = State("boot-token-for-tests", db_path=Path(tmp) / "app.db",
+                      market_path=Path(tmp) / "market.db")
+        # main.py loads the universe at boot; without it the supplement roots
+        # are unknown and every asset_class below would be None.
+        mcon = state.market()
+        try:
+            state.universe.load(mcon)
+        finally:
+            mcon.close()
+        client = TestClient(create_app(state), base_url="http://127.0.0.1")
+        B = {"X-App-Token": "boot-token-for-tests"}
+        r = client.post("/api/auth/setup", headers=B,
+                        json={"username": "t", "password": "longenough1"})
+        A = {**B, "Authorization": f"Bearer {r.json()['token']}"}
+        r = client.post("/api/accounts", headers=A, json={
+            "broker": "tastytrade", "kind": "data", "nickname": "TT",
+            "credentials": {"client_secret": "fixture-not-a-credential-1",
+                            "refresh_token": "fixture-not-a-credential-2"}})
+        assert r.status_code == 200, r.text
+
+        # setup-recording on a futures root: the chain half is created, the
+        # bars half is reported skipped — never a rollback-and-422.
+        r = client.post("/api/backtests/data/setup-recording", headers=A,
+                        json={"underlying": "/ES"})
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert j["created"] == ["chain"], j
+        assert any("bars" == x["kind"] for x in j["skipped"]), j
+
+        # a futures root can be starred (backend rule mirrors favorites.ts)
+        r = client.post("/api/favorites", headers=A, json={
+            "kind": "symbol", "key": "/ES", "label": "/ES"})
+        assert r.status_code == 200, r.text
+
+        # an unknown root gets the honest refusal, not "sync the universe"
+        r = client.post("/api/datamgmt/jobs", headers=A, json={
+            "kind": "chain", "symbol": "/ZZ", "timeframe": "",
+            "interval_seconds": 3600, "retention_days": 365})
+        assert r.status_code == 422 and "built-in futures" in r.json()["detail"], r.text
+    ts_src = (CODE / "app" / "src" / "renderer" / "src" / "favorites.ts"
+              ).read_text(encoding="utf-8")
+    assert "^\\/?(?=.*[A-Z0-9])" in ts_src, \
+        "favorites.ts symbol rule no longer accepts futures roots"
+
+
 @check("sessions: idle expiry, revocation wipe, and no shared-buffer race")
 def _sessions():
     sys.path.insert(0, str(CODE))

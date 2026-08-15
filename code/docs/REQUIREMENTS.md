@@ -166,8 +166,10 @@ Decided in §6; summarized here so the requirements below have a spine:
 - **FR-DATA-6 Keyless fallback.** Users without any data API still get
   delayed quotes and daily history from Yahoo Finance, always labeled
   *delayed* and never used to price orders. Provider policy per instrument:
-  §6.9. Also covers **index** quotes (SPX/NDX/VIX/XSP), which no connected
-  broker feed carries.
+  §6.9. Also covers **index** quotes (SPX/NDX/VIX/XSP) as the last resort —
+  *(amended 2026-08-14)* an enrolled TastyTrade account now serves real index
+  quotes with bid/ask and is preferred; Yahoo answers only when no TastyTrade
+  account exists.
 
   *Implementation revised 2026-08-02, twice measured.* This was specified as
   yfinance (pinned, with curl_cffi). Both dependencies are now **removed**:

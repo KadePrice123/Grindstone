@@ -88,14 +88,15 @@ def quote_for(symbol: str, asset_class: str, creds: dict[str, str] | None,
     # An index prefers TastyTrade (a real quote with bid/ask); Alpaca has no
     # index feed at all, and the keyless Yahoo fallback (verified 2026-08-02:
     # SPX/NDX/VIX/XSP all answer) remains the last resort, labeled delayed.
+    tasty_err = None
     if asset_class == "index" and tasty is not None:
         try:
             q = TastyTradeAdapter(tasty["client_secret"],
                                   tasty["refresh_token"]).index_snapshot(symbol)
             return {**q, "available": q.get("price") is not None,
                     "source": "tastytrade"}
-        except BrokerError:
-            pass  # fall through to yahoo below
+        except BrokerError as e:
+            tasty_err = str(e)  # fall through to yahoo, but keep the reason
     if asset_class != "index" and creds is not None:
         try:
             q = AlpacaData(creds["key_id"], creds["secret_key"]).stock_snapshot(symbol)
@@ -114,6 +115,12 @@ def quote_for(symbol: str, asset_class: str, creds: dict[str, str] | None,
                         "source": "yahoo (delayed)"}
         except Exception:  # noqa: BLE001 — fallback of a fallback stays quiet
             pass
+    if asset_class == "index":
+        # "Add an Alpaca account" can never produce an index quote — Alpaca
+        # carries no index feed. Say the thing that would actually work.
+        return {"symbol": symbol, "available": False,
+                "reason": tasty_err or "index quotes come from a TastyTrade "
+                "account (Accounts page); the Yahoo fallback is unavailable"}
     return {"symbol": symbol, "available": False,
             "reason": alpaca_err or "no data source configured — add an Alpaca account or rely on Yahoo fallback"}
 

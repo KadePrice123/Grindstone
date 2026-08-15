@@ -11,7 +11,8 @@ most of it, and Alpaca's free tier will not sell it back).
 
 **"Starred, but not recordable, and why."** The legal domains genuinely
 differ: favourites accept any `kind in ('symbol','page','web')` with no asset
-filter, while `recorder.validate_job` refuses index and future outright,
+filter, while `recorder.validate_job` refuses index outright, refuses futures
+bars always and futures chains only without a TastyTrade account,
 refuses crypto for bars and chains, and an unsynced symbol is a 422. So there
 are symbols a user may legitimately star that cannot be recorded. The wrong
 answers are refusing the star (the user wanted a shortcut, and the shortcut
@@ -61,6 +62,12 @@ def recordability(symbol: str, asset_class: str | None, known: bool,
     refusing the possible half because the impossible half exists would leave
     futures unrecordable forever."""
     if not known:
+        if symbol.startswith("/"):
+            # "Sync the universe" is a false promise here: the sync carries
+            # no futures and the supplement roots are a built-in list.
+            return False, (f"{symbol} is not in the built-in futures list, so "
+                           f"recording cannot classify it — only the "
+                           f"supplement roots are recordable")
         return False, (f"{symbol} is not in the synced universe yet, so there "
                        f"is nothing to record against — sync the universe and "
                        f"it will start on its own")
@@ -112,12 +119,19 @@ def on_favorite_added(con: sqlite3.Connection, user_id: int, symbol: str,
                 created.append({"id": have["id"], "kind": spec["kind"],
                                 "action": "resumed"})
             continue
+        # A futures chain snapshot is ~89 sequential TastyTrade requests
+        # (measured on /ES) and futures trade ~23h/day — the equity default
+        # of 15 minutes would be ~8,500 requests/day per starred root. Hourly
+        # matches what the backtest setup wiring uses for chains.
+        interval = spec["interval_seconds"]
+        if spec["kind"] == "chain" and symbol.startswith("/"):
+            interval = max(interval, 3600)
         with con:
             cur = con.execute(
                 "INSERT INTO record_jobs (user_id, kind, symbol, timeframe,"
                 " interval_seconds, retention_days) VALUES (?,?,?,?,?,?)",
                 (user_id, spec["kind"], symbol, spec["timeframe"],
-                 spec["interval_seconds"], spec["retention_days"]))
+                 interval, spec["retention_days"]))
             created.append({"id": cur.lastrowid, "kind": spec["kind"],
                             "action": "started"})
     LOG.info("autorecord: %s -> %s", symbol,

@@ -33,10 +33,14 @@ SQLite storage. Everything lives inside the folder you clone it into.
   report.
 - **Data recording** — scheduled jobs capturing bars, option-chain snapshots and
   news, with retention pruning.
+- **TastyTrade (read-only)** — a personal OAuth grant serves futures (`/ES`) and
+  real index (SPX) quotes and records futures option-chain snapshots. Added
+  2026-08-14; order entry is not part of it.
 - **Favorites and gesture wheels** — a starred home grid and radial menus.
 
-**Not built yet:** order entry, the AI assistant, TastyTrade, Webull and
-Fidelity adapters, and session restore. Roadmap: `code/docs/REQUIREMENTS.md` §10.
+**Not built yet:** order entry, the AI assistant, TastyTrade streaming (DXLink),
+Webull and Fidelity adapters, and session restore. Roadmap:
+`code/docs/REQUIREMENTS.md` §10.
 
 ## Do I need a broker account?
 
@@ -47,6 +51,11 @@ news and backtesting.
 With a free **Alpaca paper** account you additionally get real-time IEX quotes,
 option chains, richer news, and your paper positions. Paper keys cannot touch
 real money, and the app is read-only regardless.
+
+With a **TastyTrade** personal OAuth grant (client secret + refresh token,
+generated on my.tastytrade.com) you additionally get futures quotes (`/ES`),
+real index quotes with bid/ask (SPX), and futures option-chain recording. A
+read-scope grant is enough — the app never places orders.
 
 ## Requirements
 
@@ -106,8 +115,9 @@ folder and you'll need to rerun the installer.
 1. **Create a profile.** Your password *is* the encryption key for the local
    vault. There is **no recovery** — this is deliberate, not an oversight. Lose
    it and the stored credentials are unrecoverable.
-2. **Optionally add a broker.** Accounts → add your Alpaca paper key → Test →
-   Save. Skip this and everything keyless still works.
+2. **Optionally add a broker.** Accounts → pick a brokerage (Alpaca key pair,
+   or a TastyTrade OAuth grant for futures and index data) → Test → Save. Skip
+   this and everything keyless still works.
 3. **Search something.** Type a ticker in the omnibox.
 
 ## Your data and your keys

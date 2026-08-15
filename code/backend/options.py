@@ -194,13 +194,17 @@ def filter_contracts(rows: list[dict[str, Any]], exp_from: dt.date, exp_to: dt.d
     return out
 
 
-# Asset classes that have no listed options chain at all. Answering these
-# before any network call is not an optimisation — it is the difference between
-# "we asked and there is nothing" and "there was never anything to ask about",
-# and the recorder already refuses them in exactly these words.
+# Asset classes this LIVE-CHAIN endpoint cannot serve. Answering before any
+# network call is not an optimisation — it is the difference between "we asked
+# and there is nothing" and "there was never anything to ask about". The
+# recorder's refusals intentionally diverge for futures now (2026-08-14): it
+# RECORDS futures chains through TastyTrade, while this leg-window endpoint
+# still reads only the Alpaca live path — hence the honest pointer below.
 NO_CHAIN_CLASSES = {
     "index": "an index has no listed options chain of its own — trade the ETF or the index options product",
-    "future": "futures options are not carried by this data feed",
+    "future": "futures option chains come through TastyTrade — the recorder "
+              "captures snapshots (Data management page); live chain browsing "
+              "here lands in a later milestone",
     "crypto": "crypto has no options chain",
 }
 

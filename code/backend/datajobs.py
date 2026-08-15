@@ -118,6 +118,13 @@ class DataJobs:
             syms = [s.strip().upper() for s in symbols if s.strip()]
             if not syms:
                 return False, "name at least one ticker"
+            fut = [s for s in syms if s.startswith("/")]
+            if fut:
+                # OnclickMedia never carried futures options; every day would
+                # come back empty and read as an unexplained 'skipped'.
+                return False, (f"{', '.join(fut)}: OnclickMedia carries equity "
+                               "options only — futures have no history there; "
+                               "record forward with a TastyTrade chain job")
             s, e, note = onclick.clamp(s0, e0)
             if s > e:
                 lo, hi = onclick.window()

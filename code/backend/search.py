@@ -23,7 +23,9 @@ RRF_K = 60
 # went nowhere at all.
 PAGES = [
     {"key": "home", "title": "Home", "words": ["home", "start", "grindstone"], "ready": True},
-    {"key": "accounts", "title": "Accounts", "words": ["accounts", "account", "brokers", "keys"],
+    {"key": "accounts", "title": "Accounts",
+     "words": ["accounts", "account", "brokers", "broker", "keys",
+               "alpaca", "tastytrade", "token"],
      "ready": True},
     {"key": "apis", "title": "APIs", "words": ["apis", "api", "credentials"], "ready": False},
     {"key": "ai", "title": "AI", "words": ["ai", "assistant", "chat"], "ready": False},
@@ -82,7 +84,8 @@ HELP_TOPICS = [
      "words": ["compare", "comparison", "isolate", "solo", "normalize", "multi",
                "overlay"]},
     {"section": "data", "title": "Data recording",
-     "words": ["record", "recording", "jobs", "retention", "storage", "chain"]},
+     "words": ["record", "recording", "jobs", "retention", "storage", "chain",
+               "futures", "tastytrade"]},
     {"section": "backtest-help", "title": "Backtesting",
      "words": ["backtest", "backtesting", "preset", "presets", "sweep", "verify",
                "calibrate", "calibration", "condor", "spread", "delta", "dte"]},

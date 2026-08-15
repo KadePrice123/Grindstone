@@ -149,7 +149,7 @@ Every open item, in one place. Details live in the dated sections below.
 | # | Item | Size |
 |---|---|---|
 | B1 | Multi-underlying UI — backend already takes `underlying`; only the card's buttons are hardwired to SPY | small |
-| B2 | TastyTrade / other recording adapters — anything writing `rec_chain`/`rec_bars` feeds backtests free | medium |
+| B2 | TastyTrade / other recording adapters — anything writing `rec_chain`/`rec_bars` feeds backtests free. *Futures chain recording via TastyTrade landed 2026-08-14; remaining: equity chains via TastyTrade, other providers, hosted feed* | medium |
 | B3 | Recorded-data quality guards — no holiday filter, no minimum-contract sanity check | small |
 | B4 | Form coverage — params, sizing ladders, calendars are JSON-only; `/api/backtests/vocab` is unused | medium |
 | B5 | Sweeps — engine vendored and tested, no API/UI | medium |
@@ -265,8 +265,9 @@ isotropic), and a dimension from a drawing to itself.
 | P4 | Order entry — every adapter is `order_entry: False`; the trading milestone flips it | large |
 | P5 | **e2e flake, cause unknown**: selecting the trend line mid-span failed 1 run in 6 (all seven `fanClick` offsets missed on an 8435-bar chart). A retry now absorbs it, but the underlying race is not understood — suspect the crosshair not having resolved when the click lands. Worth a real diagnosis before trusting a single green e2e run. | small |
 
-Roadmap-level work (AI layer, TastyTrade adapter, session restore, sidebar
-rail) is REQUIREMENTS.md §10, not this list.
+Roadmap-level work (AI layer, session restore, sidebar rail) is
+REQUIREMENTS.md §10, not this list. (The TastyTrade adapter left this
+category 2026-08-14 — read side shipped; order entry and DXLink remain §10.)
 
 Both installers were run end to end against genuinely clean machines, and the
 test found three defects that a re-run on a working machine never would.
@@ -504,8 +505,10 @@ after it is the honest remainder.
    status and passes it to both POSTs. Run-time resolution already follows
    the spec's `underlying`, so a TSLA spec + TSLA recordings works today —
    only the card's buttons don't know it.
-2. **TastyTrade (and other) recording adapters**: the recorder is
-   Alpaca-only. Any new provider that lands rows in `rec_chain`/`rec_bars`
+2. **TastyTrade (and other) recording adapters**: *(updated 2026-08-14 —
+   futures chain snapshots now record through TastyTrade; the recorder is
+   Alpaca-only for everything else.)* Any new provider that lands rows in
+   `rec_chain`/`rec_bars`
    feeds backtests with ZERO further work — the sync doesn't care who wrote
    the rows. Same story for the hosted-data-API idea: write into the same
    two tables (or straight into `opt`/`bars` with the mapping in

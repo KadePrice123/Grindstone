@@ -381,8 +381,8 @@ export function BacktestPage() {
                 No chain data yet. The app has created its own store and will fill it
                 from recorded chain snapshots: click <em>Set up recording</em> (needs a
                 data-capable account on accounts.gs), or point Settings at an existing
-                chain database. Recording feeds Alpaca today; more providers and a
-                hosted data feed can fill the same store later.
+                chain database. Equity chains record through Alpaca and futures chains
+                through TastyTrade; a hosted data feed can fill the same store later.
               </>
             )}
           </div>

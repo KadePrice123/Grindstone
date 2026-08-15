@@ -25,6 +25,16 @@ SUPPLEMENT = [
     {"symbol": "/NQ", "name": "E-mini Nasdaq-100 Futures", "exchange": "CME", "asset_class": "future", "tradable": False},
     {"symbol": "/CL", "name": "Crude Oil Futures", "exchange": "NYMEX", "asset_class": "future", "tradable": False},
     {"symbol": "/GC", "name": "Gold Futures", "exchange": "COMEX", "asset_class": "future", "tradable": False},
+    # Widened 2026-08-14 with the TastyTrade adapter: recording/quotes work
+    # for any root TastyTrade lists, but only supplement entries are visible
+    # to search and validation ("not in the built-in list" names these).
+    {"symbol": "/MES", "name": "Micro E-mini S&P 500 Futures", "exchange": "CME", "asset_class": "future", "tradable": False},
+    {"symbol": "/MNQ", "name": "Micro E-mini Nasdaq-100 Futures", "exchange": "CME", "asset_class": "future", "tradable": False},
+    {"symbol": "/RTY", "name": "E-mini Russell 2000 Futures", "exchange": "CME", "asset_class": "future", "tradable": False},
+    {"symbol": "/MCL", "name": "Micro Crude Oil Futures", "exchange": "NYMEX", "asset_class": "future", "tradable": False},
+    {"symbol": "/MGC", "name": "Micro Gold Futures", "exchange": "COMEX", "asset_class": "future", "tradable": False},
+    {"symbol": "/ZB", "name": "30-Year US Treasury Bond Futures", "exchange": "CBOT", "asset_class": "future", "tradable": False},
+    {"symbol": "/ZN", "name": "10-Year US Treasury Note Futures", "exchange": "CBOT", "asset_class": "future", "tradable": False},
 ]
 
 SYNC_STALE_HOURS = 24

@@ -105,7 +105,8 @@ def validate_job(kind: str, symbol: str, timeframe: str, interval_seconds: int,
     if kind == "bars" and timeframe not in TIMEFRAMES:
         return f"timeframe must be one of {', '.join(TIMEFRAMES)}"
     if interval_seconds < MIN_INTERVAL:
-        return f"interval must be at least {MIN_INTERVAL}s (Alpaca free tier is 200 req/min shared)"
+        return (f"interval must be at least {MIN_INTERVAL}s — provider rate "
+                "limits are shared with your live charts")
     if not 1 <= retention_days <= 3650:
         return "retention must be 1..3650 days"
     return None
@@ -356,6 +357,23 @@ class Recorder:
                  for w in wanted
                  for q in [quotes.get(w["symbol"], {})]],
             )
+        # AND THE ARCHIVE, same as the equity path and for the same reason:
+        # rec_chain rows die at the job's retention, so without append_day the
+        # recorder's futures history is silently TEMPORARY while equity
+        # history is permanent — prune() would eventually delete the only copy.
+        try:
+            opthist.append_day(job["symbol"], now.strftime("%Y-%m-%d"), [
+                {"right": w["right"], "strike": w["strike"],
+                 "expiration": w["expiration"],
+                 "bid": quotes.get(w["symbol"], {}).get("bid"),
+                 "ask": quotes.get(w["symbol"], {}).get("ask"),
+                 "last": quotes.get(w["symbol"], {}).get("last"),
+                 "iv": None, "delta": None,
+                 "volume": quotes.get(w["symbol"], {}).get("day_volume"),
+                 "open_interest": None}
+                for w in wanted])
+        except sqlite3.Error:
+            LOG.exception("archive append failed for %s", job["symbol"])
         return len(wanted)
 
     def _collect_news(self, client: AlpacaData, job: dict[str, Any]) -> int:
@@ -470,6 +488,12 @@ class Recorder:
                     cfg = by_user[uid] = {}
             if not (cfg.get("backfill_enabled", False)
                     and cfg.get("onclick_chain_backfill", False)):
+                continue
+            # OnclickMedia has NEVER carried futures options. Asking would
+            # cycle the same days through attempt/cooldown forever (an empty
+            # answer never earns 'absent' for a symbol that never answers) —
+            # paced futile requests and a polluted data_cover, permanently.
+            if str(job["symbol"]).startswith("/"):
                 continue
             done += self._backfill_chains(job["symbol"], now)
         return {"ran": done, "results": results}

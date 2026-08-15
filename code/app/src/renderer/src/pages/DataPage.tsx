@@ -505,7 +505,10 @@ export function DataPage() {
           A separate broker key for background recording, sealed to your Windows
           account so the recorder can run without you signing in. Use a{' '}
           <strong>paper</strong> key — it cannot move real money. Your trading
-          keys stay in the encrypted vault and are never used for this.
+          keys stay in the encrypted vault and are never used for this. The key is
+          Alpaca-shaped, so unattended mode covers <strong>equity</strong> jobs only:
+          futures chain jobs (TastyTrade) record while you are signed in and report
+          “locked” otherwise.
         </div>
 
         {sk?.enrolled ? (

@@ -63,7 +63,11 @@ def validate_new(kind: Any, key: Any, label: Any, icon: Any) -> dict[str, Any]:
 
     if kind == "symbol":
         sym = key.upper()
-        if not (1 <= len(sym) <= 8) or not sym.replace(".", "").isalnum():
+        # A leading '/' is a futures root (/ES) — quotable through TastyTrade
+        # since 2026-08-14, so starrable. The rule is mirrored in the
+        # renderer's favorites.ts; change both together.
+        core = sym[1:] if sym.startswith("/") else sym
+        if not (1 <= len(core) <= 8) or not core.replace(".", "").isalnum():
             _fail(f"bad symbol {key!r}")
         key = sym
     elif kind == "page":

@@ -147,9 +147,14 @@ const SECTIONS: Sec[] = [
         <ol>
           <li>First run: create a profile. <strong>Your password is the vault key</strong> that
             encrypts your broker credentials — there is no recovery by design.</li>
-          <li>Open <code>accounts.gs</code> (or search “accounts”) → add your Alpaca paper key →
-            <em> Test</em> → <em>Save</em>. Keys are encrypted per-user; the app never stores
-            them in plain text.</li>
+          <li>Open <code>accounts.gs</code> (or search “accounts”) → pick a brokerage →
+            <em> Test</em> → <em>Save</em>. <strong>Alpaca</strong> takes an API key pair
+            (equities, options, news). <strong>TastyTrade</strong> takes a personal OAuth
+            grant — client secret + refresh token from my.tastytrade.com — and is what
+            carries futures (/ES), futures options and real index quotes (SPX). If you
+            regenerate a TastyTrade grant later, use <em>Update token</em> on the saved
+            account instead of re-adding it. Credentials are encrypted per-user; the app
+            never stores them in plain text.</li>
           <li>No broker account? Quotes and daily charts still work through the keyless
             delayed fallback — everything is labeled with its source.</li>
         </ol>
@@ -373,6 +378,11 @@ const SECTIONS: Sec[] = [
             <strong> news</strong> for a symbol at a chosen interval, with per-job
             retention. When jobs share a table, the longest retention wins — one job can
             never delete another’s history.</li>
+          <li>Futures roots (<code>/ES</code>) record their <strong>option-chain
+            snapshots</strong> through a connected TastyTrade account: near expirations
+            plus monthlies/quarterlies, strikes near the mark. Greeks are blank on those
+            rows because the snapshot feed carries none. Futures <em>bars</em> have no
+            source yet and are refused with the reason.</li>
           <li>Recorded bars serve your charts when they cover the request — labeled
             <em> your recorded data</em>.</li>
           <li>The page shows per-job status and total store size.</li>
@@ -505,7 +515,9 @@ const SECTIONS: Sec[] = [
             looks first) and restart.</li>
           <li><strong>“no data source available”</strong>: add an Alpaca account, record
             bars from <code>data.gs</code>, or rely on the keyless daily fallback
-            (1D timeframe).</li>
+            (1D timeframe). For futures (<code>/ES</code>) or index (SPX) symbols the fix
+            is a <strong>TastyTrade</strong> account on <code>accounts.gs</code> — Alpaca
+            carries neither.</li>
           <li><strong>A chart tool feels stuck</strong>: press <kbd>Esc</kbd> to cancel any
             half-placed drawing, or click <em>Ptr</em> to disarm.</li>
           <li><strong>Locked out?</strong> There is no password recovery — the password IS

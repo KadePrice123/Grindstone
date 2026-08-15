@@ -53,9 +53,10 @@ export function favoriteIdentity(
   if (!gs) return null
   if (!isKnownPage(gs.page)) {
     const sym = gs.page.toUpperCase()
-    // The backend's symbol rule: 1-8 chars, alphanumeric plus dots. A
-    // hyphenated or overlong .gs name is not a ticker we can store.
-    if (!/^(?=.*[A-Z0-9])[A-Z0-9.]{1,8}$/.test(sym)) return null
+    // The backend's symbol rule: 1-8 chars, alphanumeric plus dots, with an
+    // optional leading '/' for futures roots (/ES) — quotable via TastyTrade
+    // since 2026-08-14. Mirrored in backend/favorites.py; change both.
+    if (!/^\/?(?=.*[A-Z0-9])[A-Z0-9.]{1,8}$/.test(sym)) return null
     return { kind: 'symbol', key: sym }
   }
   return { kind: 'page', key: text.toLowerCase() }

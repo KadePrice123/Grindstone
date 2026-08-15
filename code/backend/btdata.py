@@ -22,6 +22,7 @@ two tables through the same mapping — the engine never needs to know.
 from __future__ import annotations
 
 import datetime as dt
+import re
 import sqlite3
 from pathlib import Path
 
@@ -138,7 +139,22 @@ def _now_iso() -> str:
 def data_db_path(underlying: str) -> Path:
     d = data_dir() / "backtest_data"
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{underlying.upper()}.db"
+    # A futures root ('/ES') must not become the filename verbatim: pathlib
+    # DISCARDS the left side when the right side is rooted — d / '/ES.db'
+    # is C:\ES.db, the drive root (measured). Map the slash to a FUT- prefix
+    # so futures stores sit beside equity ones, distinguishable, and prove
+    # the result stayed inside the store before returning it.
+    name = underlying.upper().strip()
+    if name.startswith("/"):
+        name = "FUT-" + name[1:]
+    # Whitelist, not blacklist: a symbol is letters/digits with optional dots
+    # (BRK.B) — anything else ('..', separators, empty) is refused outright.
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9.\-]{0,11}", name) or ".." in name:
+        raise ValueError(f"bad underlying {underlying!r}")
+    p = (d / f"{name}.db").resolve()
+    if p.parent != d.resolve():
+        raise ValueError(f"bad underlying {underlying!r}")
+    return p
 
 
 def connect_data(path: Path | str) -> sqlite3.Connection:

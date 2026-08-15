@@ -1535,6 +1535,14 @@ def create_app(state: State) -> FastAPI:
         if err:
             raise HTTPException(422, err)
         if body.kind in ("bars", "chain") and entry is None and symbol:
+            if symbol.startswith("/"):
+                # "Sync the universe" can never fix a futures root — the sync
+                # carries no futures and the supplement is a built-in list.
+                roots = ", ".join(sorted(
+                    u["symbol"] for u in universe_mod.SUPPLEMENT
+                    if u["asset_class"] == "future"))
+                raise HTTPException(422, f"{symbol}: not in the built-in futures"
+                                         f" list (known roots: {roots})")
             raise HTTPException(422, f"{symbol}: unknown symbol — sync the universe first")
         con = state.market()
         try:
@@ -1822,6 +1830,7 @@ def create_app(state: State) -> FastAPI:
         ]
         con = state.market()
         created = []
+        skipped = []
         try:
             with con:
                 for kind, timeframe, interval, retention in wanted:
@@ -1837,7 +1846,12 @@ def create_app(state: State) -> FastAPI:
                         (entry or {}).get("asset_class") if entry else None,
                         has_tasty=state.has_tasty_account(s.user_id))
                     if err:
-                        raise HTTPException(422, err)
+                        # ANY-of, same rule as autorecord: a futures root
+                        # records its chain and can never record bars —
+                        # raising here rolled back the possible half with
+                        # the transaction and 422'd about the impossible one.
+                        skipped.append({"kind": kind, "reason": err})
+                        continue
                     con.execute(
                         "INSERT INTO record_jobs (user_id, kind, symbol, timeframe,"
                         " interval_seconds, retention_days) VALUES (?,?,?,?,?,?)",
@@ -1846,7 +1860,9 @@ def create_app(state: State) -> FastAPI:
                     created.append(kind)
         finally:
             con.close()
-        return {"ok": True, "created": created,
+        if not created and skipped:
+            raise HTTPException(422, "; ".join(x["reason"] for x in skipped))
+        return {"ok": True, "created": created, "skipped": skipped,
                 "note": "jobs record while you are signed in with a data-capable"
                         " account; runs sync the recorded snapshots automatically"}
 

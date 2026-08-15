@@ -5,7 +5,7 @@
       "selftest.py"
     ],
     "cwd": "code",
-    "expect": "SELFTEST OK 73/73",
+    "expect": "SELFTEST OK 74/74",
     "timeout": 300
   }
 }
